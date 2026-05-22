@@ -1,0 +1,84 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+__MACOSX/
+._*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Results and data (keep structure, ignore content)
+result/*/
+!result/.gitkeep
+result/*.md
+result/*.txt
+
+# Memory layer data
+memory/
+
+# Local development files
+memory/*.json
+BUG_FIX_LOG.md
+*说明.md
+*方案.md
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Streamlit
+.streamlit/
+
+# Model cache
+models/
+*.pkl
+*.pth
+*.h5
+
+# Temporary files
+tmp/
+temp/
+*.tmp

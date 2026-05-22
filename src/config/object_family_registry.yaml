@@ -1,0 +1,572 @@
+# Object Family Registry
+# 对象族注册表 - 26 个细粒度跨源技术术语的正式定义
+#
+# 每个对象族包含：
+# - family_id: 唯一标识符
+# - canonical_term: 对象族内部统一术语
+# - alias_terms: 别名列表
+# - zh_en_pairs: 中英文对照
+# - parent_term: 上位概念
+# - term_type: 术语类型 (model_name | task | capability | component | scenario | method)
+# - cross_source_pattern: 跨源模式
+# - patent_role: 专利侧角色
+# - priority: 优先级 (high | medium | low)
+# - description: 描述
+
+# ============================================================
+# 术语类型定义
+# ============================================================
+# model_name: 模型名称 (如 v-jepa, dreamer, gaia-1)
+# task: 任务类型 (如 navigation, manipulation, planning)
+# capability: 能力类型 (如 perception, reasoning, control)
+# component: 硬件/软件组件 (如 lidar, camera, imu)
+# scenario: 应用场景 (如 indoor, outdoor, driving)
+# method: 方法类型 (如 reinforcement learning, simulation)
+
+# ============================================================
+# 跨源模式定义
+# ============================================================
+# news_paper: 学术-媒体联动，研究热点正在扩散
+# paper_patent: 学术-工程联动，技术正在走向应用
+# news_patent: 媒体-工程联动，产业应用已有进展
+# full_cross_source: 全源验证，技术成熟度较高
+
+# ============================================================
+# 专利侧角色定义
+# ============================================================
+# engineering_signal: 工程信号补充，专利侧不需要与 news/paper 在主题表述上完全一致
+# application_trace: 应用痕迹补充，专利侧提供产业化证据
+# validation: 验证角色，专利侧提供技术成熟度证据
+# optional: 可选补充，专利侧不强制要求
+
+families:
+  # ============================================================
+  # news + paper 模式 (15个)
+  # ============================================================
+
+  - family_id: "of_001"
+    canonical_term: "generative world model"
+    alias_terms:
+      - "generative world models"
+      - "generative-world-model"
+      - "generative world modeling"
+      - "generative model"
+      - "generative models"
+      - "生成式模型"
+    zh_en_pairs:
+      zh: ["生成式世界模型", "生成式模型", "生成模型"]
+      en: ["generative world model", "generative model"]
+    parent_term: "world model"
+    term_type: "model_name"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "high"
+    description: "生成式世界模型，用于预测和生成环境状态的模型"
+
+  - family_id: "of_002"
+    canonical_term: "humanoid robot"
+    alias_terms:
+      - "humanoid robots"
+      - "humanoid-robot"
+    zh_en_pairs:
+      zh: ["人形机器人", "仿人机器人"]
+      en: ["humanoid robot"]
+    parent_term: "robot"
+    term_type: "component"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "high"
+    description: "人形机器人，具有人类形态的机器人"
+
+  - family_id: "of_003"
+    canonical_term: "v-jepa"
+    alias_terms:
+      - "v-jepa 2"
+      - "v-jepa 2.1"
+      - "v-jepa 2 1"
+      - "vjepa"
+      - "video jepa"
+    zh_en_pairs:
+      zh: []
+      en: ["v-jepa", "video jepa"]
+    parent_term: "video world model"
+    term_type: "model_name"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "high"
+    description: "V-JEPA 视频联合嵌入预测架构，Meta 发布的视频世界模型"
+
+  - family_id: "of_004"
+    canonical_term: "model-based reinforcement learning"
+    alias_terms:
+      - "model-based rl"
+      - "model based reinforcement learning"
+    zh_en_pairs:
+      zh: ["基于模型的强化学习"]
+      en: ["model-based reinforcement learning"]
+    parent_term: "reinforcement learning"
+    term_type: "method"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "high"
+    description: "基于模型的强化学习，使用环境模型进行规划和决策"
+
+  - family_id: "of_005"
+    canonical_term: "video world model"
+    alias_terms:
+      - "video world models"
+      - "video-world-model"
+    zh_en_pairs:
+      zh: ["视频世界模型"]
+      en: ["video world model"]
+    parent_term: "world model"
+    term_type: "model_name"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "medium"
+    description: "视频世界模型，用于视频理解和预测的世界模型"
+
+  # ============================================================
+  # simulation 拆分后的细粒度对象族 (of_006 拆分为 of_027, of_028, of_029)
+  # ============================================================
+
+  - family_id: "of_027"
+    canonical_term: "embodied simulation"
+    alias_terms:
+      - "embodied sim"
+      - "具身智能仿真"
+      - "embodied intelligence simulation"
+    zh_en_pairs:
+      zh: ["具身智能仿真", "具身仿真"]
+      en: ["embodied simulation"]
+    parent_term: "embodied intelligence"
+    term_type: "method"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "high"
+    description: "具身智能仿真，用于训练和测试具身智能系统的仿真环境"
+
+  - family_id: "of_028"
+    canonical_term: "robot training"
+    alias_terms:
+      - "机器人训练"
+      - "robot learning"
+      - "robotic training"
+    zh_en_pairs:
+      zh: ["机器人训练"]
+      en: ["robot training"]
+    parent_term: "machine learning"
+    term_type: "method"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "medium"
+    description: "机器人训练，使用仿真或真实数据训练机器人策略"
+
+  - family_id: "of_029"
+    canonical_term: "robot planning"
+    alias_terms:
+      - "机器人规划"
+      - "robotic planning"
+      - "robot path planning"
+    zh_en_pairs:
+      zh: ["机器人规划", "机器人路径规划"]
+      en: ["robot planning"]
+    parent_term: "planning"
+    term_type: "task"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "medium"
+    description: "机器人规划，包括路径规划、任务规划等"
+
+  # ============================================================
+  # 原 simulation (of_006) 已拆分，保留为兼容性别名
+  # ============================================================
+
+  - family_id: "of_006"
+    canonical_term: "simulation"
+    alias_terms:
+      - "simulations"
+      - "simulator"
+      - "simulators"
+    zh_en_pairs:
+      zh: ["仿真", "模拟"]
+      en: ["simulation"]
+    parent_term: null
+    term_type: "method"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "low"
+    description: "仿真方法（已拆分为 embodied_simulation, robot_training, robot_planning，此条目仅作兼容）"
+
+  - family_id: "of_007"
+    canonical_term: "jepa"
+    alias_terms:
+      - "joint embedding predictive architecture"
+      - "joint-embedding predictive architecture"
+    zh_en_pairs:
+      zh: []
+      en: ["jepa"]
+    parent_term: null
+    term_type: "method"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "medium"
+    description: "联合嵌入预测架构，Yann LeCun 提出的自监督学习框架"
+
+  - family_id: "of_008"
+    canonical_term: "interactive world model"
+    alias_terms:
+      - "interactive world models"
+    zh_en_pairs:
+      zh: ["交互式世界模型"]
+      en: ["interactive world model"]
+    parent_term: "generative world model"
+    term_type: "model_name"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "medium"
+    description: "交互式世界模型，支持与环境交互的世界模型"
+
+  - family_id: "of_009"
+    canonical_term: "dreamer"
+    alias_terms:
+      - "dreamer v1"
+      - "dreamer v2"
+      - "dreamer v3"
+      - "daydreamer"
+    zh_en_pairs:
+      zh: []
+      en: ["dreamer"]
+    parent_term: "model-based reinforcement learning"
+    term_type: "model_name"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "medium"
+    description: "Dreamer 系列模型，基于世界模型的强化学习算法"
+
+  - family_id: "of_010"
+    canonical_term: "lidar"
+    alias_terms:
+      - "lidars"
+      - "li-dar"
+      - "激光雷达"
+    zh_en_pairs:
+      zh: ["激光雷达"]
+      en: ["lidar"]
+    parent_term: "embodied intelligence hardware"
+    term_type: "component"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "medium"
+    description: "激光雷达，用于环境感知的传感器"
+
+  - family_id: "of_011"
+    canonical_term: "neuroevolution"
+    alias_terms: []
+    zh_en_pairs:
+      zh: ["神经进化"]
+      en: ["neuroevolution"]
+    parent_term: "machine learning"
+    term_type: "method"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "low"
+    description: "神经进化，使用进化算法优化神经网络"
+
+  - family_id: "of_012"
+    canonical_term: "curriculum learning"
+    alias_terms: []
+    zh_en_pairs:
+      zh: ["课程学习"]
+      en: ["curriculum learning"]
+    parent_term: "machine learning"
+    term_type: "method"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "low"
+    description: "课程学习，从简单到复杂逐步训练模型"
+
+  - family_id: "of_013"
+    canonical_term: "gaia-1"
+    alias_terms:
+      - "gaia 1"
+      - "gaia1"
+    zh_en_pairs:
+      zh: []
+      en: ["gaia-1"]
+    parent_term: "generative world model"
+    term_type: "model_name"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "medium"
+    description: "GAIA-1，自动驾驶领域的生成式世界模型"
+
+  # ============================================================
+  # paper + patent 模式 (6个)
+  # ============================================================
+
+  - family_id: "of_014"
+    canonical_term: "neural network"
+    alias_terms:
+      - "neural networks"
+      - "neural-network"
+      - "nn"
+    zh_en_pairs:
+      zh: ["神经网络"]
+      en: ["neural network"]
+    parent_term: "machine learning"
+    term_type: "method"
+    cross_source_pattern: "paper_patent"
+    patent_role: "engineering_signal"
+    priority: "medium"
+    description: "神经网络，机器学习的基础架构"
+
+  - family_id: "of_015"
+    canonical_term: "camera"
+    alias_terms:
+      - "摄像头"
+    zh_en_pairs:
+      zh: ["摄像头"]
+      en: ["camera"]
+    parent_term: "embodied intelligence hardware"
+    term_type: "component"
+    cross_source_pattern: "paper_patent"
+    patent_role: "engineering_signal"
+    priority: "medium"
+    description: "摄像头，用于视觉感知的传感器"
+
+  - family_id: "of_016"
+    canonical_term: "3d representation"
+    alias_terms:
+      - "3d表示"
+      - "三维表示"
+      - "3d representations"
+    zh_en_pairs:
+      zh: ["3d表示", "三维表示"]
+      en: ["3d representation"]
+    parent_term: null
+    term_type: "method"
+    cross_source_pattern: "paper_patent"
+    patent_role: "engineering_signal"
+    priority: "low"
+    description: "3D 表示，用于三维场景理解和重建"
+
+  - family_id: "of_017"
+    canonical_term: "imu"
+    alias_terms:
+      - "inertial measurement unit"
+    zh_en_pairs:
+      zh: ["惯性测量单元"]
+      en: ["imu"]
+    parent_term: "embodied intelligence hardware"
+    term_type: "component"
+    cross_source_pattern: "paper_patent"
+    patent_role: "engineering_signal"
+    priority: "low"
+    description: "IMU 惯性测量单元，用于运动感知的传感器"
+
+  - family_id: "of_018"
+    canonical_term: "ros"
+    alias_terms:
+      - "robot operating system"
+    zh_en_pairs:
+      zh: []
+      en: ["ros"]
+    parent_term: null
+    term_type: "component"
+    cross_source_pattern: "paper_patent"
+    patent_role: "engineering_signal"
+    priority: "low"
+    description: "ROS 机器人操作系统，机器人软件开发框架"
+
+  - family_id: "of_019"
+    canonical_term: "python"
+    alias_terms: []
+    zh_en_pairs:
+      zh: []
+      en: ["python"]
+    parent_term: null
+    term_type: "component"
+    cross_source_pattern: "paper_patent"
+    patent_role: "engineering_signal"
+    priority: "low"
+    description: "Python 编程语言，机器学习和机器人开发的主要语言"
+
+  # ============================================================
+  # news + patent 模式 (3个)
+  # ============================================================
+
+  - family_id: "of_020"
+    canonical_term: "large language model"
+    alias_terms:
+      - "大模型"
+      - "大型语言模型"
+      - "llm"
+      - "llms"
+      - "large language models"
+      - "language model"
+      - "language models"
+      - "语言模型"
+      - "foundation model"
+      - "foundation models"
+      - "基础模型"
+    zh_en_pairs:
+      zh: ["大模型", "大型语言模型", "语言模型", "基础模型"]
+      en: ["large language model", "language model", "foundation model"]
+    parent_term: "language model"
+    term_type: "model_name"
+    cross_source_pattern: "news_patent"
+    patent_role: "application_trace"
+    priority: "high"
+    description: "大语言模型，具有强大语言理解和生成能力的模型"
+
+  - family_id: "of_021"
+    canonical_term: "robotic arm"
+    alias_terms:
+      - "机械臂"
+      - "robot arm"
+    zh_en_pairs:
+      zh: ["机械臂"]
+      en: ["robotic arm"]
+    parent_term: "embodied intelligence hardware"
+    term_type: "component"
+    cross_source_pattern: "news_patent"
+    patent_role: "application_trace"
+    priority: "medium"
+    description: "机械臂，用于操作任务的机器人部件"
+
+  - family_id: "of_022"
+    canonical_term: "path planning"
+    alias_terms:
+      - "路径规划"
+    zh_en_pairs:
+      zh: ["路径规划"]
+      en: ["path planning"]
+    parent_term: "planning"
+    term_type: "task"
+    cross_source_pattern: "news_patent"
+    patent_role: "application_trace"
+    priority: "medium"
+    description: "路径规划，计算从起点到终点的最优路径"
+
+  # ============================================================
+  # full_cross_source 模式 (2个)
+  # ============================================================
+
+  - family_id: "of_023"
+    canonical_term: "slam"
+    alias_terms:
+      - "simultaneous localization and mapping"
+      - "slam system"
+      - "visual slam"
+      - "lidar slam"
+    zh_en_pairs:
+      zh: ["同步定位与建图"]
+      en: ["slam"]
+    parent_term: null
+    term_type: "method"
+    cross_source_pattern: "full_cross_source"
+    patent_role: "validation"
+    priority: "high"
+    description: "SLAM 同步定位与建图，机器人自主导航的核心技术"
+
+  - family_id: "of_024"
+    canonical_term: "lidar_full"
+    alias_terms:
+      - "激光雷达"
+      - "激光雷达导航"
+    zh_en_pairs:
+      zh: ["激光雷达"]
+      en: ["lidar"]
+    parent_term: "embodied intelligence hardware"
+    term_type: "component"
+    cross_source_pattern: "full_cross_source"
+    patent_role: "validation"
+    priority: "high"
+    description: "激光雷达（全源验证），在新闻、论文、专利中均有出现"
+
+  # ============================================================
+  # 补充对象族 (2个)
+  # ============================================================
+
+  - family_id: "of_025"
+    canonical_term: "world model"
+    alias_terms:
+      - "world models"
+      - "世界模型"
+    zh_en_pairs:
+      zh: ["世界模型"]
+      en: ["world model"]
+    parent_term: null
+    term_type: "model_name"
+    cross_source_pattern: "news_paper"
+    patent_role: "optional"
+    priority: "high"
+    description: "世界模型，用于预测环境状态的抽象模型"
+
+  - family_id: "of_026"
+    canonical_term: "embodied intelligence"
+    alias_terms:
+      - "具身智能"
+      - "embodied ai"
+    zh_en_pairs:
+      zh: ["具身智能"]
+      en: ["embodied intelligence"]
+    parent_term: null
+    term_type: "capability"
+    cross_source_pattern: "full_cross_source"
+    patent_role: "validation"
+    priority: "high"
+    description: "具身智能，具有物理身体的智能系统"
+
+# ============================================================
+# 跨源模式定义（参考）
+# ============================================================
+cross_source_patterns:
+  news_paper:
+    sources: ["news", "paper"]
+    description: "学术-媒体联动，通常表示研究热点正在扩散"
+    strength: "medium"
+    reason: "研究+传播"
+
+  paper_patent:
+    sources: ["paper", "patent"]
+    description: "学术-工程联动，通常表示技术正在走向应用"
+    strength: "medium"
+    reason: "研究+工程"
+
+  news_patent:
+    sources: ["news", "patent"]
+    description: "媒体-工程联动，通常表示产业应用已有进展"
+    strength: "medium"
+    reason: "传播+应用痕迹"
+
+  full_cross_source:
+    sources: ["news", "paper", "patent"]
+    description: "全源验证，技术成熟度较高"
+    strength: "strong"
+    reason: "强验证"
+
+# ============================================================
+# 专利侧角色定义（参考）
+# ============================================================
+patent_roles:
+  engineering_signal:
+    description: "工程信号补充"
+    expectation: "专利侧不需要与 news/paper 在主题表述上完全一致"
+    focus: "技术实现细节、工程参数、应用场景"
+
+  application_trace:
+    description: "应用痕迹补充"
+    expectation: "专利侧提供产业化证据"
+    focus: "产品化、商业化、落地场景"
+
+  validation:
+    description: "验证角色"
+    expectation: "专利侧提供技术成熟度证据"
+    focus: "技术路线稳定性、市场认可度"
+
+  optional:
+    description: "可选补充"
+    expectation: "专利侧不强制要求"
+    focus: "任何补充信息"

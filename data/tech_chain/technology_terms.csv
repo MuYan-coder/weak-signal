@@ -1,0 +1,126 @@
+term_id,term_name,official_name,short_name,alias,name_en,semantic_tag,source_text,ipc_code,ipc_name,belongs_to_tech_node_id,mapping_confidence,source_reference,maintainer,updated_at
+tt_001,具身智能,具身智能,具身智能,embodied intelligence|embodied ai,embodied intelligence,domain,object_family_registry of_026,,,tc_001,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_002,embodied intelligence,具身智能,embodied intelligence,具身智能|embodied ai,embodied intelligence,domain,object_family_registry of_026,,,tc_001,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_003,physical ai,具身智能,physical ai,物理AI|physical artificial intelligence,physical ai,domain,result signal embodied intelligence news and report,,,tc_001,0.85,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_004,人形机器人,人形机器人,人形机器人,humanoid robot|仿人机器人|双足机器人,humanoid robot,technology,object_family_registry of_002,,,tc_002,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_005,humanoid robot,人形机器人,humanoid robot,humanoid robots|humanoid-robot,humanoid robot,technology,object_family_registry of_002,,,tc_002,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_006,humanoid robots,人形机器人,humanoid robots,humanoid robot|humanoid-robot,humanoid robot,technology,object_family_registry of_002,,,tc_002,0.98,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_007,仿人机器人,人形机器人,仿人机器人,人形机器人|humanoid robot,humanoid robot,technology,manual alias from implementation plan,,,tc_002,0.90,v2.6实施方案.md,project_team,2026-04-28
+tt_008,双足机器人,人形机器人,双足机器人,bipedal robot|人形机器人,bipedal robot,technology,patent evidence in signals,,,tc_002,0.82,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_009,机器人平台,机器人平台,机器人平台,robot platform|robot system,robot platform,platform,result signal platform generalization,,,tc_003,0.90,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_010,robot platform,机器人平台,robot platform,robot system|autonomous robot,robot platform,platform,manual node derived from pipeline signals,,,tc_003,0.90,v2.6实施方案.md,project_team,2026-04-28
+tt_011,机械臂,机械臂,机械臂,robotic arm|robot arm,robotic arm,component,object_family_registry of_021,,,tc_004,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_012,robotic arm,机械臂,robotic arm,robot arm|manipulator,robotic arm,component,object_family_registry of_021,,,tc_004,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_013,manipulator,机械臂,manipulator,robotic arm|robot arm,manipulator,component,manual alias,,,tc_004,0.82,v2.6实施方案.md,project_team,2026-04-28
+tt_014,具身智能硬件,具身智能硬件,硬件,embodied intelligence hardware|robot hardware,embodied intelligence hardware,component,canonicalization hierarchy,,,tc_005,0.95,src/config/object_family_canonicalization.yaml,project_team,2026-04-28
+tt_015,robot hardware,具身智能硬件,robot hardware,embodied intelligence hardware,robot hardware,component,manual alias,,,tc_005,0.85,v2.6实施方案.md,project_team,2026-04-28
+tt_016,激光雷达,激光雷达,LiDAR,lidar|lidar_full, lidar,component,object_family_registry of_010 and of_024,,,tc_006,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_017,lidar,激光雷达,LiDAR,lidars|li-dar|激光雷达,lidar,component,object_family_registry of_010,,,tc_006,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_018,lidars,激光雷达,LiDAR,lidar,lidar,component,object_family_registry of_010,,,tc_006,0.96,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_019,li-dar,激光雷达,LiDAR,lidar,lidar,component,object_family_registry of_010,,,tc_006,0.95,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_020,摄像头,视觉摄像头,摄像头,camera|vision camera,camera,component,object_family_registry of_015,,,tc_007,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_021,camera,视觉摄像头,Camera,摄像头|vision camera,camera,component,object_family_registry of_015,,,tc_007,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_022,vision camera,视觉摄像头,vision camera,camera|摄像头,vision camera,component,manual alias,,,tc_007,0.85,v2.6实施方案.md,project_team,2026-04-28
+tt_023,imu,惯性测量单元,IMU,inertial measurement unit|惯性测量单元,imu,component,object_family_registry of_017,,,tc_008,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_024,inertial measurement unit,惯性测量单元,IMU,imu|惯性测量单元,inertial measurement unit,component,object_family_registry of_017,,,tc_008,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_025,惯性测量单元,惯性测量单元,IMU,imu|inertial measurement unit,imu,component,object_family_registry of_017,,,tc_008,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_026,深度摄像头,深度视觉感知,深度摄像头,depth camera|rgb-d camera,depth camera,component,manual sensor term,,,tc_009,0.85,v2.6实施方案.md,project_team,2026-04-28
+tt_027,rgb-d camera,深度视觉感知,RGB-D,depth camera|深度摄像头,rgb-d camera,component,manual sensor term,,,tc_009,0.86,v2.6实施方案.md,project_team,2026-04-28
+tt_028,depth sensor,深度视觉感知,depth sensor,depth camera|深度传感器,depth sensor,component,manual sensor term,,,tc_009,0.84,v2.6实施方案.md,project_team,2026-04-28
+tt_029,世界模型,世界模型,世界模型,world model|world models,world model,model,object_family_registry of_025,,,tc_010,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_030,world model,世界模型,world model,world models|世界模型,world model,model,object_family_registry of_025,,,tc_010,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_031,world models,世界模型,world models,world model|世界模型,world model,model,object_family_registry of_025,,,tc_010,0.98,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_032,生成式世界模型,生成式世界模型,生成式世界模型,generative world model|generative model,generative world model,model,object_family_registry of_001,,,tc_011,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_033,generative world model,生成式世界模型,generative world model,generative world models|generative model,generative world model,model,object_family_registry of_001,,,tc_011,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_034,generative world models,生成式世界模型,generative world models,generative world model|generative models,generative world model,model,object_family_registry of_001,,,tc_011,0.98,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_035,generative model,生成式模型,generative model,generative models|生成式模型,generative model,model,object_family_registry of_001,,,tc_011,0.88,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_036,生成式模型,生成式模型,生成式模型,generative model|生成模型,generative model,model,object_family_registry of_001,,,tc_011,0.88,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_037,视频世界模型,视频世界模型,视频世界模型,video world model|video world models,video world model,model,object_family_registry of_005,,,tc_012,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_038,video world model,视频世界模型,video world model,video world models|video-world-model,video world model,model,object_family_registry of_005,,,tc_012,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_039,video world models,视频世界模型,video world models,video world model|video-world-model,video world model,model,object_family_registry of_005,,,tc_012,0.98,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_040,交互式世界模型,交互式世界模型,交互式世界模型,interactive world model,interactive world model,model,object_family_registry of_008,,,tc_013,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_041,interactive world model,交互式世界模型,interactive world model,interactive world models|交互式世界模型,interactive world model,model,object_family_registry of_008,,,tc_013,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_042,v-jepa,V-JEPA,V-JEPA,v-jepa 2|vjepa|video jepa,v-jepa,model,object_family_registry of_003,,,tc_014,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_043,v-jepa 2,V-JEPA,V-JEPA2,v-jepa|v-jepa 2.1|v-jepa 2 1,v-jepa,model,object_family_registry of_003,,,tc_014,0.98,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_044,vjepa,V-JEPA,VJEPA,v-jepa|video jepa,v-jepa,model,object_family_registry of_003,,,tc_014,0.96,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_045,video jepa,V-JEPA,video jepa,v-jepa|vjepa,v-jepa,model,object_family_registry of_003,,,tc_014,0.96,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_046,gaia-1,GAIA-1,GAIA-1,gaia 1|gaia1,gaia-1,model,object_family_registry of_013,,,tc_015,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_047,gaia1,GAIA-1,GAIA1,gaia-1|gaia 1,gaia-1,model,object_family_registry of_013,,,tc_015,0.95,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_048,jepa,联合嵌入预测架构,JEPA,joint embedding predictive architecture,jepa,method,object_family_registry of_007,,,tc_016,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_049,joint embedding predictive architecture,联合嵌入预测架构,JEPA,jepa|joint-embedding predictive architecture,jepa,method,object_family_registry of_007,,,tc_016,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_050,基于模型的强化学习,基于模型的强化学习,MBRL,model-based reinforcement learning|model-based rl,model-based reinforcement learning,method,object_family_registry of_004,,,tc_017,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_051,model-based reinforcement learning,基于模型的强化学习,MBRL,model-based rl|model based reinforcement learning,model-based reinforcement learning,method,object_family_registry of_004,,,tc_017,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_052,model-based rl,基于模型的强化学习,MBRL,model-based reinforcement learning,model-based reinforcement learning,method,object_family_registry of_004,,,tc_017,0.96,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_053,dreamer,Dreamer,Dreamer,dreamer v1|dreamer v2|dreamer v3|daydreamer,dreamer,model,object_family_registry of_009,,,tc_018,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_054,daydreamer,Dreamer,DayDreamer,dreamer,dreamer,model,object_family_registry of_009,,,tc_018,0.90,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_055,强化学习,强化学习,RL,reinforcement learning|rl|deep reinforcement learning,reinforcement learning,method,result signal and object family parent,,,tc_019,1.00,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_056,reinforcement learning,强化学习,RL,rl|deep reinforcement learning|强化学习,reinforcement learning,method,result signal and object family parent,,,tc_019,1.00,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_057,deep reinforcement learning,深度强化学习,DRL,reinforcement learning|强化学习,deep reinforcement learning,method,result evidence title,,,tc_019,0.92,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_058,机器人训练,机器人训练,机器人训练,robot training|robot learning,robot training,method,object_family_registry of_028,,,tc_020,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_059,robot training,机器人训练,robot training,robot learning|robotic training|机器人训练,robot training,method,object_family_registry of_028,,,tc_020,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_060,robot learning,机器人训练,robot learning,robot training|robotic training,robot training,method,object_family_registry of_028,,,tc_020,0.92,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_061,模仿学习,机器人训练,模仿学习,imitation learning|learning from demonstration,imitation learning,method,result signal context,,,tc_020,0.82,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_062,具身智能仿真,具身智能仿真,具身仿真,embodied simulation|embodied sim,embodied simulation,method,object_family_registry of_027,,,tc_021,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_063,embodied simulation,具身智能仿真,embodied simulation,embodied sim|具身智能仿真,embodied simulation,method,object_family_registry of_027,,,tc_021,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_064,simulation,具身智能仿真,simulation,simulations|simulator,simulation,method,object_family_registry of_006 compatibility,,,tc_021,0.72,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_065,simulator,具身智能仿真,simulator,simulation|simulators,simulation,method,object_family_registry of_006 compatibility,,,tc_021,0.70,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_066,机器人规划,机器人规划,机器人规划,robot planning|robotic planning|robot path planning,robot planning,task,object_family_registry of_029,,,tc_022,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_067,robot planning,机器人规划,robot planning,robotic planning|robot path planning|机器人规划,robot planning,task,object_family_registry of_029,,,tc_022,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_068,robot path planning,机器人规划,robot path planning,robot planning|机器人路径规划,robot planning,task,object_family_registry of_029,,,tc_022,0.88,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_069,路径规划,路径规划,路径规划,path planning|机器人路径规划,path planning,task,object_family_registry of_022,,,tc_023,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_070,path planning,路径规划,path planning,路径规划|robot path planning,path planning,task,object_family_registry of_022,,,tc_023,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_071,机器人控制,机器人控制,控制,robot control|motion control|运动控制,robot control,capability,result signal robot control,,,tc_024,1.00,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_072,robot control,机器人控制,robot control,motion control|control,robot control,capability,result signal robot control,,,tc_024,1.00,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_073,motion control,机器人控制,motion control,robot control|运动控制,motion control,capability,result signal control evidence,,,tc_024,0.88,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_074,control,机器人控制,control,robot control|运动控制,control,capability,mechanism_core in signals,,,tc_024,0.70,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_075,机器人感知,机器人感知,感知,robot perception|perception|感知机器人,robot perception,capability,result signal perception candidates,,,tc_025,1.00,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_076,robot perception,机器人感知,robot perception,perception|机器人感知,robot perception,capability,result signal perception candidates,,,tc_025,1.00,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_077,perception,机器人感知,perception,robot perception|感知,perception,capability,mechanism and object token in signals,,,tc_025,0.72,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_078,多模态感知,多模态感知融合,多模态感知,multimodal perception|multimodal fusion, multimodal perception,capability,result signal multimodal perception,,,tc_026,1.00,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_079,multimodal perception,多模态感知融合,multimodal perception,multimodal sensing|multimodal fusion,multimodal perception,capability,result signal multimodal perception,,,tc_026,1.00,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_080,multimodal fusion,多模态感知融合,multimodal fusion,multimodal perception|sensor fusion,multimodal fusion,capability,result signal sensor fusion context,,,tc_026,0.90,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_081,多模态数据实时融合,多模态感知融合,多模态融合,realtime multimodal fusion|multimodal sensor fusion,multimodal fusion,capability,result evidence Jetson Thor,,,tc_026,0.88,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_082,slam,同步定位与建图,SLAM,simultaneous localization and mapping|slam system,slam,method,object_family_registry of_023,,,tc_027,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_083,同步定位与建图,同步定位与建图,SLAM,slam|simultaneous localization and mapping,slam,method,object_family_registry of_023,,,tc_027,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_084,simultaneous localization and mapping,同步定位与建图,SLAM,slam|slam system,slam,method,object_family_registry of_023,,,tc_027,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_085,visual slam,视觉SLAM,Visual SLAM,slam|视觉同步定位与建图,visual slam,method,object_family_registry of_023 alias,,,tc_028,0.95,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_086,视觉SLAM,视觉SLAM,Visual SLAM,visual slam|slam,visual slam,method,manual chinese alias,,,tc_028,0.95,v2.6实施方案.md,project_team,2026-04-28
+tt_087,lidar slam,激光SLAM,LiDAR SLAM,slam|激光雷达导航,lidar slam,method,object_family_registry of_023 alias,,,tc_029,0.95,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_088,激光SLAM,激光SLAM,LiDAR SLAM,lidar slam|激光雷达导航,lidar slam,method,manual chinese alias,,,tc_029,0.95,v2.6实施方案.md,project_team,2026-04-28
+tt_089,3d representation,三维表示,3D表示,3d representations|三维表示|3d表示,3d representation,method,object_family_registry of_016,,,tc_030,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_090,3d表示,三维表示,3D表示,3d representation|三维表示,3d representation,method,object_family_registry of_016,,,tc_030,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_091,三维表示,三维表示,三维表示,3d representation|3d表示,3d representation,method,object_family_registry of_016,,,tc_030,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_092,3d reconstruction,三维表示,3D重建,三维重建|3d representation,3d reconstruction,method,result evidence 3d world model planning,,,tc_030,0.82,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_093,神经网络,神经网络,NN,neural network|nn,neural network,method,object_family_registry of_014,,,tc_031,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_094,neural network,神经网络,NN,neural networks|neural-network|nn,neural network,method,object_family_registry of_014,,,tc_031,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_095,nn,神经网络,NN,neural network,neural network,method,object_family_registry of_014,,,tc_031,0.95,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_096,大模型,大语言模型,大模型,large language model|llm|基础模型,large language model,model,object_family_registry of_020,,,tc_032,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_097,大型语言模型,大语言模型,大型语言模型,large language model|llm,large language model,model,object_family_registry of_020,,,tc_032,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_098,large language model,大语言模型,LLM,large language models|llm|foundation model,large language model,model,object_family_registry of_020,,,tc_032,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_099,llm,大语言模型,LLM,llms|large language model,large language model,model,object_family_registry of_020,,,tc_032,0.98,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_100,foundation model,基础模型,foundation model,foundation models|基础模型|large language model,foundation model,model,object_family_registry of_020,,,tc_032,0.88,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_101,ros,机器人操作系统,ROS,robot operating system,ros,component,object_family_registry of_018,,,tc_033,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_102,robot operating system,机器人操作系统,ROS,ros,ros,component,object_family_registry of_018,,,tc_033,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_103,python,Python,Python,Python,python,tool,object_family_registry of_019,,,tc_034,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_104,课程学习,课程学习,课程学习,curriculum learning,curriculum learning,method,object_family_registry of_012,,,tc_035,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_105,curriculum learning,课程学习,curriculum learning,课程学习,curriculum learning,method,object_family_registry of_012,,,tc_035,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_106,神经进化,神经进化,神经进化,neuroevolution,neuroevolution,method,object_family_registry of_011,,,tc_036,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_107,neuroevolution,神经进化,neuroevolution,神经进化,neuroevolution,method,object_family_registry of_011,,,tc_036,1.00,src/config/object_family_registry.yaml,project_team,2026-04-28
+tt_108,机器人导航,机器人导航,导航,robot navigation|autonomous navigation,robot navigation,task,canonicalization hierarchy and result signals,,,tc_037,1.00,src/config/object_family_canonicalization.yaml|result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_109,robot navigation,机器人导航,robot navigation,navigation|autonomous navigation,robot navigation,task,canonicalization hierarchy and result signals,,,tc_037,1.00,src/config/object_family_canonicalization.yaml|result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_110,navigation,机器人导航,navigation,robot navigation|自主导航,navigation,task,task token in candidates,,,tc_037,0.78,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_111,机器人操作,机器人操作,操作,robot manipulation|manipulation|抓取,robot manipulation,task,canonicalization hierarchy and result signals,,,tc_038,1.00,src/config/object_family_canonicalization.yaml|result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_112,robot manipulation,机器人操作,robot manipulation,manipulation|grasping,robot manipulation,task,canonicalization hierarchy and result signals,,,tc_038,1.00,src/config/object_family_canonicalization.yaml|result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_113,grasping,机器人操作,抓取,grasp|robot manipulation,grasping,task,task token in candidates,,,tc_038,0.82,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_114,机器人遥操作,沉浸式机器人遥操作,遥操作,teleoperation|immersive teleoperation,teleoperation,task,result signal visual feedback teleoperation,,,tc_039,1.00,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_115,teleoperation,沉浸式机器人遥操作,teleoperation,robot teleoperation|immersive teleoperation,teleoperation,task,result signal visual feedback teleoperation,,,tc_039,1.00,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_116,visual feedback,沉浸式机器人遥操作,visual feedback,视觉反馈|teleoperation,visual feedback,capability,result evidence title,,,tc_039,0.85,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_117,物理AI数据飞轮,物理AI数据飞轮,数据飞轮,physical ai data flywheel|data flywheel,physical ai data flywheel,data_loop,result signal physical ai report,,,tc_040,1.00,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_118,data flywheel,物理AI数据飞轮,data flywheel,physical ai data flywheel|数据飞轮,data flywheel,data_loop,result signal physical ai report,,,tc_040,0.90,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_119,synthetic data,物理AI数据飞轮,synthetic data,数据合成|synthetic data for physical ai,synthetic data,data_loop,result signal physical ai cooperation,,,tc_040,0.82,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_120,机器人AI计算平台,机器人AI计算平台,AI计算平台,robot ai computing platform|edge ai platform,robot ai computing platform,platform,result evidence Jetson Thor,,,tc_041,1.00,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_121,jetson thor,机器人AI计算平台,Jetson Thor,nvidia jetson thor|robot ai computing platform,jetson thor,product_platform,result evidence NVIDIA Jetson Thor,,,tc_041,0.92,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_122,edge ai platform,机器人AI计算平台,边缘AI平台,edge ai|robot ai computing platform,edge ai platform,platform,result evidence edge inference,,,tc_041,0.82,result/20260427_094827/signals.csv,project_team,2026-04-28
+tt_123,多模态具身交互,多模态具身交互,具身交互,multimodal embodied interaction|human robot interaction,multimodal embodied interaction,capability,v2.6 implementation plan extension,,,tc_042,1.00,v2.6实施方案.md,project_team,2026-04-28
+tt_124,human robot interaction,多模态具身交互,HRI,人机交互|具身交互,human robot interaction,capability,v2.6 implementation plan extension,,,tc_042,0.86,v2.6实施方案.md,project_team,2026-04-28
+tt_125,grounding,多模态具身交互,grounding,视觉grounding|机器人grounding,grounding,capability,result candidate mechanism grounding,,,tc_042,0.74,result/20260427_094827/signals.csv,project_team,2026-04-28

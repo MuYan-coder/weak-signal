@@ -1,0 +1,460 @@
+# 对象族归一化配置
+# 用于处理 26 个细粒度跨源技术术语的归一化
+
+# ============================================================
+# 1. 英文变体归一（单复数、词形变体）
+# ============================================================
+english_variants:
+  # 生成式世界模型
+  "generative world model":
+    canonical: "generative world model"
+    variants:
+      - "generative world models"
+      - "generative-world-model"
+      - "generative world modeling"
+      - "generative model"
+      - "generative models"
+
+  # V-JEPA 系列
+  "v-jepa":
+    canonical: "v-jepa"
+    variants:
+      - "v-jepa 2"
+      - "v-jepa 2.1"
+      - "v-jepa 2 1"
+      - "vjepa"
+      - "video jepa"
+
+  # JEPA
+  "jepa":
+    canonical: "jepa"
+    variants:
+      - "joint embedding predictive architecture"
+      - "joint-embedding predictive architecture"
+
+  # 视频世界模型
+  "video world model":
+    canonical: "video world model"
+    variants:
+      - "video world models"
+      - "video-world-model"
+
+  # 交互式世界模型
+  "interactive world model":
+    canonical: "interactive world model"
+    variants:
+      - "interactive world models"
+
+  # 人形机器人
+  "humanoid robot":
+    canonical: "humanoid robot"
+    variants:
+      - "humanoid robots"
+      - "humanoid-robot"
+
+  # 神经网络
+  "neural network":
+    canonical: "neural network"
+    variants:
+      - "neural networks"
+      - "neural-network"
+      - "nn"
+
+  # 激光雷达
+  "lidar":
+    canonical: "lidar"
+    variants:
+      - "lidars"
+      - "li-dar"
+
+  # SLAM
+  "slam":
+    canonical: "slam"
+    variants:
+      - "simultaneous localization and mapping"
+      - "slam system"
+
+  # 模拟
+  "simulation":
+    canonical: "simulation"
+    variants:
+      - "simulations"
+      - "simulator"
+      - "simulators"
+
+  # 具身智能仿真（simulation 拆分）
+  "embodied simulation":
+    canonical: "embodied simulation"
+    variants:
+      - "embodied sim"
+      - "embodied intelligence simulation"
+      - "具身智能仿真"
+
+  # 机器人训练（simulation 拆分）
+  "robot training":
+    canonical: "robot training"
+    variants:
+      - "机器人训练"
+      - "robot learning"
+      - "robotic training"
+
+  # 机器人规划（simulation 拆分）
+  "robot planning":
+    canonical: "robot planning"
+    variants:
+      - "机器人规划"
+      - "robotic planning"
+      - "robot path planning"
+
+# ============================================================
+# 2. 中英文对齐
+# ============================================================
+chinese_english_alignment:
+  # 激光雷达
+  "lidar":
+    chinese_terms:
+      - "激光雷达"
+    canonical: "lidar"  # 优先使用英文作为 canonical
+
+  # 大模型
+  "large language model":
+    chinese_terms:
+      - "大模型"
+      - "大型语言模型"
+      - "语言模型"
+      - "基础模型"
+    canonical: "large language model"
+
+  # 语言模型变体
+  "language model":
+    canonical: "large language model"
+    variants:
+      - "language models"
+      - "llm"
+      - "llms"
+      - "foundation model"
+      - "foundation models"
+
+  # 机械臂
+  "robotic arm":
+    chinese_terms:
+      - "机械臂"
+    canonical: "robotic arm"
+
+  # 路径规划
+  "path planning":
+    chinese_terms:
+      - "路径规划"
+    canonical: "path planning"
+
+  # 摄像头
+  "camera":
+    chinese_terms:
+      - "摄像头"
+    canonical: "camera"
+
+  # 3D表示
+  "3d representation":
+    chinese_terms:
+      - "3d表示"
+      - "三维表示"
+    canonical: "3d representation"
+
+  # 具身智能仿真（simulation 拆分）
+  "embodied simulation":
+    chinese_terms:
+      - "具身智能仿真"
+      - "具身仿真"
+    canonical: "embodied simulation"
+
+  # 机器人训练（simulation 拆分）
+  "robot training":
+    chinese_terms:
+      - "机器人训练"
+    canonical: "robot training"
+
+  # 机器人规划（simulation 拆分）
+  "robot planning":
+    chinese_terms:
+      - "机器人规划"
+      - "机器人路径规划"
+    canonical: "robot planning"
+
+# ============================================================
+# 3. 上下位关系（层级结构）
+# ============================================================
+hierarchy:
+  # 模型基础强化学习
+  "model-based reinforcement learning":
+    type: "parent"
+    children:
+      - "dreamer"
+      - "dreamer v1"
+      - "dreamer v2"
+      - "dreamer v3"
+      - "daydreamer"
+
+  # 视频世界模型
+  "video world model":
+    type: "parent"
+    children:
+      - "v-jepa"
+      - "v-jepa 2"
+      - "v-jepa 2.1"
+      - "gaia-1"
+
+  # 生成式世界模型
+  "generative world model":
+    type: "parent"
+    children:
+      - "interactive world model"
+      - "gaia-1"
+
+  # 具身智能硬件
+  "embodied intelligence hardware":
+    type: "parent"
+    children:
+      - "lidar"
+      - "激光雷达"
+      - "camera"
+      - "摄像头"
+      - "imu"
+      - "机械臂"
+      - "humanoid robots"
+
+  # SLAM
+  "slam":
+    type: "parent"
+    children:
+      - "visual slam"
+      - "lidar slam"
+
+  # 具身智能（新增）
+  "embodied intelligence":
+    type: "parent"
+    children:
+      - "embodied simulation"
+      - "具身智能仿真"
+      - "embodied ai"
+
+  # 机器人训练（新增）
+  "robot training":
+    type: "parent"
+    children:
+      - "video robot training"
+      - "机器人训练"
+      - "robot learning"
+
+  # 机器人规划（新增）
+  "robot planning":
+    type: "parent"
+    children:
+      - "robot path planning"
+      - "机器人规划"
+      - "机器人路径规划"
+
+# ============================================================
+# 4. 跨源模式定义
+# ============================================================
+cross_source_patterns:
+  # 模式 A: news + paper (学术-媒体联动)
+  news_paper:
+    sources: ["news", "paper"]
+    description: "学术-媒体联动，通常表示研究热点正在扩散"
+    weight: 1.0
+    patent_role: "optional"  # 专利可选
+
+  # 模式 B: paper + patent (学术-工程联动)
+  paper_patent:
+    sources: ["paper", "patent"]
+    description: "学术-工程联动，通常表示技术正在走向应用"
+    weight: 1.2
+    patent_role: "engineering_signal"  # 专利承担工程信号
+
+  # 模式 C: news + patent (媒体-工程联动)
+  news_patent:
+    sources: ["news", "patent"]
+    description: "媒体-工程联动，通常表示产业应用已有进展"
+    weight: 1.1
+    patent_role: "application_trace"  # 专利承担应用痕迹
+
+  # 模式 D: news + paper + patent (全源验证)
+  full_cross_source:
+    sources: ["news", "paper", "patent"]
+    description: "全源验证，技术成熟度较高"
+    weight: 1.5
+    patent_role: "validation"  # 专利承担验证角色
+
+# ============================================================
+# 5. 专利侧角色定义
+# ============================================================
+patent_roles:
+  engineering_signal:
+    description: "工程信号补充"
+    expectation: "专利侧不需要与 news/paper 在主题表述上完全一致"
+    focus: "技术实现细节、工程参数、应用场景"
+
+  application_trace:
+    description: "应用痕迹补充"
+    expectation: "专利侧提供产业化证据"
+    focus: "产品化、商业化、落地场景"
+
+  validation:
+    description: "验证角色"
+    expectation: "专利侧提供技术成熟度证据"
+    focus: "技术路线稳定性、市场认可度"
+
+  optional:
+    description: "可选补充"
+    expectation: "专利侧不强制要求"
+    focus: "任何补充信息"
+
+# ============================================================
+# 6. 高价值对象族列表（26个细粒度跨源术语）
+# ============================================================
+high_value_families:
+  # news + paper (15个)
+  - term: "generative world model"
+    cross_source_pattern: "news_paper"
+    priority: "high"
+
+  - term: "humanoid robots"
+    cross_source_pattern: "news_paper"
+    priority: "high"
+
+  - term: "v-jepa 2"
+    cross_source_pattern: "news_paper"
+    priority: "high"
+    parent: "video world model"
+
+  - term: "model-based reinforcement learning"
+    cross_source_pattern: "news_paper"
+    priority: "high"
+
+  - term: "generative world models"
+    cross_source_pattern: "news_paper"
+    priority: "medium"
+    canonical_of: "generative world model"
+
+  - term: "simulation"
+    cross_source_pattern: "news_paper"
+    priority: "low"
+    note: "已拆分为 embodied_simulation, robot_training, robot_planning"
+
+  - term: "embodied simulation"
+    cross_source_pattern: "news_paper"
+    priority: "high"
+    parent: "embodied intelligence"
+
+  - term: "robot training"
+    cross_source_pattern: "news_paper"
+    priority: "medium"
+
+  - term: "robot planning"
+    cross_source_pattern: "news_paper"
+    priority: "medium"
+
+  - term: "jepa"
+    cross_source_pattern: "news_paper"
+    priority: "medium"
+
+  - term: "interactive world model"
+    cross_source_pattern: "news_paper"
+    priority: "medium"
+    parent: "generative world model"
+
+  - term: "dreamer"
+    cross_source_pattern: "news_paper"
+    priority: "medium"
+    parent: "model-based reinforcement learning"
+
+  - term: "lidar"
+    cross_source_pattern: "news_paper"
+    priority: "medium"
+
+  - term: "neuroevolution"
+    cross_source_pattern: "news_paper"
+    priority: "low"
+
+  - term: "curriculum learning"
+    cross_source_pattern: "news_paper"
+    priority: "low"
+
+  - term: "v-jepa 2 1"
+    cross_source_pattern: "news_paper"
+    priority: "medium"
+    canonical_of: "v-jepa 2"
+
+  - term: "video world models"
+    cross_source_pattern: "news_paper"
+    priority: "medium"
+    canonical_of: "video world model"
+
+  - term: "gaia-1"
+    cross_source_pattern: "news_paper"
+    priority: "medium"
+    parent: "generative world model"
+
+  # paper + patent (6个)
+  - term: "neural network"
+    cross_source_pattern: "paper_patent"
+    priority: "medium"
+    patent_role: "engineering_signal"
+
+  - term: "摄像头"
+    cross_source_pattern: "paper_patent"
+    priority: "medium"
+    canonical_of: "camera"
+    patent_role: "engineering_signal"
+
+  - term: "3d表示"
+    cross_source_pattern: "paper_patent"
+    priority: "low"
+    canonical_of: "3d representation"
+    patent_role: "engineering_signal"
+
+  - term: "imu"
+    cross_source_pattern: "paper_patent"
+    priority: "low"
+    patent_role: "engineering_signal"
+
+  - term: "ros"
+    cross_source_pattern: "paper_patent"
+    priority: "low"
+    patent_role: "engineering_signal"
+
+  - term: "python"
+    cross_source_pattern: "paper_patent"
+    priority: "low"
+    patent_role: "engineering_signal"
+
+  # news + patent (3个)
+  - term: "大模型"
+    cross_source_pattern: "news_patent"
+    priority: "high"
+    canonical_of: "large language model"
+    patent_role: "application_trace"
+
+  - term: "机械臂"
+    cross_source_pattern: "news_patent"
+    priority: "medium"
+    canonical_of: "robotic arm"
+    patent_role: "application_trace"
+
+  - term: "路径规划"
+    cross_source_pattern: "news_patent"
+    priority: "medium"
+    canonical_of: "path planning"
+    patent_role: "application_trace"
+
+  # news + paper + patent (2个)
+  - term: "slam"
+    cross_source_pattern: "full_cross_source"
+    priority: "high"
+    patent_role: "validation"
+
+  - term: "激光雷达"
+    cross_source_pattern: "full_cross_source"
+    priority: "high"
+    canonical_of: "lidar"
+    patent_role: "validation"
