@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from src.core.agent import TechForesightAgent, analyze_data, analyze_text
 from src.core.pipeline import AnalysisPipeline
+from src.extraction.event_schema import backfill_events_file, event_schema_summary
 
 
 def main():
@@ -56,6 +57,8 @@ def main():
     parser.add_argument("--text", "-t", type=str, help="分析单条文本")
     parser.add_argument("--list-sources", action="store_true", help="列出可用的数据源文件")
     parser.add_argument("--from-events", type=str, help="从已抽取的 events.json/csv 继续分析并生成报告")
+    parser.add_argument("--backfill-events", type=str, help="将历史 events.json/csv 补齐为新版事件 schema")
+    parser.add_argument("--backfill-output", type=str, help="历史 events schema 补齐输出路径，默认输出 *_schema_backfilled.json")
     parser.add_argument("--from-result", type=str, help="从历史 result 目录恢复；默认仅重新生成报告")
     parser.add_argument("--resume-stage", choices=["events", "report"], default="report", help="恢复阶段：events=从事件继续跑，report=仅重生成报告")
     
@@ -74,6 +77,19 @@ def main():
         print("=" * 60)
         print(f"事件: {result.get('events', [])}")
         print(f"候选: {result.get('candidates', [])}")
+        return
+
+    if args.backfill_events:
+        output_path = Path(args.backfill_output) if args.backfill_output else None
+        events_df = backfill_events_file(Path(args.backfill_events), output_path)
+        output_display = output_path or Path(args.backfill_events).with_name(f"{Path(args.backfill_events).stem}_schema_backfilled.json")
+        print("\n" + "=" * 60)
+        print("历史事件 schema 补齐完成!")
+        print(f"输出文件: {output_display}")
+        print(f"摘要文件: {output_display.with_name(f'{output_display.stem}_summary.json')}")
+        print(f"事件数: {len(events_df)}")
+        print(f"补齐摘要: {event_schema_summary(events_df)}")
+        print("=" * 60)
         return
 
     if args.from_events:

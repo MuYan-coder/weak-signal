@@ -31,7 +31,7 @@ class TechForesightAgent:
         """初始化智能体"""
         Config.ensure_dirs()
         self.pipeline = AnalysisPipeline()
-        self._version = "2.7.0"
+        self._version = "0.02"
         self._llm_available = self._check_llm_availability()
     
     def _check_llm_availability(self) -> bool:

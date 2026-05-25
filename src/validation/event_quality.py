@@ -25,6 +25,10 @@ EVENT_QUALITY_COLUMNS = [
     "event_completeness_score",
     "tech_relevance_score",
     "traceability_score",
+    "evidence_span_score",
+    "confidence_score",
+    "uncertainty_risk_score",
+    "foresight_relevance_score",
     "source_reliability_score",
     "non_marketing_score",
     "event_quality_tier",
@@ -36,6 +40,10 @@ EVENT_QUALITY_SCORE_COLUMNS = [
     "event_completeness_score",
     "tech_relevance_score",
     "traceability_score",
+    "evidence_span_score",
+    "confidence_score",
+    "uncertainty_risk_score",
+    "foresight_relevance_score",
     "source_reliability_score",
     "non_marketing_score",
     "event_quality_tier",
@@ -45,6 +53,8 @@ EVENT_QUALITY_SCORE_COLUMNS = [
 CANDIDATE_QUALITY_COLUMNS = [
     "candidate_evidence_quality",
     "candidate_core_evidence_quality",
+    "candidate_evidence_foresight_relevance",
+    "high_foresight_evidence_count",
     "low_quality_evidence_ratio",
     "high_quality_evidence_count",
     "quality_risk_flag",
@@ -89,6 +99,14 @@ TECH_KEYWORDS = {
     "材料", "装置", "设备", "传感", "控制", "规划", "训练", "仿真",
     "学习", "网络", "机器人", "感知", "导航", "操作", "定位", "建图",
     "多模态", "激光雷达", "摄像头", "强化学习", "世界模型", "具身智能",
+}
+
+FORESIGHT_KEYWORDS = {
+    "novel", "novelty", "new", "emerging", "early", "prototype", "pilot",
+    "cross-domain", "cross domain", "multimodal", "trajectory", "sensor",
+    "causal", "retrieval", "reinforcement", "memory", "world model",
+    "新", "新型", "新颖", "早期", "原型", "试点", "跨领域", "跨界",
+    "多模态", "轨迹", "传感", "因果", "检索", "强化", "记忆", "世界模型",
 }
 
 MARKETING_PATTERNS = [
@@ -167,7 +185,7 @@ def _raw_index(raw_data: pd.DataFrame | None) -> Dict[str, Dict[str, Any]]:
 
 
 def _event_id(row: pd.Series, index: int) -> str:
-    event_id = _safe_text(row.get("id"))
+    event_id = _safe_text(row.get("event_id")) or _safe_text(row.get("id"))
     return event_id or f"event_row_{index}"
 
 
@@ -179,7 +197,20 @@ def _combined_text(event: pd.Series, raw_record: Dict[str, Any]) -> str:
         event.get("subject", ""),
         event.get("action", ""),
         event.get("scene", ""),
+        event.get("technical_object", ""),
+        event.get("mechanism", ""),
+        event.get("task", ""),
+        event.get("capability_change", ""),
+        event.get("problem_solved", ""),
+        event.get("novelty_signal", ""),
+        event.get("adoption_signal", ""),
+        event.get("cross_domain_signal", ""),
+        event.get("weak_signal_reason", ""),
+        event.get("uncertainty", ""),
+        event.get("evidence_span", ""),
         " ".join(str(item) for item in _safe_list(event.get("technology", []))),
+        " ".join(str(item) for item in _safe_list(event.get("data_modality", []))),
+        " ".join(str(item) for item in _safe_list(event.get("method", []))),
         " ".join(str(item) for item in _safe_list(event.get("observation_scopes", []))),
         " ".join(str(item) for item in _safe_list(event.get("weak_signal_reasons", []))),
     ]
@@ -201,6 +232,92 @@ def _score_completeness(event: pd.Series, raw_record: Dict[str, Any]) -> Tuple[f
     if missing:
         reason += f"，缺失={','.join(missing)}"
     return score, reason
+
+
+def _score_evidence_span(event: pd.Series, raw_record: Dict[str, Any]) -> Tuple[float, str]:
+    span = _safe_text(event.get("evidence_span"))
+    raw_text = _safe_text(raw_record.get("text"))
+    if not span:
+        return 2.0, "缺少 evidence_span"
+    if len(span) < 12:
+        return 4.0, "evidence_span 过短"
+    score = 7.0
+    reason = "包含原文证据片段"
+    if raw_text and span in raw_text:
+        score = 10.0
+        reason = "evidence_span 可在原文中直接定位"
+    elif raw_text and any(part and part in raw_text for part in re.split(r"[。；;,.，]", span)[:3]):
+        score = 8.0
+        reason = "evidence_span 与原文部分匹配"
+    return score, reason
+
+
+def _score_confidence(event: pd.Series) -> Tuple[float, str]:
+    raw_value = event.get("confidence")
+    try:
+        confidence = float(raw_value)
+    except (TypeError, ValueError):
+        return 4.0, "缺少抽取置信度"
+    confidence = max(0.0, min(1.0, confidence))
+    return round(confidence * 10.0, 2), f"抽取置信度={confidence:.2f}"
+
+
+def _score_uncertainty(event: pd.Series) -> Tuple[float, str]:
+    uncertainty = _safe_text(event.get("uncertainty"))
+    if not uncertainty:
+        return 8.0, "未声明明显不确定性"
+    high_risk_words = ["缺少", "不足", "unclear", "unknown", "not verified", "尚缺", "无法判断"]
+    medium_risk_words = ["可能", "需验证", "初步", "preliminary", "limited"]
+    lowered = uncertainty.lower()
+    if any(word in lowered for word in high_risk_words):
+        return 5.0, f"不确定性较高：{uncertainty[:80]}"
+    if any(word in lowered for word in medium_risk_words):
+        return 6.5, f"存在待验证不确定性：{uncertainty[:80]}"
+    return 7.5, f"已声明不确定性：{uncertainty[:80]}"
+
+
+def _score_foresight_relevance(event: pd.Series, raw_record: Dict[str, Any]) -> Tuple[float, str]:
+    score = 0.0
+    reasons = []
+    if _has_value(event.get("technical_object")):
+        score += 1.5
+        reasons.append("技术对象明确")
+    if _has_value(event.get("mechanism")):
+        score += 1.3
+        reasons.append("机制明确")
+    if _has_value(event.get("task")) or _has_value(event.get("problem_solved")):
+        score += 1.1
+        reasons.append("任务/问题明确")
+    if _has_value(event.get("capability_change")):
+        score += 1.1
+        reasons.append("能力变化明确")
+    if _has_value(event.get("novelty_signal")):
+        score += 1.0
+        reasons.append("新颖性线索")
+    if _has_value(event.get("adoption_signal")):
+        score += 0.8
+        reasons.append("扩散/采用迹象")
+    if _has_value(event.get("cross_domain_signal")):
+        score += 0.8
+        reasons.append("跨域迁移线索")
+    if _has_value(event.get("weak_signal_reason")) or _safe_list(event.get("weak_signal_reasons")):
+        score += 1.0
+        reasons.append("弱信号理由明确")
+    if _safe_list(event.get("data_modality")):
+        score += 0.7
+        reasons.append("数据模态变化")
+    if _safe_list(event.get("method")):
+        score += 0.7
+        reasons.append("方法特征变化")
+
+    text = _combined_text(event, raw_record).lower()
+    hits = sorted({keyword for keyword in FORESIGHT_KEYWORDS if keyword.lower() in text})
+    if hits:
+        score += min(1.0, len(hits[:4]) * 0.25)
+        reasons.append("预见关键词=" + "/".join(hits[:4]))
+    if not reasons:
+        reasons.append("预见相关线索不足")
+    return round(min(score, 10.0), 2), "；".join(reasons)
 
 
 def _score_tech_relevance(event: pd.Series, raw_record: Dict[str, Any]) -> Tuple[float, str]:
@@ -240,6 +357,7 @@ def _score_traceability(event: pd.Series, raw_record: Dict[str, Any], event_id: 
         ("来源", event.get("source_type") or raw_record.get("source_type")),
         ("日期", event.get("time") or raw_record.get("date")),
         ("原文", raw_record.get("text")),
+        ("证据片段", event.get("evidence_span")),
         ("链接", raw_record.get("url")),
     ]
     present = [label for label, value in checks if _has_value(value)]
@@ -288,14 +406,22 @@ def _quality_row(event: pd.Series, raw_record: Dict[str, Any], index: int) -> Di
     completeness, completeness_reason = _score_completeness(event, raw_record)
     tech_relevance, tech_reason = _score_tech_relevance(event, raw_record)
     traceability, trace_reason = _score_traceability(event, raw_record, event_id)
+    evidence_span, evidence_reason = _score_evidence_span(event, raw_record)
+    confidence, confidence_reason = _score_confidence(event)
+    uncertainty, uncertainty_reason = _score_uncertainty(event)
+    foresight, foresight_reason = _score_foresight_relevance(event, raw_record)
     reliability, reliability_reason = _score_source_reliability(source_type, raw_record)
     non_marketing, non_marketing_reason = _score_non_marketing(event, raw_record, source_type)
     score = round(
-        completeness * 0.20
-        + tech_relevance * 0.25
-        + traceability * 0.20
-        + reliability * 0.20
-        + non_marketing * 0.15,
+        completeness * 0.12
+        + tech_relevance * 0.18
+        + traceability * 0.13
+        + evidence_span * 0.12
+        + confidence * 0.08
+        + uncertainty * 0.07
+        + foresight * 0.14
+        + reliability * 0.10
+        + non_marketing * 0.06,
         2,
     )
     tier = _quality_tier(score)
@@ -303,6 +429,10 @@ def _quality_row(event: pd.Series, raw_record: Dict[str, Any], index: int) -> Di
         f"完整性{completeness:.1f}({completeness_reason})；"
         f"技术相关{tech_relevance:.1f}({tech_reason})；"
         f"追溯性{traceability:.1f}({trace_reason})；"
+        f"证据片段{evidence_span:.1f}({evidence_reason})；"
+        f"置信度{confidence:.1f}({confidence_reason})；"
+        f"不确定性{uncertainty:.1f}({uncertainty_reason})；"
+        f"预见相关{foresight:.1f}({foresight_reason})；"
         f"来源可信{reliability:.1f}({reliability_reason})；"
         f"非营销{non_marketing:.1f}({non_marketing_reason})"
     )
@@ -315,6 +445,10 @@ def _quality_row(event: pd.Series, raw_record: Dict[str, Any], index: int) -> Di
         "event_completeness_score": completeness,
         "tech_relevance_score": tech_relevance,
         "traceability_score": traceability,
+        "evidence_span_score": evidence_span,
+        "confidence_score": confidence,
+        "uncertainty_risk_score": uncertainty,
+        "foresight_relevance_score": foresight,
         "source_reliability_score": reliability,
         "non_marketing_score": non_marketing,
         "event_quality_tier": tier,
@@ -402,6 +536,9 @@ def _event_quality_payload(event_id: Any, lookup: Dict[str, Dict[str, Any]]) -> 
     record = lookup.get(_safe_text(event_id), {})
     return {
         "event_quality_score": float(record.get("event_quality_score", 0.0) or 0.0),
+        "foresight_relevance_score": float(record.get("foresight_relevance_score", 0.0) or 0.0),
+        "evidence_span_score": float(record.get("evidence_span_score", 0.0) or 0.0),
+        "confidence_score": float(record.get("confidence_score", 0.0) or 0.0),
         "event_quality_tier": _safe_text(record.get("event_quality_tier")),
         "event_quality_reason": _safe_text(record.get("event_quality_reason")),
     }
@@ -450,10 +587,17 @@ def _candidate_quality_metrics(
         for event_id in ids
         if event_id in lookup
     ]
+    foresight_scores = [
+        float(lookup[event_id].get("foresight_relevance_score", 0.0) or 0.0)
+        for event_id in ids
+        if event_id in lookup
+    ]
     if not scores:
         return {
             "candidate_evidence_quality": 0.0,
             "candidate_core_evidence_quality": 0.0,
+            "candidate_evidence_foresight_relevance": 0.0,
+            "high_foresight_evidence_count": 0,
             "low_quality_evidence_ratio": 0.0,
             "high_quality_evidence_count": 0,
             "quality_risk_flag": "quality_unknown",
@@ -467,6 +611,8 @@ def _candidate_quality_metrics(
     core_average = round(sum(core_scores) / len(core_scores), 2)
     low_ratio = round(sum(1 for score in scores if score < 4.0) / len(scores), 3)
     high_count = sum(1 for score in scores if score >= 8.0)
+    foresight_average = round(sum(foresight_scores) / len(foresight_scores), 2) if foresight_scores else 0.0
+    high_foresight_count = sum(1 for score in foresight_scores if score >= 7.0)
     if average < 4.0 or low_ratio >= 0.5:
         risk = "high_quality_risk"
     elif average < 6.0 or low_ratio > 0:
@@ -484,6 +630,8 @@ def _candidate_quality_metrics(
     return {
         "candidate_evidence_quality": average,
         "candidate_core_evidence_quality": core_average,
+        "candidate_evidence_foresight_relevance": foresight_average,
+        "high_foresight_evidence_count": high_foresight_count,
         "low_quality_evidence_ratio": low_ratio,
         "high_quality_evidence_count": high_count,
         "quality_risk_flag": risk,

@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.02 - 2026-05-25
+
+### 新增
+
+- 新增独立事件 schema 契约 `src/extraction/event_schema.py`，统一维护 `weak_signal_event_v2` 字段、缓存列、标准化、历史回填和 schema 摘要。
+- 事件抽取支持单篇文档 0-N 个事件，并通过 `EVENT_EXTRACTION_MAX_EVENTS_PER_DOC` 与 `EVENT_EXTRACTION_MIN_CONFIDENCE` 控制多事件膨胀。
+- 批量事件抽取遇到整批空数组 `[]` 时默认逐条重试一次，可用 `EVENT_EXTRACTION_RETRY_EMPTY_BATCH=0` 关闭。
+- 批量事件抽取支持 `EVENT_EXTRACTION_BATCH_RETRIES`、`EVENT_EXTRACTION_BATCH_TIMEOUT`、`EVENT_EXTRACTION_SINGLE_TIMEOUT` 和 `EVENT_EXTRACTION_TIMEOUT_FALLBACK_TO_LOCAL`；默认批量超时后快速退回本地规则兜底，避免单批长时间卡住。
+- CLI 新增 `--backfill-events` 与 `--backfill-output`，可将历史 `events.json/csv` 补齐为新版 schema 并输出摘要。
+- 事件质量评分新增 `evidence_span_score`、`confidence_score`、`uncertainty_risk_score` 和 `foresight_relevance_score`。
+- 候选证据聚合新增 `candidate_evidence_foresight_relevance` 与 `high_foresight_evidence_count`。
+
+### 改进
+
+- API 与本地回退抽取均输出新版字段，包括 `technical_object`、`mechanism`、`task`、`data_modality`、`method`、`evidence_span`、`confidence` 和 `weak_signal_reason`。
+- 候选成形优先利用新版 schema 字段生成对象-机制-任务候选单元，同时保留旧规则候选作为兼容补充。
+- `from-events` 路径自动回填历史事件 schema，避免旧事件文件阻断后续评分、候选成形和报告生成。
+- 报告证据排序优先考虑预见相关度、事件质量、证据片段质量和置信度，降低空泛或低质量证据进入核心报告的概率。
+- Web 页面补充展示新版事件字段、事件质量细分分数和候选证据预见相关度，便于人工复核。
+
 ## v2.7.0 - 2026-05-07
 
 本次发布在 v2.6 质量控制和技术链映射基础上，新增时间验证与关键核心潜力评分，用于从弱信号候选中筛出更适合人工复核的关键核心技术潜力对象。

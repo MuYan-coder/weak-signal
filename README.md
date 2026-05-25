@@ -6,9 +6,9 @@
 
 ## 当前版本
 
-- 当前发布版本：`v2.7.0`
-- 目标发布标签：`v2.7`
-- v2.7 主线新增时间验证、关键核心潜力评分、关键核心候选短名单、报告关键核心候选章节和 Web 展示增强。
+- 当前发布版本：`0.02`
+- 目标发布标签：`v0.02`
+- v0.02 主线新增事件 schema 契约、多事件抽取、历史事件回填、事件质量细分评分和 Web 复核增强。
 - v2.6 验收参考目录：`result/20260430_100821_v26_final_validation`
 
 ## 项目架构
@@ -26,6 +26,7 @@ tf_agent/
     │   ├── agent.py           # 对外智能体封装
     │   └── pipeline.py        # 主分析流水线
     ├── extraction/
+    │   ├── event_schema.py       # 事件 schema 契约、回填与读写工具
     │   ├── event_extractor.py
     │   ├── candidate_former.py
     │   └── tech_lexicon.py
@@ -87,6 +88,7 @@ python main.py
 python main.py --sample 100
 python main.py --data data/your_file.xlsx
 python main.py --from-result result/20260424_092011
+python main.py --backfill-events result/old/events.json
 ```
 
 Web 页面运行：
@@ -106,7 +108,27 @@ OPENAI_BASE_URL=https://api.siliconflow.cn/v1
 EXTRACTION_MODEL=Qwen/Qwen2.5-14B-Instruct
 AGENT_MODEL=Qwen/Qwen2.5-32B-Instruct
 REPORT_MODEL=deepseek-ai/DeepSeek-V3
+
+# 可选：控制单篇文档最多保留的抽取事件数与最低置信度
+EVENT_EXTRACTION_MAX_EVENTS_PER_DOC=6
+EVENT_EXTRACTION_MIN_CONFIDENCE=0
+EVENT_EXTRACTION_RETRY_EMPTY_BATCH=1
+EVENT_EXTRACTION_BATCH_TIMEOUT=60
+EVENT_EXTRACTION_SINGLE_TIMEOUT=45
+EVENT_EXTRACTION_BATCH_RETRIES=0
+EVENT_EXTRACTION_TIMEOUT_FALLBACK_TO_LOCAL=1
 ```
+
+## 事件抽取 schema
+
+事件抽取主契约集中在 `src/extraction/event_schema.py`，当前版本为 `weak_signal_event_v2`。新版事件在兼容 `subject/action/technology/scene/time` 的基础上，新增 `technical_object`、`mechanism`、`task`、`data_modality`、`method`、`evidence_span`、`confidence`、`weak_signal_reason` 等面向候选成形和证据复核的字段。
+
+- 抽取结果支持 0-N 个事件，批量 API 返回需携带 `doc_index` 以映射原文。
+- 若批量 API 对整批返回空数组 `[]`，默认会逐条重试一次；可通过 `EVENT_EXTRACTION_RETRY_EMPTY_BATCH=0` 关闭。
+- 批量 API 超时会按 `EVENT_EXTRACTION_BATCH_RETRIES` 重试，仍失败时默认退回本地规则兜底，避免单批长时间卡住；如需继续逐条 API 兜底，可设置 `EVENT_EXTRACTION_TIMEOUT_FALLBACK_TO_LOCAL=0`。
+- 历史 `events.json/csv` 会通过 schema 回填补齐缺失字段，并标记 `schema_migration_mode=legacy_backfill`。
+- `--backfill-events` 可单独生成补齐后的事件文件及摘要 JSON。
+- 事件质量评分已纳入 `evidence_span_score`、`confidence_score`、`uncertainty_risk_score` 和 `foresight_relevance_score`，这些字段会继续进入候选证据聚合、Web 复核视图和报告证据排序。
 
 ## 目录边界
 

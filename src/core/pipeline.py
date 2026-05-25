@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 # 导入各模块
+from ..extraction.event_schema import WEAK_SIGNAL_EVENT_SCHEMA_VERSION, backfill_events_dataframe
 from ..extraction.event_extractor import process_events, load_event_cache, save_event_cache
 from ..extraction.candidate_former import build_candidate_forms
 
@@ -231,6 +232,8 @@ class AnalysisPipeline:
             if isinstance(payload, list):
                 return pd.DataFrame(payload)
             if isinstance(payload, dict):
+                if isinstance(payload.get("events"), list):
+                    return pd.DataFrame(payload.get("events", []))
                 return pd.DataFrame([payload])
         return pd.DataFrame()
 
@@ -525,6 +528,9 @@ class AnalysisPipeline:
             "support_terms",
             "raw_candidate_text",
             "event_quality_score",
+            "foresight_relevance_score",
+            "evidence_span_score",
+            "confidence_score",
             "event_quality_tier",
             "traceability_status",
             "full_text_available",
@@ -886,6 +892,9 @@ class AnalysisPipeline:
                         "support_terms": support_terms,
                         "raw_candidate_text": raw_candidate_text,
                         "event_quality_score": round(self._safe_report_float(item.get("event_quality_score"), 0.0), 2),
+                        "foresight_relevance_score": round(self._safe_report_float(item.get("foresight_relevance_score"), 0.0), 2),
+                        "evidence_span_score": round(self._safe_report_float(item.get("evidence_span_score"), 0.0), 2),
+                        "confidence_score": round(self._safe_report_float(item.get("confidence_score"), 0.0), 2),
                         "event_quality_tier": self._safe_report_text(item.get("event_quality_tier")),
                         "traceability_status": traceability_status,
                         "full_text_available": bool(doc_text),
@@ -1106,6 +1115,7 @@ class AnalysisPipeline:
         result_dir.mkdir(parents=True, exist_ok=True)
 
         events_df = self._ensure_dataframe(events_df) if events_df is not None else self._read_dataframe_file(Path(events_path))
+        events_df = backfill_events_dataframe(events_df)
         if events_df.empty:
             print("[ERROR] 已抽取事件为空，无法继续分析")
             return {}
@@ -1600,6 +1610,8 @@ class AnalysisPipeline:
                     "rows": len(events_df),
                     "data_path": str(data_path) if data_path else "",
                     "cache_fingerprint": cache_path.stem,
+                    "source_ids": raw_data.get("id", pd.Series(dtype="object")).astype(str).tolist(),
+                    "event_schema_version": WEAK_SIGNAL_EVENT_SCHEMA_VERSION,
                 },
             )
 
@@ -1753,7 +1765,9 @@ class AnalysisPipeline:
         max_fields = [
             "candidate_evidence_quality",
             "candidate_core_evidence_quality",
+            "candidate_evidence_foresight_relevance",
             "high_quality_evidence_count",
+            "high_foresight_evidence_count",
             "quality_adjusted_rank_score",
             "object_like_score",
             "cluster_object_specificity",
@@ -2170,7 +2184,12 @@ class AnalysisPipeline:
         report_evidence_items = sorted(
             report_evidence_items,
             key=lambda item: (
+                self._safe_report_float(item.get("foresight_relevance_score"), -1.0),
                 self._safe_report_float(item.get("event_quality_score"), -1.0),
+                self._safe_report_float(item.get("evidence_span_score"), -1.0),
+                self._safe_report_float(item.get("confidence_score"), -1.0),
+                1 if self._safe_report_text(item.get("evidence_span")) else 0,
+                1 if self._safe_report_text(item.get("text") or item.get("snippet")) else 0,
                 self._safe_report_text(item.get("source_type")).lower() in {"paper", "patent", "report"},
             ),
             reverse=True,
@@ -2200,6 +2219,9 @@ class AnalysisPipeline:
                     "text": self._truncate_report_text(item.get("text") or item.get("snippet"), 520),
                     "raw_candidate_text": self._safe_report_text(item.get("raw_candidate_text")),
                     "event_quality_score": round(self._safe_report_float(item.get("event_quality_score"), 0.0), 2),
+                    "foresight_relevance_score": round(self._safe_report_float(item.get("foresight_relevance_score"), 0.0), 2),
+                    "evidence_span_score": round(self._safe_report_float(item.get("evidence_span_score"), 0.0), 2),
+                    "confidence_score": round(self._safe_report_float(item.get("confidence_score"), 0.0), 2),
                     "event_quality_tier": self._safe_report_text(item.get("event_quality_tier")),
                     "event_quality_reason": self._truncate_report_text(item.get("event_quality_reason"), 180),
                 }
@@ -2261,8 +2283,10 @@ class AnalysisPipeline:
             "evidence_quality": {
                 "candidate_evidence_quality": round(self._safe_report_float(row.get("candidate_evidence_quality"), 0.0), 2),
                 "candidate_core_evidence_quality": round(self._safe_report_float(row.get("candidate_core_evidence_quality"), 0.0), 2),
+                "candidate_evidence_foresight_relevance": round(self._safe_report_float(row.get("candidate_evidence_foresight_relevance"), 0.0), 2),
                 "low_quality_evidence_ratio": round(self._safe_report_float(row.get("low_quality_evidence_ratio"), 0.0), 3),
                 "high_quality_evidence_count": int(self._safe_report_float(row.get("high_quality_evidence_count"), 0.0)),
+                "high_foresight_evidence_count": int(self._safe_report_float(row.get("high_foresight_evidence_count"), 0.0)),
                 "quality_risk_flag": self._safe_report_text(row.get("quality_risk_flag")),
                 "excluded_low_quality_evidence_count": low_quality_evidence_count,
             },
@@ -2649,6 +2673,9 @@ class AnalysisPipeline:
                                 "snippet": item["snippet"],
                                 "raw_candidate_text": item["raw_candidate_text"],
                                 "event_quality_score": item.get("event_quality_score", 0.0),
+                                "foresight_relevance_score": item.get("foresight_relevance_score", 0.0),
+                                "evidence_span_score": item.get("evidence_span_score", 0.0),
+                                "confidence_score": item.get("confidence_score", 0.0),
                                 "event_quality_tier": item.get("event_quality_tier", ""),
                             }
                             for item in packet["evidence_items"]
@@ -3878,7 +3905,7 @@ class AnalysisPipeline:
             )
             report_lines.append("（一）候选总体判断")
             report_lines.append(
-                f"v2.7 已在弱信号评分之外单独生成关键核心潜力评分。本轮形成 {len(key_core_candidates)} 个候选，"
+                f"v0.02 已在弱信号评分之外单独生成关键核心潜力评分。本轮形成 {len(key_core_candidates)} 个候选，"
                 f"其中核心候选 {core_count} 个、强潜力候选 {strong_count} 个、观察候选 {watch_count} 个。"
                 "该结论仍是潜力排序，不等同于最终关键核心技术认定。"
             )

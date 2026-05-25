@@ -8,6 +8,17 @@ import pandas as pd
 from ..utils.api_stats import record_call
 from ..utils.env_config import ensure_env_loaded
 from ..utils.llm_client import chat_text, get_provider_and_client
+from .event_schema import (
+    EVENT_LLM_JSON_FIELDS as _EVENT_JSON_FIELDS,
+    WEAK_SIGNAL_EVENT_SCHEMA_VERSION,
+    coerce_confidence as _coerce_confidence,
+    coerce_event_list as _coerce_event_list,
+    event_cache_columns as _event_cache_columns,
+    normalize_event_schema as _normalize_event_schema,
+    normalize_events_dataframe as _normalize_events_dataframe,
+    safe_event_text as _safe_event_text,
+    source_date_text as _source_date_text,
+)
 from .tech_lexicon import (
     BROAD_TECH_TERMS,
     DOMINANT_TECH_TERMS,
@@ -79,17 +90,100 @@ def _dedupe_preserve_order(values):
 
 
 def _fix_event_dict(event):
-    if event.get("technology") is None:
+    if not isinstance(event, dict):
+        return {}
+    if not _coerce_event_list(event.get("technology")):
         event["technology"] = ["未知"]
-    if event.get("subject") is None:
-        event["subject"] = "未知"
-    if event.get("action") is None:
-        event["action"] = "未知"
-    if event.get("scene") is None:
-        event["scene"] = "未知"
-    if event.get("time") is None:
-        event["time"] = "未知"
+    for field in ["subject", "action", "scene", "time"]:
+        if not _safe_event_text(event.get(field)):
+            event[field] = "未知"
+    event["event_schema_version"] = (
+        _safe_event_text(event.get("event_schema_version"))
+        or WEAK_SIGNAL_EVENT_SCHEMA_VERSION
+    )
+    for field in ["data_modality", "method"]:
+        event[field] = _coerce_event_list(event.get(field))
+    event["confidence"] = _coerce_confidence(event.get("confidence"), default=0.0)
     return event
+
+
+def _event_extraction_max_events_per_doc():
+    try:
+        value = int(os.getenv("EVENT_EXTRACTION_MAX_EVENTS_PER_DOC", "6"))
+    except (TypeError, ValueError):
+        value = 6
+    return max(1, value)
+
+
+def _event_extraction_min_confidence():
+    try:
+        value = float(os.getenv("EVENT_EXTRACTION_MIN_CONFIDENCE", "0"))
+    except (TypeError, ValueError):
+        value = 0.0
+    return max(0.0, min(1.0, value))
+
+
+def _retry_empty_batch_enabled():
+    value = str(os.getenv("EVENT_EXTRACTION_RETRY_EMPTY_BATCH", "1")).strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _event_extraction_batch_timeout():
+    try:
+        value = int(os.getenv("EVENT_EXTRACTION_BATCH_TIMEOUT", "60"))
+    except (TypeError, ValueError):
+        value = 60
+    return max(30, value)
+
+
+def _event_extraction_single_timeout():
+    try:
+        value = int(os.getenv("EVENT_EXTRACTION_SINGLE_TIMEOUT", "45"))
+    except (TypeError, ValueError):
+        value = 45
+    return max(30, value)
+
+
+def _event_extraction_batch_retries():
+    try:
+        value = int(os.getenv("EVENT_EXTRACTION_BATCH_RETRIES", "0"))
+    except (TypeError, ValueError):
+        value = 0
+    return max(0, value)
+
+
+def _timeout_fallback_to_local_enabled():
+    value = str(os.getenv("EVENT_EXTRACTION_TIMEOUT_FALLBACK_TO_LOCAL", "1")).strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _event_selection_key(index_event):
+    index, event = index_event
+    return (
+        _coerce_confidence(event.get("confidence"), default=0.0),
+        1 if _safe_event_text(event.get("evidence_span")) else 0,
+        1 if any(
+            _safe_event_text(event.get(field))
+            for field in ["technical_object", "mechanism", "task", "weak_signal_reason"]
+        ) else 0,
+        -index,
+    )
+
+
+def _filter_events_for_doc(events, max_events_per_doc=None, min_confidence=None):
+    """Apply per-document event explosion controls without changing event order."""
+    max_events_per_doc = max_events_per_doc or _event_extraction_max_events_per_doc()
+    min_confidence = _event_extraction_min_confidence() if min_confidence is None else min_confidence
+    indexed_events = [(index, event) for index, event in enumerate(events or []) if isinstance(event, dict)]
+    eligible = [
+        (index, event)
+        for index, event in indexed_events
+        if _coerce_confidence(event.get("confidence"), default=0.0) >= min_confidence
+    ]
+    selected_ranked = sorted(eligible, key=_event_selection_key, reverse=True)[:max_events_per_doc]
+    selected_indexes = {index for index, _ in selected_ranked}
+    selected = [event for index, event in eligible if index in selected_indexes]
+    return selected, len(indexed_events) - len(eligible), max(0, len(eligible) - len(selected))
 
 
 def _parse_json_from_response(raw: str):
@@ -112,21 +206,18 @@ def _parse_json_from_response(raw: str):
             raw = raw.rsplit("```", 1)[0]
         raw = raw.strip()
 
-    # 尝试解析数组格式
-    json_pattern = r"\[\s*\{.*?\}\s*\]"
-    matches = re.findall(json_pattern, raw, re.DOTALL)
-    if matches:
-        candidate = max(matches, key=len)
-        try:
-            return json.loads(candidate)
-        except Exception:
-            pass
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
 
-    # 尝试解析对象格式
-    obj_pattern = r"\{[^{}]*\}"
-    matches = re.findall(obj_pattern, raw, re.DOTALL)
-    if matches:
-        candidate = max(matches, key=len)
+    first_obj_idx = raw.find("{")
+    last_obj_idx = raw.rfind("}")
+    first_array_idx = raw.find("[")
+    if first_obj_idx != -1 and last_obj_idx > first_obj_idx and (
+        first_array_idx == -1 or first_obj_idx < first_array_idx
+    ):
+        candidate = raw[first_obj_idx:last_obj_idx + 1]
         try:
             return json.loads(candidate)
         except Exception:
@@ -137,6 +228,16 @@ def _parse_json_from_response(raw: str):
     last_idx = raw.rfind("]")
     if first_idx != -1 and last_idx != -1 and last_idx > first_idx:
         candidate = raw[first_idx:last_idx + 1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+
+    # 尝试解析数组格式
+    json_pattern = r"\[\s*\{.*?\}\s*\]"
+    matches = re.findall(json_pattern, raw, re.DOTALL)
+    if matches:
+        candidate = max(matches, key=len)
         try:
             return json.loads(candidate)
         except Exception:
@@ -160,10 +261,16 @@ def _parse_json_from_response(raw: str):
         if recovered_event:
             return recovered_event
 
+    obj_pattern = r"\{[^{}]*\}"
+    matches = re.findall(obj_pattern, raw, re.DOTALL)
+    if matches:
+        candidate = max(matches, key=len)
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+
     return None
-
-
-_EVENT_JSON_FIELDS = ["subject", "action", "technology", "scene", "time"]
 
 
 def _split_object_snippets(raw: str):
@@ -262,28 +369,6 @@ def _parse_event_list_lenient(raw: str):
     return events
 
 
-def _event_cache_columns():
-    return [
-        "subject", "action", "technology", "scene", "time", "date", "event_date", "id", "source_type", "title",
-        "observation_scopes", "scope_candidates", "scope_candidate_scopes",
-        "scope_match_mode",
-        "observation_scopes_detected", "scope_direct_matches", "scope_alias_matches",
-        "scope_proxy_scopes", "scope_rejected_scopes", "scope_detection_reason",
-        "candidate_units", "candidate_unit_count", "scope_echo_candidate_count",
-        "low_attention_hint", "niche_actor_hint", "non_dominant_hint",
-        "cross_domain_hint", "traceable_hint", "weak_signal_event_score",
-        "weak_signal_event_candidate", "weak_signal_reasons",
-    ]
-
-
-def _source_date_text(row):
-    for field in ["date", "event_date", "publication_date", "application_date", "grant_date", "time"]:
-        value = str(row.get(field, "")).strip()
-        if value and value.lower() not in {"nan", "nat", "none", "null", "未知"}:
-            return value
-    return ""
-
-
 def _normalize_cache_path(cache_path):
     if not cache_path:
         return None
@@ -301,13 +386,24 @@ def load_event_cache(cache_path, expected_ids=None):
         payload = json.loads(cache_file.read_text(encoding="utf-8"))
     except Exception:
         return None
-    events = payload.get("events", [])
+    metadata = {}
+    if isinstance(payload, dict):
+        metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+        events = payload.get("events", [])
+    elif isinstance(payload, list):
+        events = payload
+    else:
+        events = []
     if not isinstance(events, list) or not events:
         return None
-    events_df = pd.DataFrame(events)
+    events_df = _normalize_events_dataframe(pd.DataFrame(events))
     if expected_ids:
-        cached_ids = events_df.get("id", pd.Series(dtype="object")).astype(str).tolist()
-        if list(map(str, expected_ids)) != cached_ids:
+        expected = [str(item) for item in expected_ids]
+        metadata_source_ids = [str(item) for item in metadata.get("source_ids", [])]
+        cached_ids = _dedupe_preserve_order(events_df.get("id", pd.Series(dtype="object")).astype(str).tolist())
+        if metadata_source_ids and metadata_source_ids != expected:
+            return None
+        if not metadata_source_ids and cached_ids != expected:
             return None
     return events_df
 
@@ -317,8 +413,15 @@ def save_event_cache(cache_path, events_df, metadata=None):
     if cache_file is None or events_df is None or events_df.empty:
         return
     cache_file.parent.mkdir(parents=True, exist_ok=True)
+    events_df = _normalize_events_dataframe(events_df)
+    metadata = dict(metadata or {})
+    metadata.setdefault("event_schema_version", WEAK_SIGNAL_EVENT_SCHEMA_VERSION)
+    metadata.setdefault(
+        "source_ids",
+        _dedupe_preserve_order(events_df.get("id", pd.Series(dtype="object")).astype(str).tolist()),
+    )
     payload = {
-        "metadata": metadata or {},
+        "metadata": metadata,
         "events": events_df.to_dict(orient="records"),
     }
     cache_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -847,6 +950,26 @@ def _normalize_event_technologies(
     fallback_method_tokens = _dedupe_preserve_order(
         extract_method_modifier_tokens(title_text, fallback_text)
     )
+    if not _coerce_event_list(event.get("mechanism_core_tokens")):
+        event["mechanism_core_tokens"] = fallback_mechanisms
+    if not _coerce_event_list(event.get("task_constraint_tokens")):
+        event["task_constraint_tokens"] = fallback_tasks
+    if not _coerce_event_list(event.get("object_modifier_tokens")):
+        event["object_modifier_tokens"] = fallback_object_tokens
+    if not _coerce_event_list(event.get("data_modifier_tokens")):
+        event["data_modifier_tokens"] = fallback_data_tokens
+    if not _coerce_event_list(event.get("method_modifier_tokens")):
+        event["method_modifier_tokens"] = fallback_method_tokens
+    if not _safe_event_text(event.get("technical_object")) and fallback_object_tokens:
+        event["technical_object"] = " ".join(fallback_object_tokens[:2])
+    if not _safe_event_text(event.get("mechanism")) and fallback_mechanisms:
+        event["mechanism"] = " ".join(fallback_mechanisms[:2])
+    if not _safe_event_text(event.get("task")) and fallback_tasks:
+        event["task"] = " ".join(fallback_tasks[:2])
+    if not _coerce_event_list(event.get("data_modality")) and fallback_data_tokens:
+        event["data_modality"] = fallback_data_tokens[:3]
+    if not _coerce_event_list(event.get("method")) and fallback_method_tokens:
+        event["method"] = fallback_method_tokens[:3]
     scope_diag = diagnose_observation_scope_detection(
         combined_text,
         source_type=source_type,
@@ -894,56 +1017,181 @@ def _normalize_event_technologies(
     return event
 
 
-def extract_event_with_api(text):
-    prompt = f"""
-请从以下文本中抽取结构化事件信息，返回JSON格式。
+def _weak_signal_event_prompt(text):
+    return f"""
+你是用于技术预见的弱信号事件抽取器。请从文本中抽取 0 到 N 条有明确原文证据的技术事件。
+只输出纯 JSON 数组，不要添加解释、Markdown、编号或多余文字。没有有效技术事件时输出 []。
 
-文本：{text}
+文本：
+{text}
 
-要求：
-- 主体（subject）：谁在行动
-- 行为（action）：做什么
-- 技术（technology）：涉及哪些技术（列表）
-- 场景（scene）：应用场景
-- 时间（time）：时间信息
+抽取要求：
+- 保留兼容字段：subject、action、technology、scene、time。
+- 补充弱信号字段：event_type、technical_object、mechanism、task、data_modality、method、capability_change、problem_solved、maturity_stage、novelty_signal、adoption_signal、cross_domain_signal、weak_signal_reason、uncertainty、evidence_span、confidence。
+- evidence_span 必须是原文中连续出现的证据片段，不能编造；找不到证据片段的事件不要输出。
+- subject/action/technology/scene/time 只描述原文明确证据；capability_change、weak_signal_reason、uncertainty 可以是基于证据的审慎推断。
+- 一篇文本可拆成多条事件，优先拆分不同技术对象、机制、任务或应用场景。
+- confidence 为 0 到 1 的数字。
 
-如果某项信息不存在，用"未知"填充。
-
-输出格式：
-{{
-  "subject": "string",
-  "action": "string",
-  "technology": ["tech1", "tech2"],
-  "scene": "string",
-  "time": "string"
-}}
+输出格式示例：
+[
+  {{
+    "event_schema_version": "{WEAK_SIGNAL_EVENT_SCHEMA_VERSION}",
+    "event_id": "",
+    "subject": "string",
+    "action": "string",
+    "technology": ["tech1", "tech2"],
+    "scene": "string",
+    "time": "string",
+    "event_type": "research",
+    "technical_object": "string",
+    "mechanism": "string",
+    "task": "string",
+    "data_modality": ["video", "sensor"],
+    "method": ["retrieval-based"],
+    "capability_change": "string",
+    "problem_solved": "string",
+    "maturity_stage": "lab",
+    "novelty_signal": "string",
+    "adoption_signal": "string",
+    "cross_domain_signal": "string",
+    "weak_signal_reason": "string",
+    "uncertainty": "string",
+    "evidence_span": "原文连续片段",
+    "confidence": 0.82
+  }}
+]
 """
+
+
+def _weak_signal_batch_prompt(items, batch_size):
+    return f"""
+你是用于技术预见的弱信号事件抽取器。请从下面多个文本中抽取 0 到 N 条有明确原文证据的技术事件。
+只输出纯 JSON 数组，不要添加解释、Markdown、编号或多余文字。
+
+文本列表：
+{items}
+
+抽取要求：
+- 每条事件必须包含 doc_index，取值为对应文本编号 1 到 {batch_size}。
+- 每篇文本可以输出 0 到 N 条事件；不要为了凑数量强行输出事件。
+- 保留兼容字段：subject、action、technology、scene、time。
+- 补充弱信号字段：event_type、technical_object、mechanism、task、data_modality、method、capability_change、problem_solved、maturity_stage、novelty_signal、adoption_signal、cross_domain_signal、weak_signal_reason、uncertainty、evidence_span、confidence。
+- evidence_span 必须是对应原文中连续出现的证据片段，不能编造；找不到证据片段的事件不要输出。
+- subject/action/technology/scene/time 只描述原文明确证据；capability_change、weak_signal_reason、uncertainty 可以是基于证据的审慎推断。
+- confidence 为 0 到 1 的数字。
+
+输出格式示例：
+[
+  {{
+    "doc_index": 1,
+    "event_schema_version": "{WEAK_SIGNAL_EVENT_SCHEMA_VERSION}",
+    "event_id": "",
+    "subject": "string",
+    "action": "string",
+    "technology": ["tech1", "tech2"],
+    "scene": "string",
+    "time": "string",
+    "event_type": "research",
+    "technical_object": "string",
+    "mechanism": "string",
+    "task": "string",
+    "data_modality": ["video", "sensor"],
+    "method": ["retrieval-based"],
+    "capability_change": "string",
+    "problem_solved": "string",
+    "maturity_stage": "lab",
+    "novelty_signal": "string",
+    "adoption_signal": "string",
+    "cross_domain_signal": "string",
+    "weak_signal_reason": "string",
+    "uncertainty": "string",
+    "evidence_span": "原文连续片段",
+    "confidence": 0.82
+  }}
+]
+"""
+
+
+def _event_records_from_parsed(parsed, inherited_doc_index=None):
+    records = []
+    if isinstance(parsed, dict):
+        doc_index = (
+            parsed.get("doc_index")
+            or parsed.get("document_index")
+            or parsed.get("source_index")
+            or parsed.get("text_index")
+            or inherited_doc_index
+        )
+        events = parsed.get("events")
+        if isinstance(events, list):
+            for event in events:
+                records.extend(_event_records_from_parsed(event, inherited_doc_index=doc_index))
+            return records
+        record = dict(parsed)
+        if doc_index is not None and not record.get("doc_index"):
+            record["doc_index"] = doc_index
+        records.append(record)
+    elif isinstance(parsed, list):
+        for item in parsed:
+            records.extend(_event_records_from_parsed(item, inherited_doc_index=inherited_doc_index))
+    return records
+
+
+def _doc_index_hint(event):
+    for key in ["doc_index", "document_index", "source_index", "text_index", "input_index", "编号"]:
+        value = event.get(key)
+        if value is None:
+            continue
+        match = re.search(r"\d+", str(value))
+        if match:
+            try:
+                return int(match.group(0))
+            except ValueError:
+                continue
+    return None
+
+
+def _batch_local_index(event, batch_len):
+    hint = _doc_index_hint(event)
+    if hint is None:
+        return None
+    if 1 <= hint <= batch_len:
+        return hint - 1
+    if 0 <= hint < batch_len:
+        return hint
+    return None
+
+
+def _strip_extraction_mapping_fields(event):
+    event = dict(event or {})
+    for field in [
+        "doc_index", "document_index", "source_index", "text_index",
+        "input_index", "编号", "events", "doc_id",
+    ]:
+        event.pop(field, None)
+    return event
+
+
+def extract_events_with_api(text):
+    prompt = _weak_signal_event_prompt(text)
 
     try:
         provider, client = get_provider_and_client()
         if client is None or provider is None:
-            return extract_event_simulate(text)
-        
-        # 使用配置的事件抽取模型
+            event = extract_event_simulate(text)
+            event["_source_extraction_mode"] = "local"
+            return [event]
+
         extraction_model = os.getenv("EXTRACTION_MODEL", os.getenv("OPENAI_MODEL", "Qwen/Qwen2.5-7B-Instruct"))
         result, usage_info, _ = chat_text(
             prompt,
             model=extraction_model,
             temperature=0.1,
-            max_tokens=300,
-            timeout=60,
+            max_tokens=4000,
+            timeout=_event_extraction_single_timeout(),
         )
-        result = result.strip()
-        
-        # 移除可能的markdown代码块标记
-        if result.startswith("```"):
-            lines = result.split("\n")
-            if len(lines) > 1:
-                result = "\n".join(lines[1:])
-            if "```" in result:
-                result = result.rsplit("```", 1)[0]
-            result = result.strip()
-        
+
         if usage_info["prompt_tokens"] or usage_info["completion_tokens"]:
             record_call(
                 call_type="事件抽取-单条",
@@ -951,81 +1199,76 @@ def extract_event_with_api(text):
                 completion_tokens=usage_info["completion_tokens"],
                 success=True,
             )
-        
-        # 尝试解析JSON
-        try:
-            event = json.loads(result)
-        except json.JSONDecodeError:
-            # 尝试从文本中提取JSON
-            json_match = re.search(r'\{[^{}]*\}', result, re.DOTALL)
-            if json_match:
-                event = json.loads(json_match.group(0))
-            else:
-                print(f"[事件抽取] 无法解析JSON响应: {result[:200]}")
-                return extract_event_simulate(text)
-        
-        _fix_event_dict(event)
-        _normalize_event_technologies(event, text, text, source_extraction_mode="api")
-        return event
+
+        parsed = _parse_json_from_response(result)
+        if parsed is None:
+            print(f"[事件抽取] 无法解析JSON响应: {result[:200]}")
+            event = extract_event_simulate(text)
+            event["_source_extraction_mode"] = "local"
+            return [event]
+        records = _event_records_from_parsed(parsed)
+        normalized_records = []
+        for record in records:
+            if not isinstance(record, dict) or not record:
+                continue
+            event = _strip_extraction_mapping_fields(record)
+            _fix_event_dict(event)
+            _normalize_event_technologies(event, text, text, source_extraction_mode="api")
+            normalized_records.append(event)
+        return normalized_records
     except Exception as e:
         print(f"API调用失败: {e}")
-        return extract_event_simulate(text)
+        event = extract_event_simulate(text)
+        event["_source_extraction_mode"] = "local"
+        return [event]
 
 
-def batch_extract_event_with_api(texts, batch_size=10):
+def extract_event_with_api(text):
+    events = extract_events_with_api(text)
+    return _normalize_event_schema(events[0], source_extraction_mode="api") if events else _normalize_event_schema({})
+
+
+def batch_extract_event_with_api(texts, batch_size=5):
     results = []
     for start in range(0, len(texts), batch_size):
         batch = texts[start:start + batch_size]
         items = "\n\n".join([f"编号{idx + 1}: {t}" for idx, t in enumerate(batch)])
-        prompt = f"""
-请按照编号顺序，从下面多个文本中抽取结构化事件信息，返回一个纯 JSON 数组。
-不要添加任何说明性文字、编号、列表或解释。只输出 JSON 数组。
-
-文本列表：
-{items}
-
-输出格式示例：
-[
-  {{
-    "subject": "string",
-    "action": "string",
-    "technology": ["tech1", "tech2"],
-    "scene": "string",
-    "time": "string"
-  }}
-]
-
-重要：返回的数组必须包含正好 {len(batch)} 个对象，对应每个文本。
-"""
+        prompt = _weak_signal_batch_prompt(items, len(batch))
         try:
             provider, client = get_provider_and_client()
             if client is None or provider is None:
-                for text in batch:
-                    results.append(extract_event_simulate(text))
+                for idx, text in enumerate(batch):
+                    event = extract_event_simulate(text)
+                    event["_source_text_index"] = start + idx
+                    event["_source_extraction_mode"] = "local"
+                    results.append(event)
                 continue
-            
-            # 使用配置的事件抽取模型
+
             extraction_model = os.getenv("EXTRACTION_MODEL", os.getenv("OPENAI_MODEL", "Qwen/Qwen2.5-7B-Instruct"))
             print(f"[事件抽取] 调用API，批次: {start//batch_size + 1}，模型: {extraction_model}")
-            raw, usage_info, _ = chat_text(
-                prompt,
-                model=extraction_model,
-                temperature=0.1,
-                max_tokens=3000,
-                timeout=120,
-            )
+            last_error = None
+            max_attempts = _event_extraction_batch_retries() + 1
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    raw, usage_info, _ = chat_text(
+                        prompt,
+                        model=extraction_model,
+                        temperature=0.1,
+                        max_tokens=6000,
+                        timeout=_event_extraction_batch_timeout(),
+                    )
+                    break
+                except Exception as attempt_error:
+                    last_error = attempt_error
+                    if attempt < max_attempts:
+                        print(
+                            f"[事件抽取] 批次 {start//batch_size + 1} 第 {attempt} 次请求失败: "
+                            f"{attempt_error}，准备重试"
+                        )
+                    else:
+                        raise last_error
             print(f"[事件抽取] API响应接收完成，长度: {len(raw)}")
-            raw = raw.strip()
-            
-            # 移除可能的markdown代码块标记
-            if raw.startswith("```"):
-                lines = raw.split("\n")
-                if len(lines) > 1:
-                    raw = "\n".join(lines[1:])
-                if "```" in raw:
-                    raw = raw.rsplit("```", 1)[0]
-                raw = raw.strip()
-            
+
             if usage_info["prompt_tokens"] or usage_info["completion_tokens"]:
                 record_call(
                     call_type="事件抽取-批量",
@@ -1033,44 +1276,158 @@ def batch_extract_event_with_api(texts, batch_size=10):
                     completion_tokens=usage_info["completion_tokens"],
                     success=True,
                 )
-            
-            # 尝试解析JSON
+
             extracted = _parse_json_from_response(raw)
             if extracted is None:
-                # 尝试直接解析
-                try:
-                    extracted = json.loads(raw)
-                except json.JSONDecodeError:
-                    pass
-            
-            if isinstance(extracted, list) and extracted:
-                recovered_count = min(len(extracted), len(batch))
-                if len(extracted) != len(batch):
-                    print(
-                        f"[warning] 批量抽取仅恢复 {recovered_count}/{len(batch)} 条，缺失部分退回逐条抽取"
-                    )
-                for event, source_text in zip(extracted[:recovered_count], batch[:recovered_count]):
-                    _fix_event_dict(event)
-                    _normalize_event_technologies(event, source_text, source_text, source_extraction_mode="api")
-                results.extend(extracted[:recovered_count])
-                for text in batch[recovered_count:]:
-                    results.append(extract_event_with_api(text))
-            else:
-                print("[warning] 批量抽取返回内容无法解析为符合长度的列表，退回逐条抽取")
+                print("[warning] 批量抽取返回内容无法解析，退回逐条抽取")
                 print("[debug] 原始响应：", raw[:800])
-                for text in batch:
-                    results.append(extract_event_with_api(text))
+                for idx, text in enumerate(batch):
+                    for event in extract_events_with_api(text):
+                        event["_source_text_index"] = start + idx
+                        results.append(event)
+                continue
+            if isinstance(extracted, list) and not extracted:
+                print(
+                    f"[事件抽取] 批次 {start//batch_size + 1} 返回空数组 []，解析事件数: 0"
+                )
+                if _retry_empty_batch_enabled() and any(_safe_event_text(text) for text in batch):
+                    print("[事件抽取] 空批次启用逐条重试，避免批量模式漏抽")
+                    retry_count = 0
+                    for idx, text in enumerate(batch):
+                        for event in extract_events_with_api(text):
+                            event["_source_text_index"] = start + idx
+                            results.append(event)
+                            retry_count += 1
+                    print(f"[事件抽取] 空批次逐条重试完成，补回事件数: {retry_count}")
+                continue
+
+            extracted_events = _event_records_from_parsed(extracted)
+            if not extracted_events:
+                print(
+                    f"[事件抽取] 批次 {start//batch_size + 1} 解析后事件数: 0，原始响应预览: {raw[:120]}"
+                )
+                continue
+            print(
+                f"[事件抽取] 批次 {start//batch_size + 1} 解析事件数: {len(extracted_events)}"
+            )
+
+            all_missing_doc_index = all(_batch_local_index(event, len(batch)) is None for event in extracted_events)
+            if all_missing_doc_index and len(extracted_events) == len(batch):
+                for idx, event in enumerate(extracted_events):
+                    event = _strip_extraction_mapping_fields(event)
+                    event["_source_text_index"] = start + idx
+                    results.append(event)
+                continue
+            if all_missing_doc_index:
+                print("[warning] 批量抽取返回多事件但缺少 doc_index，退回逐条抽取")
+                for idx, text in enumerate(batch):
+                    for event in extract_events_with_api(text):
+                        event["_source_text_index"] = start + idx
+                        results.append(event)
+                continue
+
+            unresolved_count = 0
+            for event in extracted_events:
+                local_index = _batch_local_index(event, len(batch))
+                if local_index is None:
+                    unresolved_count += 1
+                    continue
+                event = _strip_extraction_mapping_fields(event)
+                event["_source_text_index"] = start + local_index
+                results.append(event)
+            if unresolved_count:
+                print(f"[warning] 批量抽取忽略 {unresolved_count} 条无法映射到原文编号的事件")
         except Exception as e:
-            print(f"批量API调用失败: {e}")
+            use_local_timeout_fallback = "timed out" in str(e).lower() and _timeout_fallback_to_local_enabled()
+            fallback_label = "本地规则兜底" if use_local_timeout_fallback else "逐条抽取"
+            print(f"[事件抽取] 批量API调用失败: {e}，退回{fallback_label}")
             record_call(
                 call_type="事件抽取-批量",
                 prompt_tokens=0,
                 completion_tokens=0,
                 success=False,
             )
-            for text in batch:
-                results.append(extract_event_with_api(text))
+            fallback_count = 0
+            for idx, text in enumerate(batch):
+                fallback_events = [extract_event_simulate(text)] if use_local_timeout_fallback else extract_events_with_api(text)
+                for event in fallback_events:
+                    event["_source_text_index"] = start + idx
+                    if use_local_timeout_fallback:
+                        event["_source_extraction_mode"] = "local"
+                    results.append(event)
+                    fallback_count += 1
+            print(f"[事件抽取] 批次 {start//batch_size + 1} {fallback_label}完成，补回事件数: {fallback_count}")
     return results
+
+
+def _compact_local_phrase(*values, limit=120):
+    parts = []
+    for value in values:
+        if isinstance(value, (list, tuple, set)):
+            parts.extend(str(item).strip() for item in value if str(item).strip())
+        else:
+            text = str(value or "").strip()
+            if text:
+                parts.append(text)
+    return " ".join(_dedupe_preserve_order(parts))[:limit].strip()
+
+
+def _local_event_type(text_lower, source_hint=""):
+    source_hint = str(source_hint or "").strip().lower()
+    if source_hint in {"paper", "patent", "news", "report"}:
+        if source_hint == "paper":
+            return "research"
+        if source_hint == "patent":
+            return "patent_application"
+        if source_hint == "news":
+            return "market_signal"
+        if source_hint == "report":
+            return "market_signal"
+    if any(word in text_lower for word in ["patent", "专利", "申请", "发明"]):
+        return "patent_application"
+    if any(word in text_lower for word in ["prototype", "原型", "样机", "demo", "试点"]):
+        return "prototype"
+    if any(word in text_lower for word in ["deploy", "deployment", "落地", "部署", "量产", "commercial"]):
+        return "deployment"
+    if any(word in text_lower for word in ["investment", "funding", "融资", "投资"]):
+        return "investment"
+    if any(word in text_lower for word in ["policy", "regulation", "政策", "标准", "指南"]):
+        return "policy"
+    return "research"
+
+
+def _local_maturity_stage(text_lower, event_type):
+    if any(word in text_lower for word in ["scaled", "量产", "规模化", "commercial", "commercialized"]):
+        return "scaled"
+    if any(word in text_lower for word in ["deployment", "deployed", "部署", "落地", "early adoption"]):
+        return "early_adoption"
+    if any(word in text_lower for word in ["pilot", "试点", "示范"]):
+        return "pilot"
+    if any(word in text_lower for word in ["prototype", "原型", "样机", "demo"]):
+        return "prototype"
+    if event_type == "patent_application":
+        return "idea"
+    return "lab"
+
+
+def _local_weak_signal_reason(
+    mechanism_tokens,
+    object_tokens,
+    data_tokens,
+    method_tokens,
+    technologies,
+    source_hint="",
+):
+    reasons = []
+    if mechanism_tokens and (object_tokens or data_tokens or method_tokens):
+        reasons.append("机制与对象/数据/方法约束同时出现，具备候选成形线索")
+    if len(_dedupe_preserve_order(technologies)) >= 2:
+        reasons.append("涉及多个技术对象，存在组合式变化迹象")
+    if data_tokens and method_tokens:
+        reasons.append("数据模态与方法特征共同变化，可能对应能力边界变化")
+    if str(source_hint or "").strip().lower() in {"paper", "patent"}:
+        reasons.append("来源偏早期研究或专利，具备低关注弱信号特征")
+    return "；".join(reasons)
 
 
 def extract_event_simulate(text):
@@ -1163,19 +1520,74 @@ def extract_event_simulate(text):
     if year_match:
         time = year_match.group(1)
 
+    mechanism_tokens = _dedupe_preserve_order(extract_mechanism_core_tokens(text, action))
+    task_tokens = _dedupe_preserve_order(extract_task_constraint_tokens(text, scene))
+    object_tokens = _dedupe_preserve_order(extract_object_modifier_tokens(text, scene, " ".join(technologies)))
+    data_tokens = _dedupe_preserve_order(extract_data_modifier_tokens(text))
+    method_tokens = _dedupe_preserve_order(extract_method_modifier_tokens(text, action))
+    event_type = _local_event_type(text_lower)
+    maturity_stage = _local_maturity_stage(text_lower, event_type)
+    primary_technology = next(
+        (tech for tech in technologies if str(tech).strip() and str(tech).strip() != "未知"),
+        "",
+    )
+    technical_object = _compact_local_phrase(
+        " ".join(object_tokens[:2]),
+        primary_technology,
+        limit=80,
+    )
+    mechanism = _compact_local_phrase(mechanism_tokens[:2], action if action != "未知" else "", limit=80)
+    task = _compact_local_phrase(task_tokens[:2], scene if scene != "未知" else "", limit=80)
+    evidence_span = _strip_html_noise(text)[:240]
+    weak_signal_reason = _local_weak_signal_reason(
+        mechanism_tokens,
+        object_tokens,
+        data_tokens,
+        method_tokens,
+        technologies,
+    )
+
     return {
+        "event_schema_version": WEAK_SIGNAL_EVENT_SCHEMA_VERSION,
         "subject": subject,
         "action": action,
         "technology": technologies,
         "scene": scene,
         "time": time,
+        "event_type": event_type,
+        "technical_object": technical_object,
+        "mechanism": mechanism,
+        "task": task,
+        "data_modality": data_tokens,
+        "method": method_tokens,
+        "capability_change": "、".join(_dedupe_preserve_order([task, mechanism])) if task and mechanism else "",
+        "problem_solved": task,
+        "maturity_stage": maturity_stage,
+        "novelty_signal": "、".join(_dedupe_preserve_order(object_tokens + data_tokens + method_tokens)[:4]),
+        "adoption_signal": "",
+        "cross_domain_signal": "、".join(_dedupe_preserve_order(data_tokens + method_tokens)[:4]),
+        "weak_signal_reason": weak_signal_reason,
+        "uncertainty": "本地规则回退抽取，需人工复核",
+        "evidence_span": evidence_span,
+        "confidence": 0.55 if evidence_span else 0.0,
+        "mechanism_core_tokens": mechanism_tokens,
+        "task_constraint_tokens": task_tokens,
+        "object_modifier_tokens": object_tokens,
+        "data_modifier_tokens": data_tokens,
+        "method_modifier_tokens": method_tokens,
     }
 
 
-def extract_event(text, use_api=True):
+def extract_events(text, use_api=True):
     if use_api and _api_config_available():
-        return extract_event_with_api(text)
-    return extract_event_simulate(text)
+        return extract_events_with_api(text)
+    return [extract_event_simulate(text)]
+
+
+def extract_event(text, use_api=True):
+    events = extract_events(text, use_api=use_api)
+    mode = "api" if use_api and _api_config_available() else "local"
+    return _normalize_event_schema(events[0], source_extraction_mode=mode) if events else _normalize_event_schema({})
 
 
 def assess_weak_signal_event(event, source_row):
@@ -1239,7 +1651,32 @@ def assess_weak_signal_event(event, source_row):
     return event
 
 
-def process_events(df, use_api=True, batch_size=10, cache_path=None, refresh_cache=False):
+def _prepare_event_for_source_row(event, row, doc_event_index=1, source_extraction_mode="local"):
+    event = dict(event or {})
+    event["id"] = row.get("id", event.get("id", ""))
+    _normalize_event_technologies(
+        event,
+        row.get("text", ""),
+        row.get("title", ""),
+        source_extraction_mode=source_extraction_mode,
+        source_type=row.get("source_type", ""),
+    )
+    assess_weak_signal_event(event, row)
+    source_date = _source_date_text(row)
+    if source_date:
+        event["date"] = source_date
+        event["event_date"] = source_date
+    event["source_type"] = row.get("source_type", "")
+    event["title"] = row.get("title", "")
+    return _normalize_event_schema(
+        event,
+        source_row=row,
+        doc_event_index=doc_event_index,
+        source_extraction_mode=source_extraction_mode,
+    )
+
+
+def process_events(df, use_api=True, batch_size=5, cache_path=None, refresh_cache=False):
     event_columns = _event_cache_columns()
     if df is None or df.empty:
         return pd.DataFrame(columns=event_columns)
@@ -1268,65 +1705,108 @@ def process_events(df, use_api=True, batch_size=10, cache_path=None, refresh_cac
         df['id'] = [f"row_{i}" for i in range(len(df))]
         print("[INFO] 自动生成 id 列")
 
-    expected_ids = df["id"].astype(str).tolist() if "id" in df.columns else None
+    source_df = df.reset_index(drop=True)
+    expected_ids = source_df["id"].astype(str).tolist() if "id" in source_df.columns else None
     if not refresh_cache:
         cached_df = load_event_cache(cache_path, expected_ids=expected_ids)
         if cached_df is not None and not cached_df.empty:
             return cached_df.reindex(columns=event_columns, fill_value=None)
 
     if use_api and _api_config_available():
-        texts = df["text"].tolist()
+        texts = source_df["text"].tolist()
         print(f"[事件抽取] 使用API，文本数量: {len(texts)}，批次大小: {batch_size}")
-        events = batch_extract_event_with_api(texts, batch_size=batch_size)
-        print(f"[事件抽取] API调用完成，事件数量: {len(events)}")
-        if len(events) != len(df):
-            print("[warning] 批量抽取结果数量与输入数量不一致，退回逐条抽取")
-        else:
-            normalized_events = []
-            for event, (_, row) in zip(events, df.iterrows()):
-                event["id"] = row["id"]
-                _normalize_event_technologies(
-                    event,
-                    row.get("text", ""),
-                    row.get("title", ""),
-                    source_extraction_mode="api",
-                    source_type=row.get("source_type", ""),
-                )
-                assess_weak_signal_event(event, row)
-                source_date = _source_date_text(row)
-                if source_date:
-                    event["date"] = source_date
-                    event["event_date"] = source_date
-                event["source_type"] = row.get("source_type", "")
-                event["title"] = row.get("title", "")
-                normalized_events.append(event)
-            events_df = pd.DataFrame(normalized_events).reindex(columns=event_columns, fill_value=None)
-            save_event_cache(
-                cache_path,
-                events_df,
-                metadata={"mode": "api", "batch_size": batch_size, "rows": len(events_df)},
+        extracted_events = batch_extract_event_with_api(texts, batch_size=batch_size)
+        print(f"[事件抽取] API调用完成，事件数量: {len(extracted_events)}")
+        normalized_events = []
+        per_doc_counts = {}
+        max_events_per_doc = _event_extraction_max_events_per_doc()
+        min_confidence = _event_extraction_min_confidence()
+        events_by_source_index = {}
+        for event in extracted_events:
+            try:
+                source_index = int(event.get("_source_text_index"))
+            except (KeyError, TypeError, ValueError):
+                print("[warning] 忽略一条缺少来源索引的抽取事件")
+                continue
+            if source_index < 0 or source_index >= len(source_df):
+                print("[warning] 忽略一条来源索引越界的抽取事件")
+                continue
+            events_by_source_index.setdefault(source_index, []).append(dict(event))
+
+        filtered_total = 0
+        trimmed_total = 0
+        for source_index, source_events in events_by_source_index.items():
+            selected_events, filtered_count, trimmed_count = _filter_events_for_doc(
+                source_events,
+                max_events_per_doc=max_events_per_doc,
+                min_confidence=min_confidence,
             )
-            return events_df
+            filtered_total += filtered_count
+            trimmed_total += trimmed_count
+            if filtered_count or trimmed_count:
+                print(
+                    f"[事件抽取] 文档{source_index} 控制多事件: "
+                    f"保留{len(selected_events)}条，低置信过滤{filtered_count}条，上限截断{trimmed_count}条"
+                )
+            for event in selected_events:
+                event.pop("_source_text_index", None)
+                source_mode = event.pop("_source_extraction_mode", "api")
+                row = source_df.iloc[source_index]
+                source_id = str(row.get("id", ""))
+                per_doc_counts[source_id] = per_doc_counts.get(source_id, 0) + 1
+                normalized_events.append(
+                    _prepare_event_for_source_row(
+                        event,
+                        row,
+                        doc_event_index=per_doc_counts[source_id],
+                        source_extraction_mode=source_mode,
+                    )
+                )
+        if filtered_total or trimmed_total:
+            print(f"[事件抽取] 多事件控制汇总: 低置信过滤{filtered_total}条，上限截断{trimmed_total}条")
+        events_df = pd.DataFrame(normalized_events).reindex(columns=event_columns, fill_value=None)
+        save_event_cache(
+            cache_path,
+            events_df,
+            metadata={
+                "mode": "api",
+                "batch_size": batch_size,
+                "rows": len(events_df),
+                "source_ids": expected_ids or [],
+                "event_schema_version": WEAK_SIGNAL_EVENT_SCHEMA_VERSION,
+                "max_events_per_doc": max_events_per_doc,
+                "min_confidence": min_confidence,
+            },
+        )
+        return events_df
 
     events = []
-    for _, row in df.iterrows():
-        event = extract_event(row["text"], use_api)
-        event["id"] = row["id"]
-        _normalize_event_technologies(
-            event,
-            row.get("text", ""),
-            row.get("title", ""),
-            source_extraction_mode="local",
-            source_type=row.get("source_type", ""),
+    per_doc_counts = {}
+    max_events_per_doc = _event_extraction_max_events_per_doc()
+    min_confidence = _event_extraction_min_confidence()
+    filtered_total = 0
+    trimmed_total = 0
+    for _, row in source_df.iterrows():
+        source_id = str(row.get("id", ""))
+        doc_events, filtered_count, trimmed_count = _filter_events_for_doc(
+            extract_events(row["text"], use_api=False),
+            max_events_per_doc=max_events_per_doc,
+            min_confidence=min_confidence,
         )
-        assess_weak_signal_event(event, row)
-        source_date = _source_date_text(row)
-        if source_date:
-            event["date"] = source_date
-            event["event_date"] = source_date
-        event["source_type"] = row.get("source_type", "")
-        event["title"] = row.get("title", "")
-        events.append(event)
+        filtered_total += filtered_count
+        trimmed_total += trimmed_count
+        for event in doc_events:
+            per_doc_counts[source_id] = per_doc_counts.get(source_id, 0) + 1
+            events.append(
+                _prepare_event_for_source_row(
+                    event,
+                    row,
+                    doc_event_index=per_doc_counts[source_id],
+                    source_extraction_mode="local",
+                )
+            )
+    if filtered_total or trimmed_total:
+        print(f"[事件抽取] 多事件控制汇总: 低置信过滤{filtered_total}条，上限截断{trimmed_total}条")
     events_df = pd.DataFrame(events).reindex(columns=event_columns, fill_value=None)
     save_event_cache(
         cache_path,
@@ -1335,6 +1815,10 @@ def process_events(df, use_api=True, batch_size=10, cache_path=None, refresh_cac
             "mode": "api" if use_api and _api_config_available() else "local",
             "batch_size": batch_size,
             "rows": len(events_df),
+            "source_ids": expected_ids or [],
+            "event_schema_version": WEAK_SIGNAL_EVENT_SCHEMA_VERSION,
+            "max_events_per_doc": max_events_per_doc,
+            "min_confidence": min_confidence,
         },
     )
     return events_df

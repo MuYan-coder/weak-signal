@@ -8,7 +8,19 @@ import re
 
 import pandas as pd
 
-from .tech_lexicon import BARE_MECHANISM_CORES, has_non_scope_constraint, normalize_proxy_token
+from .event_schema import coerce_event_list, safe_event_text
+from .tech_lexicon import (
+    BARE_MECHANISM_CORES,
+    detect_supported_observation_scopes,
+    extract_data_modifier_tokens,
+    extract_mechanism_core_tokens,
+    extract_method_modifier_tokens,
+    extract_object_modifier_tokens,
+    extract_scene_tokens,
+    extract_task_constraint_tokens,
+    has_non_scope_constraint,
+    normalize_proxy_token,
+)
 
 
 MECHANISM_LABELS = {
@@ -1678,6 +1690,272 @@ def _normalize_candidate_units(raw_value):
     return []
 
 
+def _event_list_field(event, field):
+    return coerce_event_list(event.get(field))
+
+
+def _event_text_field(event, field):
+    return safe_event_text(event.get(field))
+
+
+def _schema_field_text(event):
+    parts = [
+        _event_text_field(event, "technical_object"),
+        _event_text_field(event, "mechanism"),
+        _event_text_field(event, "task"),
+        _event_text_field(event, "capability_change"),
+        _event_text_field(event, "problem_solved"),
+        _event_text_field(event, "novelty_signal"),
+        _event_text_field(event, "cross_domain_signal"),
+        _event_text_field(event, "scene"),
+        _event_text_field(event, "action"),
+        " ".join(str(item) for item in _event_list_field(event, "technology")),
+        " ".join(str(item) for item in _event_list_field(event, "data_modality")),
+        " ".join(str(item) for item in _event_list_field(event, "method")),
+    ]
+    return " ".join(part for part in parts if str(part or "").strip())
+
+
+def _has_schema_candidate_fields(event):
+    text_fields = [
+        "technical_object",
+        "mechanism",
+        "task",
+        "capability_change",
+        "problem_solved",
+        "novelty_signal",
+        "cross_domain_signal",
+    ]
+    list_fields = [
+        "data_modality",
+        "method",
+        "mechanism_core_tokens",
+        "task_constraint_tokens",
+        "object_modifier_tokens",
+        "data_modifier_tokens",
+        "method_modifier_tokens",
+    ]
+    return any(_event_text_field(event, field) for field in text_fields) or any(
+        _event_list_field(event, field) for field in list_fields
+    )
+
+
+def _normalize_schema_token(value):
+    token = normalize_proxy_token(value)
+    return token or str(value or "").strip()
+
+
+def _schema_tokens_from_fields(event, explicit_field, extractor, *source_fields):
+    values = []
+    values.extend(_event_list_field(event, explicit_field))
+    texts = [_event_text_field(event, field) for field in source_fields]
+    values.extend(extractor(*texts))
+    return _dedupe_preserve_order(
+        _normalize_schema_token(value)
+        for value in values
+        if str(value or "").strip()
+    )
+
+
+def _schema_object_tokens(event):
+    values = []
+    values.extend(_event_list_field(event, "object_modifier_tokens"))
+    technical_object = _event_text_field(event, "technical_object")
+    values.extend(
+        extract_object_modifier_tokens(
+            technical_object,
+            _event_text_field(event, "task"),
+            _event_text_field(event, "scene"),
+            " ".join(str(item) for item in _event_list_field(event, "technology")),
+        )
+    )
+    if technical_object and not values:
+        values.append(technical_object)
+    return _dedupe_preserve_order(
+        _normalize_schema_token(value)
+        for value in values
+        if str(value or "").strip()
+    )
+
+
+def _schema_candidate_raw_text(
+    technical_object,
+    object_tokens,
+    data_tokens,
+    method_tokens,
+    mechanism_tokens,
+    task_tokens,
+):
+    raw_parts = []
+    raw_parts.extend(object_tokens[:2])
+    raw_parts.extend(data_tokens[:2])
+    raw_parts.extend(method_tokens[:2])
+    raw_parts.extend(mechanism_tokens[:2])
+    raw_parts.extend(task_tokens[:2])
+    if technical_object:
+        raw_parts.insert(0, technical_object)
+    return " ".join(_dedupe_preserve_order(raw_parts)).strip()
+
+
+def _schema_relation_summary(object_tokens, task_tokens, data_tokens, method_tokens, mechanism_tokens):
+    parts = []
+    if data_tokens:
+        parts.append(f"data={data_tokens[0]}")
+    if object_tokens:
+        parts.append(f"object={object_tokens[0]}")
+    if task_tokens:
+        parts.append(f"task={task_tokens[0]}")
+    if method_tokens:
+        parts.append(f"method={method_tokens[0]}")
+    if mechanism_tokens:
+        parts.append(f"mechanism={mechanism_tokens[0]}")
+    return " | ".join(parts)
+
+
+def _schema_candidate_units(event, observation_scopes):
+    event = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
+    if not _has_schema_candidate_fields(event):
+        return []
+    technical_object = _event_text_field(event, "technical_object")
+    mechanism_tokens = _schema_tokens_from_fields(
+        event,
+        "mechanism_core_tokens",
+        extract_mechanism_core_tokens,
+        "mechanism",
+        "action",
+        "technical_object",
+        "evidence_span",
+    )
+    task_tokens = _schema_tokens_from_fields(
+        event,
+        "task_constraint_tokens",
+        extract_task_constraint_tokens,
+        "task",
+        "problem_solved",
+        "capability_change",
+        "scene",
+        "technical_object",
+    )
+    object_tokens = _schema_object_tokens(event)
+    data_tokens = _schema_tokens_from_fields(
+        event,
+        "data_modifier_tokens",
+        extract_data_modifier_tokens,
+        "technical_object",
+        "task",
+        "evidence_span",
+    )
+    data_tokens = _dedupe_preserve_order(data_tokens + [_normalize_schema_token(item) for item in _event_list_field(event, "data_modality")])
+    method_tokens = _schema_tokens_from_fields(
+        event,
+        "method_modifier_tokens",
+        extract_method_modifier_tokens,
+        "mechanism",
+        "technical_object",
+        "evidence_span",
+    )
+    method_tokens = _dedupe_preserve_order(method_tokens + [_normalize_schema_token(item) for item in _event_list_field(event, "method")])
+    scene_tokens = _dedupe_preserve_order(
+        extract_scene_tokens(
+            _event_text_field(event, "scene"),
+            _event_text_field(event, "task"),
+            _event_text_field(event, "technical_object"),
+        )
+    )
+    schema_text = _schema_field_text(event)
+    scope_names = _normalize_scope_names(observation_scopes) or detect_supported_observation_scopes(schema_text)
+    if not scope_names:
+        return []
+    if not mechanism_tokens:
+        return []
+
+    has_anchor = bool(object_tokens or task_tokens or data_tokens or method_tokens or technical_object)
+    if not has_anchor:
+        return []
+
+    raw_candidate_text = _schema_candidate_raw_text(
+        technical_object,
+        object_tokens,
+        data_tokens,
+        method_tokens,
+        mechanism_tokens,
+        task_tokens,
+    )
+    if not raw_candidate_text:
+        return []
+
+    source_mode = _event_text_field(event, "source_extraction_mode") or "schema"
+    schema_source_mode = source_mode if source_mode.endswith("_schema") else f"{source_mode}_schema"
+    if schema_source_mode == "schema_schema":
+        schema_source_mode = "schema"
+    relation_summary = _schema_relation_summary(
+        object_tokens,
+        task_tokens,
+        data_tokens,
+        method_tokens,
+        mechanism_tokens,
+    )
+    return [
+        {
+            "raw_phrase": raw_candidate_text,
+            "raw_candidate_text": raw_candidate_text,
+            "raw_phrase_type": "schema_object_mechanism",
+            "mechanism_core": mechanism_tokens[0],
+            "secondary_mechanism_cores": mechanism_tokens[1:],
+            "scope_names": scope_names,
+            "mechanism_core_tokens": mechanism_tokens,
+            "task_constraint_tokens": task_tokens,
+            "object_modifier_tokens": object_tokens,
+            "data_modifier_tokens": data_tokens,
+            "method_modifier_tokens": method_tokens,
+            "scene_tokens": scene_tokens,
+            "action_tokens": mechanism_tokens,
+            "is_scope_echo": False,
+            "has_mechanism_core": True,
+            "has_task_constraint": bool(task_tokens),
+            "scope_context_supported": True,
+            "has_non_scope_constraint": True,
+            "generic_core_only": False,
+            "source_extraction_mode": schema_source_mode,
+            "scope_match_mode": _event_text_field(event, "scope_match_mode") or "schema_field",
+            "relation_target": object_tokens[0] if object_tokens else technical_object,
+            "relation_task": task_tokens[0] if task_tokens else "",
+            "relation_data_modality": data_tokens[0] if data_tokens else "",
+            "relation_method": method_tokens[0] if method_tokens else "",
+            "relation_summary": relation_summary,
+            "relation_signature": relation_summary,
+        }
+    ]
+
+
+def _merge_candidate_units(schema_units, rule_units):
+    merged = []
+    seen = set()
+    for unit in list(schema_units or []) + list(rule_units or []):
+        if not isinstance(unit, dict):
+            continue
+        signature = (
+            str(unit.get("raw_candidate_text") or unit.get("raw_phrase") or "").strip().lower(),
+            tuple(_normalize_scope_names(unit.get("scope_names", []))),
+            tuple(_dedupe_preserve_order(unit.get("mechanism_core_tokens", []))),
+            tuple(_dedupe_preserve_order(unit.get("task_constraint_tokens", []))),
+            tuple(_dedupe_preserve_order(unit.get("object_modifier_tokens", []))),
+            tuple(_dedupe_preserve_order(unit.get("data_modifier_tokens", []))),
+            tuple(_dedupe_preserve_order(unit.get("method_modifier_tokens", []))),
+        )
+        if signature in seen:
+            continue
+        merged.append(unit)
+        seen.add(signature)
+    return merged
+
+
+def _candidate_units_for_event(event, observation_scopes):
+    schema_units = _schema_candidate_units(event, observation_scopes)
+    rule_units = _normalize_candidate_units(event.get("candidate_units", []))
+    return _merge_candidate_units(schema_units, rule_units)
+
+
 def _pick_constraint(values, mechanism_core, generic_tokens):
     values = _dedupe_preserve_order(values)
     mechanism_core = str(mechanism_core or "").strip()
@@ -3250,7 +3528,7 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame) -> pd.
         event_id = event.get("id")
         source_type = source_type_map.get(event_id, str(event.get("source_type", "")))
         observation_scopes = _normalize_scope_names(event.get("observation_scopes", []))
-        candidate_units = _normalize_candidate_units(event.get("candidate_units", []))
+        candidate_units = _candidate_units_for_event(event, observation_scopes)
 
         for scope in observation_scopes:
             scope_metric_payload = _build_metric_payload(scope_items_map.get(scope, []), display_name=SCOPE_LABELS.get(scope, scope), raw_candidate_text=scope)

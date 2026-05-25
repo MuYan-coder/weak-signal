@@ -1,4 +1,4 @@
-"""Key-core technology potential scoring for v2.7."""
+"""Key-core technology potential scoring for v0.02."""
 
 from __future__ import annotations
 

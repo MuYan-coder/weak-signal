@@ -1,4 +1,4 @@
-"""Temporal validation for v2.7 key-core potential scoring.
+"""Temporal validation for v0.02 key-core potential scoring.
 
 This module keeps the validation deliberately lightweight: it builds candidate
 level time-window features from already extracted evidence, records why a

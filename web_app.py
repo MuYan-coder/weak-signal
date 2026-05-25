@@ -20,7 +20,7 @@ import streamlit as st
 from pathlib import Path
 
 st.set_page_config(
-    page_title="产业技术预见智能体",
+    page_title="产业技术弱信号识别系统",
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -471,8 +471,8 @@ def render_sidebar():
 
 def render_header():
     """渲染页面头部"""
-    st.markdown('<div class="main-header">🔍 产业技术预见智能体 v2.7</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">基于大模型驱动的产业技术弱信号识别系统</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">🔍 产业技术弱信号识别系统</div>', unsafe_allow_html=True)
+    ##st.markdown('<div class="sub-header">基于大模型驱动的产业技术弱信号识别系统</div>', unsafe_allow_html=True)
 
 def render_data_source_selection(sources):
     """渲染数据源选择"""
@@ -984,6 +984,45 @@ def render_results(results):
             return []
         return [value]
 
+    def table_key_suffix(value):
+        text = safe_text(value) or "active"
+        return re.sub(r"[^0-9A-Za-z_\-]+", "_", text)[-48:] or "active"
+
+    def render_paginated_dataframe(df, columns, key_prefix, page_size=20, empty_message="暂无可展示数据。"):
+        if df is None or df.empty:
+            st.info(empty_message)
+            return pd.DataFrame()
+
+        view_df = df[columns].copy() if columns else df.copy()
+        total_rows = len(view_df)
+        total_pages = max(1, (total_rows + page_size - 1) // page_size)
+        result_suffix = table_key_suffix(results.get('result_dir', 'active'))
+        page_key = f"{key_prefix}_page_{result_suffix}"
+        if page_key in st.session_state and int(st.session_state[page_key]) > total_pages:
+            st.session_state[page_key] = total_pages
+
+        page_cols = st.columns([1, 1, 2])
+        with page_cols[0]:
+            st.metric("记录数", total_rows)
+        with page_cols[1]:
+            st.metric("每页展示", page_size)
+        with page_cols[2]:
+            page_number = int(st.number_input(
+                "页码",
+                min_value=1,
+                max_value=total_pages,
+                value=min(int(st.session_state.get(page_key, 1)), total_pages),
+                step=1,
+                key=page_key,
+            ))
+
+        start = (page_number - 1) * page_size
+        end = min(start + page_size, total_rows)
+        st.caption(f"第 {page_number}/{total_pages} 页，展示第 {start + 1}-{end} 条")
+        page_df = view_df.iloc[start:end].copy()
+        st.dataframe(page_df, use_container_width=True)
+        return page_df
+
     def render_horizontal_bar_chart(series, category_label="类别", value_label="数量", max_rows=30):
         if series is None:
             return
@@ -1091,8 +1130,8 @@ def render_results(results):
             and isinstance(tech_chain_mapping_df, pd.DataFrame)
             and not tech_chain_mapping_df.empty
         ):
-            st.markdown("### v2.7 质量与技术链概览")
-            v26_cols = st.columns(3)
+            st.markdown("### v0.02 质量与技术链概览")
+            v26_cols = st.columns(4)
             with v26_cols[0]:
                 quality_series = (
                     event_quality_df['event_quality_score']
@@ -1112,6 +1151,14 @@ def render_results(results):
             with v26_cols[2]:
                 coverage = mapped_count / max(len(tech_chain_mapping_df), 1)
                 st.metric("映射覆盖率", f"{coverage:.0%}")
+            with v26_cols[3]:
+                foresight_series = (
+                    event_quality_df['foresight_relevance_score']
+                    if 'foresight_relevance_score' in event_quality_df.columns
+                    else pd.Series([0] * len(event_quality_df))
+                )
+                avg_foresight = pd.to_numeric(foresight_series, errors='coerce').fillna(0).mean()
+                st.metric("平均预见相关度", f"{avg_foresight:.1f}")
 
         temporal_validation_df = results.get('temporal_validation_df', pd.DataFrame())
         key_core_scored_df = results.get('key_core_scored_df', pd.DataFrame())
@@ -1208,15 +1255,45 @@ def render_results(results):
                 'risk_flags',
             ]
             shortlist_cols = [c for c in shortlist_cols if c in final_shortlist_df.columns]
-            st.dataframe(final_shortlist_df[shortlist_cols].head(20), use_container_width=True)
+            render_paginated_dataframe(
+                final_shortlist_df,
+                shortlist_cols,
+                "final_shortlist_table",
+                page_size=20,
+                empty_message="当前结果未包含最终研究短名单。",
+            )
     
     with tabs[1]:
         st.markdown("### 📋 抽取的事件要素")
         events_df = results['events_df']
         if not events_df.empty:
-            display_cols = ['subject', 'action', 'technology', 'scene', 'time', 'source_type']
+            display_cols = [
+                'event_id',
+                'event_schema_version',
+                'schema_migration_mode',
+                'subject',
+                'action',
+                'technology',
+                'technical_object',
+                'mechanism',
+                'task',
+                'data_modality',
+                'method',
+                'evidence_span',
+                'confidence',
+                'source_extraction_mode',
+                'scene',
+                'time',
+                'source_type',
+            ]
             display_cols = [c for c in display_cols if c in events_df.columns]
-            st.dataframe(events_df[display_cols].head(20), use_container_width=True)
+            render_paginated_dataframe(
+                events_df,
+                display_cols,
+                "events_table",
+                page_size=20,
+                empty_message="当前结果未包含抽取事件。",
+            )
 
     with tabs[2]:
         st.markdown("### 🧾 事件质量评分")
@@ -1230,13 +1307,23 @@ def render_results(results):
                 'event_completeness_score',
                 'tech_relevance_score',
                 'traceability_score',
+                'evidence_span_score',
+                'confidence_score',
+                'uncertainty_risk_score',
+                'foresight_relevance_score',
                 'source_reliability_score',
                 'non_marketing_score',
                 'event_quality_tier',
                 'event_quality_reason',
             ]
             quality_cols = [c for c in quality_cols if c in event_quality_df.columns]
-            st.dataframe(event_quality_df[quality_cols].head(50), use_container_width=True)
+            render_paginated_dataframe(
+                event_quality_df,
+                quality_cols,
+                "event_quality_table",
+                page_size=20,
+                empty_message="当前结果未包含事件质量评分。",
+            )
             if 'event_quality_tier' in event_quality_df.columns:
                 st.markdown("#### 质量层级分布")
                 render_horizontal_bar_chart(event_quality_df['event_quality_tier'].value_counts(), "质量层级", "数量")
@@ -1265,9 +1352,18 @@ def render_results(results):
                 'family_priority',
                 'cluster_evidence_count',
                 'source_count',
+                'candidate_evidence_quality',
+                'candidate_evidence_foresight_relevance',
+                'high_foresight_evidence_count',
             ]
             display_cols = [c for c in display_cols if c in unique_candidates_df.columns]
-            st.dataframe(unique_candidates_df[display_cols].head(30), use_container_width=True)
+            render_paginated_dataframe(
+                unique_candidates_df,
+                display_cols,
+                "candidate_forms_table",
+                page_size=20,
+                empty_message="当前结果未包含候选对象。",
+            )
             
             if 'topic_granularity' in candidates_df.columns:
                 st.markdown("#### 主题粒度分布")
@@ -1286,7 +1382,13 @@ def render_results(results):
                 unique_scored_df,
                 ['weak_signal_score', 'hotspot_score', 'source_count', 'total_mentions']
             )
-            st.dataframe(sorted_df[score_cols].head(20), use_container_width=True)
+            render_paginated_dataframe(
+                sorted_df,
+                score_cols,
+                "scored_candidates_table",
+                page_size=20,
+                empty_message="当前结果未包含评分候选。",
+            )
             
             st.markdown("#### 评分分布")
             if 'weak_signal_score' in unique_scored_df.columns:
@@ -1318,7 +1420,13 @@ def render_results(results):
                 ]
                 rv_cols = [c for c in rv_cols if c in reverse_validation_df.columns]
                 if rv_cols:
-                    st.dataframe(reverse_validation_df[rv_cols].head(15), use_container_width=True)
+                    render_paginated_dataframe(
+                        reverse_validation_df,
+                        rv_cols,
+                        "reverse_validation_table",
+                        page_size=20,
+                        empty_message="当前结果未包含反向验证摘要。",
+                    )
     
     with tabs[5]:
         st.markdown("### 🎯 识别的弱信号")
@@ -2105,6 +2213,9 @@ def render_results(results):
                     ('source_id', evidence.get('source_id')),
                     ('追溯状态', evidence.get('traceability_status')),
                     ('证据质量分', evidence.get('event_quality_score')),
+                    ('预见相关度', evidence.get('foresight_relevance_score')),
+                    ('证据片段分', evidence.get('evidence_span_score')),
+                    ('置信度分', evidence.get('confidence_score')),
                     ('text_sha256', evidence.get('text_sha256')),
                 ]
                 audit_rows = [
@@ -2163,6 +2274,8 @@ def render_results(results):
                 'mechanism_core',
                 'weak_signal_score',
                 'candidate_evidence_quality',
+                'candidate_evidence_foresight_relevance',
+                'high_foresight_evidence_count',
                 'tech_chain_name',
                 'mapping_relation',
                 'signal_bucket',
@@ -2203,6 +2316,11 @@ def render_results(results):
                     for item in evidence_records
                     if safe_float(item.get('event_quality_score')) > 0
                 ]
+                foresight_scores = [
+                    safe_float(item.get('foresight_relevance_score'))
+                    for item in evidence_records
+                    if safe_float(item.get('foresight_relevance_score')) > 0
+                ]
                 years = [extract_year(item.get('date')) for item in evidence_records]
                 years = [year for year in years if year is not None]
                 trace_statuses = sorted({
@@ -2227,6 +2345,7 @@ def render_results(results):
                     'evidence_source_types': source_type_values,
                     'evidence_traceability_statuses': trace_statuses,
                     'max_evidence_quality': max(qualities) if qualities else 0.0,
+                    'max_evidence_foresight_relevance': max(foresight_scores) if foresight_scores else 0.0,
                     'min_evidence_year': min(years) if years else None,
                     'max_evidence_year': max(years) if years else None,
                     'has_evidence_url': any(bool(safe_text(item.get('url'))) for item in evidence_records),
@@ -2247,7 +2366,7 @@ def render_results(results):
                 options=["已确认弱信号", "证据不足/待复核", "全部"],
                 index=0,
             )
-            filter_cols = st.columns([1.4, 1.4, 1.1, 1.1])
+            filter_cols = st.columns([1.3, 1.3, 1.0, 1.0, 1.0])
             all_source_types = sorted({
                 source_type
                 for items in sorted_signals.get('evidence_source_types', pd.Series(dtype=object)).tolist()
@@ -2267,6 +2386,8 @@ def render_results(results):
             with filter_cols[2]:
                 min_quality_filter = st.slider("最低证据质量", 0.0, 10.0, 0.0, 0.5)
             with filter_cols[3]:
+                min_foresight_filter = st.slider("最低预见相关度", 0.0, 10.0, 0.0, 0.5)
+            with filter_cols[4]:
                 only_with_url = st.checkbox("仅带URL证据", value=False)
 
             available_years = [
@@ -2304,6 +2425,10 @@ def render_results(results):
             if min_quality_filter > 0 and 'max_evidence_quality' in filtered_signals.columns:
                 filtered_signals = filtered_signals[
                     pd.to_numeric(filtered_signals['max_evidence_quality'], errors='coerce').fillna(0) >= min_quality_filter
+                ]
+            if min_foresight_filter > 0 and 'max_evidence_foresight_relevance' in filtered_signals.columns:
+                filtered_signals = filtered_signals[
+                    pd.to_numeric(filtered_signals['max_evidence_foresight_relevance'], errors='coerce').fillna(0) >= min_foresight_filter
                 ]
             if only_with_url and 'has_evidence_url' in filtered_signals.columns:
                 filtered_signals = filtered_signals[filtered_signals['has_evidence_url'].fillna(False).astype(bool)]
@@ -2418,6 +2543,7 @@ def render_results(results):
                     family_consistency = safe_text(row.get('family_semantic_consistency'))
                     alignment_risk = safe_text(row.get('release_alignment_risk'))
                     evidence_quality = safe_text(row.get('candidate_evidence_quality'))
+                    evidence_foresight = safe_text(row.get('candidate_evidence_foresight_relevance'))
                     tech_chain_name = safe_text(row.get('tech_chain_name'))
                     mapping_relation = safe_text(row.get('mapping_relation'))
                     mapping_confidence = safe_text(row.get('mapping_confidence'))
@@ -2440,6 +2566,8 @@ def render_results(results):
                         st.markdown(f"**发布对齐风险**: {alignment_risk}")
                     if evidence_quality:
                         st.markdown(f"**证据质量**: {evidence_quality}")
+                    if evidence_foresight:
+                        st.markdown(f"**证据预见相关度**: {evidence_foresight}")
                     if tech_chain_name:
                         mapping_parts = [tech_chain_name, mapping_relation, mapping_confidence]
                         st.markdown(f"**技术链映射**: {' / '.join([part for part in mapping_parts if part])}")
@@ -2460,6 +2588,8 @@ def render_results(results):
                         ('追溯载体占比', 'traceable_ratio'),
                         ('候选证据质量', 'candidate_evidence_quality'),
                         ('核心证据质量', 'candidate_core_evidence_quality'),
+                        ('证据预见相关度', 'candidate_evidence_foresight_relevance'),
+                        ('高预见证据数', 'high_foresight_evidence_count'),
                     ]:
                         value = safe_text(row.get(column))
                         if value:
@@ -2526,6 +2656,9 @@ def render_results(results):
                                     '日期': safe_text(evidence.get('date')),
                                     '机构': safe_preview(evidence.get('org'), limit=60),
                                     '质量分': safe_text(evidence.get('event_quality_score')),
+                                    '预见分': safe_text(evidence.get('foresight_relevance_score')),
+                                    '片段分': safe_text(evidence.get('evidence_span_score')),
+                                    '置信分': safe_text(evidence.get('confidence_score')),
                                     '追溯状态': safe_text(evidence.get('traceability_status')) or 'partial_traceable',
                                     '支撑词': '、'.join(
                                         (
@@ -2546,6 +2679,7 @@ def render_results(results):
                                     safe_text(evidence.get('date')),
                                     safe_text(evidence.get('org')),
                                     f"质量分 {safe_text(evidence.get('event_quality_score'))}" if safe_text(evidence.get('event_quality_score')) else "",
+                                    f"预见分 {safe_text(evidence.get('foresight_relevance_score'))}" if safe_text(evidence.get('foresight_relevance_score')) else "",
                                     safe_text(evidence.get('traceability_status')) or "partial_traceable",
                                 ]
                                 st.caption(" / ".join([part for part in meta_parts if part]))
@@ -2627,7 +2761,13 @@ def render_results(results):
                 )
             if len(mapping_view) < len(tech_chain_mapping_df):
                 st.caption(f"已合并重复映射：展示 {len(mapping_view)} 条唯一映射，原始记录 {len(tech_chain_mapping_df)} 条。")
-            st.dataframe(mapping_view[mapping_cols].head(100), use_container_width=True)
+            render_paginated_dataframe(
+                mapping_view,
+                mapping_cols,
+                "tech_chain_mapping_table",
+                page_size=20,
+                empty_message="当前结果未包含技术链映射。",
+            )
             if 'mapping_relation' in tech_chain_mapping_df.columns:
                 st.markdown("#### 映射关系分布")
                 render_horizontal_bar_chart(mapping_view['mapping_relation'].value_counts(), "映射关系", "数量")
@@ -2639,6 +2779,8 @@ def render_results(results):
             enriched_cols = [
                 'display_candidate_name',
                 'candidate_evidence_quality',
+                'candidate_evidence_foresight_relevance',
+                'high_foresight_evidence_count',
                 'quality_adjusted_rank_score',
                 'tech_chain_name',
                 'mapping_relation',
@@ -2647,7 +2789,13 @@ def render_results(results):
             enriched_cols = [c for c in enriched_cols if c in validated_df.columns]
             if enriched_cols:
                 st.markdown("#### 候选增强字段")
-                st.dataframe(validated_df[enriched_cols].head(50), use_container_width=True)
+                render_paginated_dataframe(
+                    validated_df,
+                    enriched_cols,
+                    "validated_enriched_table",
+                    page_size=20,
+                    empty_message="当前结果未包含候选增强字段。",
+                )
 
     with tabs[7]:
         st.markdown("### ⏱ 时间验证")
@@ -2683,7 +2831,13 @@ def render_results(results):
                 temporal_view_source,
                 ['temporal_momentum_score', 'growth_rate', 'source_growth_rate', 'org_growth_rate']
             )
-            st.dataframe(temporal_view[temporal_cols].head(100), use_container_width=True)
+            render_paginated_dataframe(
+                temporal_view,
+                temporal_cols,
+                "temporal_validation_table",
+                page_size=20,
+                empty_message="当前结果未包含时间验证。",
+            )
             if 'temporal_validation_tier' in temporal_view_source.columns:
                 st.markdown("#### 时间验证层级分布")
                 render_horizontal_bar_chart(temporal_view_source['temporal_validation_tier'].value_counts(), "时间验证层级", "数量")
@@ -2707,7 +2861,13 @@ def render_results(results):
                     validated_df,
                     ['temporal_momentum_score', 'weak_signal_score']
                 )
-                st.dataframe(temporal_candidates[temporal_enriched_cols].head(50), use_container_width=True)
+                render_paginated_dataframe(
+                    temporal_candidates,
+                    temporal_enriched_cols,
+                    "temporal_candidates_table",
+                    page_size=20,
+                    empty_message="当前结果未包含候选时间验证字段。",
+                )
 
     with tabs[8]:
         st.markdown("### 🧩 关键核心候选")
@@ -2743,12 +2903,20 @@ def render_results(results):
                 'candidate_core_evidence_quality',
                 'source_count',
                 'cluster_evidence_count',
+                'key_core_reason',
+                'key_core_risk',
                 'recommended_action',
             ]
             candidate_cols = [c for c in candidate_cols if c in candidate_view.columns]
-            st.dataframe(candidate_view[candidate_cols].head(50), use_container_width=True)
+            page_candidate_view = render_paginated_dataframe(
+                candidate_view,
+                candidate_cols,
+                "key_core_candidates_table",
+                page_size=20,
+                empty_message="当前结果未包含关键核心候选。",
+            )
 
-            for _, row in candidate_view.head(10).iterrows():
+            for _, row in page_candidate_view.head(10).iterrows():
                 name = row.get('candidate_name', row.get('display_candidate_name', '未知'))
                 score = numeric_value(row.get('key_core_score'), default=0.0)
                 with st.expander(f"🧩 {name} (核心潜力: {score:.1f})"):
@@ -2794,7 +2962,13 @@ def render_results(results):
                 'recommended_action',
             ]
             scored_cols = [c for c in scored_cols if c in scored_view.columns]
-            st.dataframe(scored_view[scored_cols].head(50), use_container_width=True)
+            render_paginated_dataframe(
+                scored_view,
+                scored_cols,
+                "key_core_scored_table",
+                page_size=20,
+                empty_message="当前结果未包含关键核心潜力评分。",
+            )
         else:
             st.info("当前结果未包含关键核心潜力评分。")
 
