@@ -3719,9 +3719,321 @@
       "total_tokens": 20350,
       "success": true,
       "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 315,
+      "completion_tokens": 438,
+      "total_tokens": 753,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 336,
+      "completion_tokens": 477,
+      "total_tokens": 813,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 341,
+      "completion_tokens": 452,
+      "total_tokens": 793,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 225,
+      "completion_tokens": 332,
+      "total_tokens": 557,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 225,
+      "completion_tokens": 332,
+      "total_tokens": 557,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 252,
+      "completion_tokens": 355,
+      "total_tokens": 607,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 269,
+      "completion_tokens": 361,
+      "total_tokens": 630,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 238,
+      "completion_tokens": 344,
+      "total_tokens": 582,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 302,
+      "completion_tokens": 371,
+      "total_tokens": 673,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 276,
+      "completion_tokens": 371,
+      "total_tokens": 647,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 2304,
+      "completion_tokens": 534,
+      "total_tokens": 2838,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 1053,
+      "completion_tokens": 558,
+      "total_tokens": 1611,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 1057,
+      "completion_tokens": 441,
+      "total_tokens": 1498,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 1169,
+      "completion_tokens": 528,
+      "total_tokens": 1697,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 1336,
+      "completion_tokens": 559,
+      "total_tokens": 1895,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 1571,
+      "completion_tokens": 483,
+      "total_tokens": 2054,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 1831,
+      "completion_tokens": 543,
+      "total_tokens": 2374,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 1339,
+      "completion_tokens": 563,
+      "total_tokens": 1902,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 1437,
+      "completion_tokens": 741,
+      "total_tokens": 2178,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 1703,
+      "completion_tokens": 527,
+      "total_tokens": 2230,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 2987,
+      "completion_tokens": 505,
+      "total_tokens": 3492,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 7411,
+      "completion_tokens": 528,
+      "total_tokens": 7939,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 7070,
+      "completion_tokens": 573,
+      "total_tokens": 7643,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "事件抽取-批量",
+      "prompt_tokens": 2124,
+      "completion_tokens": 185,
+      "total_tokens": 2309,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "小主题收口",
+      "prompt_tokens": 2803,
+      "completion_tokens": 447,
+      "total_tokens": 3250,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "小主题收口",
+      "prompt_tokens": 2753,
+      "completion_tokens": 475,
+      "total_tokens": 3228,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "小主题收口",
+      "prompt_tokens": 2885,
+      "completion_tokens": 466,
+      "total_tokens": 3351,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "小主题收口",
+      "prompt_tokens": 2515,
+      "completion_tokens": 436,
+      "total_tokens": 2951,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "报告生成",
+      "prompt_tokens": 16291,
+      "completion_tokens": 756,
+      "total_tokens": 17047,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "小主题收口",
+      "prompt_tokens": 2970,
+      "completion_tokens": 436,
+      "total_tokens": 3406,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "小主题收口",
+      "prompt_tokens": 2742,
+      "completion_tokens": 461,
+      "total_tokens": 3203,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "小主题收口",
+      "prompt_tokens": 2793,
+      "completion_tokens": 451,
+      "total_tokens": 3244,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "小主题收口",
+      "prompt_tokens": 2527,
+      "completion_tokens": 491,
+      "total_tokens": 3018,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "报告生成",
+      "prompt_tokens": 17653,
+      "completion_tokens": 805,
+      "total_tokens": 18458,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "小主题收口",
+      "prompt_tokens": 2970,
+      "completion_tokens": 437,
+      "total_tokens": 3407,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "小主题收口",
+      "prompt_tokens": 2742,
+      "completion_tokens": 475,
+      "total_tokens": 3217,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "小主题收口",
+      "prompt_tokens": 2793,
+      "completion_tokens": 449,
+      "total_tokens": 3242,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "小主题收口",
+      "prompt_tokens": 2527,
+      "completion_tokens": 443,
+      "total_tokens": 2970,
+      "success": true,
+      "metadata": {}
+    },
+    {
+      "type": "报告生成",
+      "prompt_tokens": 17658,
+      "completion_tokens": 801,
+      "total_tokens": 18459,
+      "success": true,
+      "metadata": {}
     }
   ],
-  "total_prompt_tokens": 922469,
-  "total_completion_tokens": 193495,
-  "total_calls": 456
+  "total_prompt_tokens": 1044262,
+  "total_completion_tokens": 212425,
+  "total_calls": 495
 }

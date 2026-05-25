@@ -65,6 +65,9 @@ class AnalysisPipeline:
         self.latest_shortlist_dedup_df = pd.DataFrame()
         self.latest_frequency_baseline_df = pd.DataFrame()
         self.latest_baseline_comparison_df = pd.DataFrame()
+        self.latest_source_documents_df = pd.DataFrame()
+        self.latest_signal_evidence_links_df = pd.DataFrame()
+        self.latest_signal_reliability_df = pd.DataFrame()
 
     def run_full_pipeline(
         self,
@@ -174,7 +177,8 @@ class AnalysisPipeline:
 
         # 保存结果
         print("\n[保存结果] ...")
-        self._save_results(result_dir, events_df, candidate_forms_df, scored_df, refined_df, validated_df, signals_output, report)
+        self._save_results(result_dir, events_df, candidate_forms_df, scored_df, refined_df, validated_df, signals_output, report, raw_data=raw_data)
+        signals_df = self._assign_signal_ids(signals_df)
 
         print(f"\n[完成] 分析结果已保存到: {result_dir}")
 
@@ -197,6 +201,9 @@ class AnalysisPipeline:
             "final_shortlist_df": self.latest_final_shortlist_df,
             "frequency_baseline_df": self.latest_frequency_baseline_df,
             "baseline_comparison_df": self.latest_baseline_comparison_df,
+            "source_documents_df": self.latest_source_documents_df,
+            "signal_evidence_links_df": self.latest_signal_evidence_links_df,
+            "signal_reliability_df": self.latest_signal_reliability_df,
             "report": report,
         }
 
@@ -266,7 +273,22 @@ class AnalysisPipeline:
         raw_data["source_type"] = events_df.get("source_type", pd.Series(["unknown"] * len(events_df))).fillna("unknown").astype(str)
         raw_data["title"] = events_df.get("title", pd.Series([""] * len(events_df))).fillna("").astype(str)
         raw_data["text"] = events_df.apply(event_text, axis=1)
-        for column in ["org", "date", "url"]:
+        for column in [
+            "org",
+            "date",
+            "url",
+            "publish_time",
+            "authors",
+            "affiliations",
+            "keywords",
+            "venue",
+            "source_name",
+            "abstract",
+            "main_content",
+            "industry",
+            "document_code",
+            "classification",
+        ]:
             if column in events_df.columns:
                 raw_data[column] = events_df[column]
         raw_data = raw_data.drop_duplicates(subset=["id"], keep="last").reset_index(drop=True)
@@ -282,6 +304,794 @@ class AnalysisPipeline:
             "candidates_df": signals_df,
             "near_strong_candidates_df": near_strong_df,
         }
+
+    @staticmethod
+    def _normalize_trace_source_type(value: Any) -> str:
+        text = AnalysisPipeline._safe_report_text(value)
+        mapping = {
+            "专利": "patent",
+            "文献": "paper",
+            "论文": "paper",
+            "研报": "report",
+            "资讯": "news",
+            "patent": "patent",
+            "paper": "paper",
+            "literature": "paper",
+            "report": "report",
+            "news": "news",
+        }
+        return mapping.get(text, mapping.get(text.lower(), text.lower() or "unknown"))
+
+    def _assign_signal_ids(self, signals_df: pd.DataFrame) -> pd.DataFrame:
+        signals_df = self._ensure_dataframe(signals_df)
+        if signals_df.empty:
+            if "signal_id" not in signals_df.columns:
+                signals_df["signal_id"] = []
+            return signals_df
+
+        counters = {"WS": 0, "NS": 0, "SC": 0, "SG": 0}
+        signal_ids = []
+        for _, row in signals_df.iterrows():
+            existing_id = self._safe_report_text(row.get("signal_id"))
+            if existing_id:
+                signal_ids.append(existing_id)
+                continue
+
+            signal_type = self._safe_report_text(row.get("signal_type")).lower()
+            candidate_stage = self._safe_report_text(row.get("candidate_stage")).lower()
+            if signal_type == "weak_signal":
+                prefix = "WS"
+            elif signal_type in {"near_strong", "hotspot"}:
+                prefix = "NS"
+            elif candidate_stage == "scope_overview":
+                prefix = "SC"
+            else:
+                prefix = "SG"
+            counters[prefix] += 1
+            signal_ids.append(f"{prefix}{counters[prefix]:03d}")
+
+        signals_df = signals_df.copy()
+        signals_df["signal_id"] = signal_ids
+        return signals_df
+
+    def _build_source_documents(
+        self,
+        raw_data: Optional[pd.DataFrame],
+        events_df: Optional[pd.DataFrame] = None,
+    ) -> pd.DataFrame:
+        raw_df = self._ensure_dataframe(raw_data)
+        if raw_df.empty:
+            raw_df = self._raw_data_from_events(events_df if events_df is not None else pd.DataFrame())
+
+        columns = [
+            "source_id",
+            "source_type",
+            "title",
+            "authors",
+            "org",
+            "affiliations",
+            "date",
+            "publish_time",
+            "url",
+            "keywords",
+            "venue",
+            "source_name",
+            "abstract",
+            "main_content",
+            "industry",
+            "document_code",
+            "classification",
+            "overview",
+            "full_text",
+            "text_sha256",
+            "full_text_available",
+        ]
+        if raw_df.empty:
+            return pd.DataFrame(columns=columns)
+
+        def first_text(row: pd.Series, fields: List[str]) -> str:
+            for field in fields:
+                text = self._safe_report_text(row.get(field))
+                if text:
+                    return text
+            return ""
+
+        rows = []
+        seen_source_ids = set()
+        for index, row in raw_df.reset_index(drop=True).iterrows():
+            source_id = (
+                self._safe_report_text(row.get("source_id"))
+                or self._safe_report_text(row.get("id"))
+                or self._safe_report_text(row.get("doc_id"))
+            )
+            title = (
+                self._safe_report_text(row.get("title"))
+                or self._safe_report_text(row.get("name"))
+                or self._safe_report_text(row.get("标题"))
+            )
+            abstract = (
+                self._safe_report_text(row.get("abstract"))
+                or self._safe_report_text(row.get("summary"))
+                or self._safe_report_text(row.get("snippet"))
+            )
+            main_content = (
+                self._safe_report_text(row.get("main_content"))
+                or self._safe_report_text(row.get("content"))
+                or self._safe_report_text(row.get("html"))
+                or self._safe_report_text(row.get("content_html"))
+            )
+            text = (
+                self._safe_report_text(row.get("text"))
+                or main_content
+                or self._safe_report_text(row.get("content"))
+                or self._safe_report_text(row.get("abstract"))
+            )
+            source_type = self._normalize_trace_source_type(row.get("source_type"))
+            if not source_id:
+                seed = "|".join([source_type, title, text[:160], str(index)])
+                source_id = f"source_{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]}"
+            if source_id in seen_source_ids:
+                continue
+            seen_source_ids.add(source_id)
+
+            overview = (
+                self._safe_report_text(row.get("snippet"))
+                or self._safe_report_text(row.get("summary"))
+                or abstract
+                or main_content
+                or text
+                or title
+            )
+            rows.append(
+                {
+                    "source_id": source_id,
+                    "source_type": source_type,
+                    "title": title,
+                    "authors": first_text(row, ["authors", "author", "inventors", "inventor", "作者", "发明人"]),
+                    "org": (
+                        self._safe_report_text(row.get("org"))
+                        or self._safe_report_text(row.get("organization"))
+                        or self._safe_report_text(row.get("source"))
+                    ),
+                    "affiliations": (
+                        self._safe_report_text(row.get("affiliations"))
+                        or self._safe_report_text(row.get("affiliation"))
+                        or self._safe_report_text(row.get("institution"))
+                        or self._safe_report_text(row.get("applicant"))
+                    ),
+                    "date": (
+                        self._safe_report_text(row.get("date"))
+                        or self._safe_report_text(row.get("time"))
+                        or self._safe_report_text(row.get("year"))
+                    ),
+                    "publish_time": (
+                        self._safe_report_text(row.get("publish_time"))
+                        or self._safe_report_text(row.get("publish_date"))
+                        or self._safe_report_text(row.get("public_date"))
+                        or self._safe_report_text(row.get("date"))
+                        or self._safe_report_text(row.get("year"))
+                    ),
+                    "url": self._safe_report_text(row.get("url")) or self._safe_report_text(row.get("link")),
+                    "keywords": first_text(row, ["keywords", "keyword", "tags", "entities", "关键词"]),
+                    "venue": first_text(row, ["venue", "journal", "conference", "source", "publisher"]),
+                    "source_name": first_text(row, ["source_name", "source", "publisher", "venue"]),
+                    "abstract": abstract,
+                    "main_content": main_content or (text if len(text) >= 220 else ""),
+                    "industry": first_text(row, ["industry", "lz_industry", "node_classify", "stock_name", "stock_code"]),
+                    "document_code": first_text(row, ["document_code", "doc_id", "report_code", "doi/arxiv_id", "doi", "公开号", "申请号", "专利号"]),
+                    "classification": first_text(row, ["classification", "ipc", "cpc", "type", "status", "label"]),
+                    "overview": self._truncate_report_text(overview, 420),
+                    "full_text": text,
+                    "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest() if text else "",
+                    "full_text_available": bool(text),
+                }
+            )
+
+        return pd.DataFrame(rows, columns=columns)
+
+    def _build_signal_evidence_links(
+        self,
+        signals_df: pd.DataFrame,
+        source_documents_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        signals_df = self._ensure_dataframe(signals_df)
+        source_documents_df = self._ensure_dataframe(source_documents_df)
+        columns = [
+            "signal_id",
+            "signal_type",
+            "candidate_cluster_id",
+            "candidate_id",
+            "display_candidate_name",
+            "evidence_id",
+            "source_id",
+            "source_type",
+            "title",
+            "authors",
+            "org",
+            "affiliations",
+            "date",
+            "publish_time",
+            "url",
+            "keywords",
+            "venue",
+            "source_name",
+            "abstract",
+            "main_content",
+            "industry",
+            "document_code",
+            "classification",
+            "evidence_overview",
+            "evidence_excerpt",
+            "support_terms",
+            "raw_candidate_text",
+            "event_quality_score",
+            "event_quality_tier",
+            "traceability_status",
+            "full_text_available",
+            "text_sha256",
+        ]
+        if signals_df.empty:
+            return pd.DataFrame(columns=columns)
+
+        def split_support_terms(value: Any) -> List[str]:
+            values = self._safe_report_list(value)
+            if not values and self._safe_report_text(value):
+                values = [value]
+
+            terms: List[str] = []
+            for raw in values:
+                if isinstance(raw, dict):
+                    raw_values = [
+                        raw.get("term"),
+                        raw.get("name"),
+                        raw.get("text"),
+                        raw.get("value"),
+                        raw.get("matched_term"),
+                    ]
+                else:
+                    raw_values = [raw]
+
+                for item in raw_values:
+                    text = self._safe_report_text(item)
+                    if not text:
+                        continue
+                    pieces = re.split(r"[、,;；/|]+", text) if len(text) > 80 else [text]
+                    for piece in pieces:
+                        term = self._safe_report_text(piece)
+                        if not term or len(term) > 80:
+                            continue
+                        if term not in terms:
+                            terms.append(term)
+            return terms
+
+        def support_term_matches(term: str, evidence_text: str, evidence_key: str) -> bool:
+            lower_term = self._safe_report_text(term).lower()
+            if not lower_term:
+                return False
+            if re.fullmatch(r"[a-z0-9.+#-]{1,4}", lower_term):
+                return re.search(rf"(?<![a-z0-9]){re.escape(lower_term)}(?![a-z0-9])", evidence_text) is not None
+            if lower_term in evidence_text:
+                return True
+            normalized = self._report_normalize_key(term)
+            return len(normalized) >= 2 and normalized in evidence_key
+
+        broad_support_keys = {
+            self._report_normalize_key(term)
+            for term in [
+                "ai", "llm", "robot", "robots", "robotics", "technology", "technologies",
+                "system", "systems", "method", "methods", "approach", "application",
+                "control", "planning", "training", "simulation", "visual", "vision",
+                "机器人", "控制", "技术", "方法", "系统", "视觉", "规划", "训练", "仿真",
+            ]
+        }
+        specific_support_acronyms = {"slam", "vla", "rgb-d", "lidar", "imu", "vr", "ar"}
+        support_alias_groups = [
+            (
+                ["3D视觉", "三维视觉", "3d视觉", "3d", "data:3d", "point cloud", "点云"],
+                [
+                    "SLAM",
+                    "visual SLAM",
+                    "point cloud",
+                    "3D point cloud",
+                    "visual feedback",
+                    "virtual reality",
+                    "viewpoint control",
+                    "decoupled viewpoint",
+                    "three-dimensional",
+                    "3D vision",
+                    "depth camera",
+                    "RGB-D",
+                    "LiDAR",
+                ],
+            ),
+            (
+                ["人形机器人", "humanoid robot", "humanoid"],
+                [
+                    "immersive humanoid robot teleoperation",
+                    "humanoid robot teleoperation",
+                    "humanoid robot",
+                    "humanoid",
+                    "teleoperation",
+                ],
+            ),
+            (
+                ["遥操作", "teleoperation"],
+                ["teleoperation", "immersive teleoperation", "viewpoint control", "visual feedback"],
+            ),
+            (
+                ["点云", "point cloud"],
+                ["point cloud", "3D point cloud", "SLAM"],
+            ),
+        ]
+
+        def is_broad_support_term(term: str) -> bool:
+            text = self._safe_report_text(term)
+            lower = text.lower()
+            key = self._report_normalize_key(text)
+            if key in broad_support_keys:
+                return True
+            return len(lower) <= 2 and lower not in specific_support_acronyms
+
+        def support_specificity(term: str) -> int:
+            text = self._safe_report_text(term)
+            lower = text.lower()
+            score = 0
+            if is_broad_support_term(text):
+                score -= 100
+            if lower in specific_support_acronyms:
+                score += 20
+            if re.search(r"\d", text):
+                score += 8
+            if " " in text or "-" in text:
+                score += 6
+            if len(text) >= 10:
+                score += 4
+            if any(marker in lower for marker in ["slam", "point cloud", "visual feedback", "virtual reality", "teleoperation", "viewpoint"]):
+                score += 10
+            return score
+
+        def finalize_support_terms(terms: List[str], limit: int = 8) -> List[str]:
+            deduped: List[str] = []
+            for term in terms:
+                text = self._safe_report_text(term)
+                if text and text not in deduped:
+                    deduped.append(text)
+            specific = [term for term in deduped if not is_broad_support_term(term)]
+            pool = specific if specific else deduped
+            indexed = list(enumerate(pool))
+            indexed.sort(key=lambda pair: (-support_specificity(pair[1]), pair[0]))
+            return [term for _, term in indexed[:limit]]
+
+        def signature_support_terms(value: Any) -> List[str]:
+            terms: List[str] = []
+            for raw in split_support_terms(value):
+                for piece in re.split(r"\s*\|\|\s*|[;；、,，]+", raw):
+                    piece_text = self._safe_report_text(piece)
+                    if not piece_text:
+                        continue
+                    if ":" in piece_text:
+                        piece_text = piece_text.split(":", 1)[1].strip()
+                    for token in re.split(r"[|/]+", piece_text):
+                        token_text = self._safe_report_text(token)
+                        if token_text and token_text not in terms:
+                            terms.append(token_text)
+            return terms
+
+        def semantic_support_terms(
+            row: pd.Series,
+            item: Dict[str, Any],
+            evidence_text: str,
+            evidence_key: str,
+            candidate_terms: List[Any],
+        ) -> List[str]:
+            context_text = " ".join(
+                [
+                    self._safe_report_text(row.get("display_candidate_name")),
+                    self._safe_report_text(row.get("tech_name")),
+                    self._safe_report_text(row.get("technology")),
+                    self._safe_report_text(row.get("canonical_candidate_name_en")),
+                    self._safe_report_text(row.get("constraint_signature")),
+                    self._safe_report_text(row.get("process_slot")),
+                    self._safe_report_text(row.get("carrier_slot")),
+                    self._safe_report_text(row.get("application_slot")),
+                    self._safe_report_text(row.get("relation_data_modality")),
+                    self._safe_report_text(item.get("raw_candidate_text")),
+                    " ".join(self._safe_report_text(term) for term in candidate_terms),
+                ]
+            ).lower()
+            context_key = self._report_normalize_key(context_text)
+            matched_terms: List[str] = []
+            for triggers, aliases in support_alias_groups:
+                active = any(
+                    self._safe_report_text(trigger).lower() in context_text
+                    or self._report_normalize_key(trigger) in context_key
+                    for trigger in triggers
+                )
+                if not active:
+                    continue
+                for alias in aliases:
+                    if alias not in matched_terms and support_term_matches(alias, evidence_text, evidence_key):
+                        matched_terms.append(alias)
+            return matched_terms
+
+        def add_support_term(terms: List[str], value: Any, limit: int = 32) -> None:
+            for term in split_support_terms(value):
+                if term not in terms:
+                    terms.append(term)
+                if len(terms) >= limit:
+                    return
+
+        source_by_id = {}
+        source_by_title = {}
+        if not source_documents_df.empty:
+            for _, doc in source_documents_df.iterrows():
+                doc_dict = doc.to_dict()
+                source_id = self._safe_report_text(doc_dict.get("source_id"))
+                if source_id:
+                    source_by_id[source_id] = doc_dict
+                title_key = (
+                    self._normalize_trace_source_type(doc_dict.get("source_type")),
+                    self._report_normalize_key(doc_dict.get("title")),
+                )
+                if title_key[1] and title_key not in source_by_title:
+                    source_by_title[title_key] = doc_dict
+
+        rows = []
+        seen = set()
+        for _, row in signals_df.iterrows():
+            signal_id = self._safe_report_text(row.get("signal_id"))
+            if not signal_id:
+                continue
+            evidence_items = [
+                item
+                for item in self._safe_report_list(row.get("evidence_items", []))
+                if isinstance(item, dict)
+            ]
+            for evidence_index, item in enumerate(evidence_items, 1):
+                source_id = (
+                    self._safe_report_text(item.get("source_id"))
+                    or self._safe_report_text(item.get("id"))
+                    or self._safe_report_text(item.get("record_id"))
+                )
+                source_type = self._normalize_trace_source_type(item.get("source_type"))
+                title = self._safe_report_text(item.get("title"))
+                source_doc = source_by_id.get(source_id) if source_id else None
+                if source_doc is None and title:
+                    source_doc = source_by_title.get((source_type, self._report_normalize_key(title)))
+                    if source_doc is not None:
+                        source_id = self._safe_report_text(source_doc.get("source_id"))
+
+                if source_doc is not None:
+                    traceability_status = "traceable"
+                elif source_id:
+                    traceability_status = "source_missing"
+                elif title or self._safe_report_text(item.get("snippet") or item.get("text")):
+                    traceability_status = "partial_traceable"
+                else:
+                    traceability_status = "missing_source"
+
+                doc_text = self._safe_report_text((source_doc or {}).get("full_text"))
+                doc_overview = self._safe_report_text((source_doc or {}).get("overview"))
+                evidence_excerpt = self._safe_report_text(item.get("snippet") or item.get("text"))
+                raw_candidate_text = self._safe_report_text(item.get("raw_candidate_text"))
+                candidate_name = (
+                    self._safe_report_text(row.get("display_candidate_name"))
+                    or self._safe_report_text(row.get("tech_name"))
+                    or self._safe_report_text(row.get("technology"))
+                )
+                candidate_terms = [
+                    raw_candidate_text,
+                    candidate_name,
+                    self._safe_report_text(row.get("canonical_candidate_name_en")),
+                    self._safe_report_text(row.get("matched_term")),
+                    self._safe_report_text(row.get("tech_chain_name")),
+                    self._safe_report_text(row.get("tech_chain_official_name")),
+                    self._safe_report_text(row.get("mechanism_core")),
+                    self._safe_report_text(row.get("relation_target")),
+                    self._safe_report_text(row.get("relation_task")),
+                    self._safe_report_text(row.get("relation_method")),
+                    self._safe_report_text(row.get("relation_data_modality")),
+                    self._safe_report_text(row.get("constraint_signature")),
+                    self._safe_report_text(row.get("raw_candidate_text")),
+                    self._safe_report_text(row.get("tech_object_slot")),
+                    self._safe_report_text(row.get("capability_slot")),
+                    self._safe_report_text(row.get("process_slot")),
+                    self._safe_report_text(row.get("carrier_slot")),
+                    self._safe_report_text(row.get("application_slot")),
+                ]
+                for field in [
+                    "display_candidate_aliases",
+                    "mechanism_core_tokens",
+                    "task_constraint_tokens",
+                    "object_modifier_tokens",
+                    "data_modifier_tokens",
+                    "method_modifier_tokens",
+                ]:
+                    candidate_terms.extend(split_support_terms(row.get(field)))
+                candidate_terms.extend(signature_support_terms(row.get("constraint_signature")))
+
+                evidence_text_for_match = " ".join(
+                    [
+                        title,
+                        evidence_excerpt,
+                        doc_overview,
+                        doc_text[:2000],
+                        self._safe_report_text(item.get("abstract")),
+                        self._safe_report_text(item.get("main_content"))[:2000],
+                    ]
+                ).lower()
+                evidence_key_for_match = self._report_normalize_key(evidence_text_for_match)
+                support_terms = []
+                for field in ["support_terms", "matched_terms", "matched_term", "support_term"]:
+                    add_support_term(support_terms, item.get(field))
+                for term in semantic_support_terms(row, item, evidence_text_for_match, evidence_key_for_match, candidate_terms):
+                    if term not in support_terms:
+                        support_terms.append(term)
+                for term in candidate_terms:
+                    if len(support_terms) >= 32:
+                        break
+                    term_text = self._safe_report_text(term)
+                    if (
+                        term_text
+                        and term_text not in support_terms
+                        and support_term_matches(term_text, evidence_text_for_match, evidence_key_for_match)
+                    ):
+                        support_terms.append(term_text)
+                support_terms = finalize_support_terms(support_terms)
+                if not support_terms:
+                    for fallback in [
+                        candidate_name,
+                        raw_candidate_text,
+                        self._safe_report_text(row.get("mechanism_core")),
+                        self._safe_report_text(row.get("matched_term")),
+                    ]:
+                        add_support_term(support_terms, fallback)
+                        if support_terms:
+                            break
+                    support_terms = finalize_support_terms(support_terms)
+
+                evidence_id = self._safe_report_text(item.get("evidence_id")) or f"{signal_id}-EV{evidence_index:03d}"
+                dedupe_key = (signal_id, evidence_id, source_id, title)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+
+                rows.append(
+                    {
+                        "signal_id": signal_id,
+                        "signal_type": self._safe_report_text(row.get("signal_type")),
+                        "candidate_cluster_id": self._safe_report_text(row.get("candidate_cluster_id")),
+                        "candidate_id": self._safe_report_text(row.get("candidate_id")),
+                        "display_candidate_name": candidate_name,
+                        "evidence_id": evidence_id,
+                        "source_id": source_id,
+                        "source_type": source_type or self._safe_report_text((source_doc or {}).get("source_type")),
+                        "title": title or self._safe_report_text((source_doc or {}).get("title")),
+                        "authors": self._safe_report_text(item.get("authors")) or self._safe_report_text((source_doc or {}).get("authors")),
+                        "org": self._safe_report_text(item.get("org")) or self._safe_report_text((source_doc or {}).get("org")),
+                        "affiliations": self._safe_report_text(item.get("affiliations")) or self._safe_report_text((source_doc or {}).get("affiliations")),
+                        "date": self._safe_report_text(item.get("date")) or self._safe_report_text((source_doc or {}).get("date")),
+                        "publish_time": self._safe_report_text(item.get("publish_time")) or self._safe_report_text((source_doc or {}).get("publish_time")),
+                        "url": self._safe_report_text(item.get("url")) or self._safe_report_text((source_doc or {}).get("url")),
+                        "keywords": self._safe_report_text(item.get("keywords")) or self._safe_report_text((source_doc or {}).get("keywords")),
+                        "venue": self._safe_report_text(item.get("venue")) or self._safe_report_text((source_doc or {}).get("venue")),
+                        "source_name": self._safe_report_text(item.get("source_name")) or self._safe_report_text((source_doc or {}).get("source_name")),
+                        "abstract": self._safe_report_text(item.get("abstract")) or self._safe_report_text((source_doc or {}).get("abstract")),
+                        "main_content": self._safe_report_text(item.get("main_content")) or self._safe_report_text((source_doc or {}).get("main_content")),
+                        "industry": self._safe_report_text(item.get("industry")) or self._safe_report_text((source_doc or {}).get("industry")),
+                        "document_code": self._safe_report_text(item.get("document_code")) or self._safe_report_text((source_doc or {}).get("document_code")),
+                        "classification": self._safe_report_text(item.get("classification")) or self._safe_report_text((source_doc or {}).get("classification")),
+                        "evidence_overview": self._truncate_report_text(evidence_excerpt or doc_overview or doc_text, 420),
+                        "evidence_excerpt": self._truncate_report_text(evidence_excerpt or doc_text or doc_overview, 700),
+                        "support_terms": support_terms,
+                        "raw_candidate_text": raw_candidate_text,
+                        "event_quality_score": round(self._safe_report_float(item.get("event_quality_score"), 0.0), 2),
+                        "event_quality_tier": self._safe_report_text(item.get("event_quality_tier")),
+                        "traceability_status": traceability_status,
+                        "full_text_available": bool(doc_text),
+                        "text_sha256": self._safe_report_text((source_doc or {}).get("text_sha256")),
+                    }
+                )
+
+        return pd.DataFrame(rows, columns=columns)
+
+    def _build_signal_reliability_table(
+        self,
+        signals_df: pd.DataFrame,
+        signal_evidence_links_df: pd.DataFrame,
+        min_quality_score: float = 4.0,
+    ) -> pd.DataFrame:
+        signals_df = self._ensure_dataframe(signals_df)
+        links_df = self._ensure_dataframe(signal_evidence_links_df)
+        columns = [
+            "signal_id",
+            "signal_type",
+            "candidate_id",
+            "candidate_cluster_id",
+            "display_candidate_name",
+            "evidence_gate_passed",
+            "evidence_gate_status",
+            "evidence_gate_reason",
+            "total_evidence_count",
+            "traceable_evidence_count",
+            "reliable_evidence_count",
+            "low_quality_evidence_count",
+            "missing_source_id_count",
+            "missing_text_hash_count",
+            "empty_evidence_text_count",
+            "full_text_available_count",
+            "max_event_quality_score",
+            "min_reliable_quality_score",
+            "source_types",
+            "top_evidence_ids",
+        ]
+        if signals_df.empty:
+            return pd.DataFrame(columns=columns)
+
+        links_by_signal: Dict[str, List[Dict[str, Any]]] = {}
+        if not links_df.empty and "signal_id" in links_df.columns:
+            for _, link in links_df.iterrows():
+                signal_id = self._safe_report_text(link.get("signal_id"))
+                if signal_id:
+                    links_by_signal.setdefault(signal_id, []).append(link.to_dict())
+
+        rows = []
+        for _, signal in signals_df.iterrows():
+            signal_id = self._safe_report_text(signal.get("signal_id"))
+            signal_type = self._safe_report_text(signal.get("signal_type"))
+            evidence_rows = links_by_signal.get(signal_id, [])
+            total_count = len(evidence_rows)
+            traceable_count = 0
+            reliable_count = 0
+            low_quality_count = 0
+            missing_source_count = 0
+            missing_hash_count = 0
+            empty_text_count = 0
+            full_text_count = 0
+            quality_values = []
+            reliable_quality_values = []
+            source_types = []
+            top_evidence_ids = []
+
+            for evidence in evidence_rows:
+                source_id = self._safe_report_text(evidence.get("source_id"))
+                text_hash = self._safe_report_text(evidence.get("text_sha256"))
+                trace_status = self._safe_report_text(evidence.get("traceability_status"))
+                quality = self._safe_report_float(evidence.get("event_quality_score"), 0.0)
+                has_quality = quality > 0
+                quality_values.append(quality)
+                if has_quality and quality < min_quality_score:
+                    low_quality_count += 1
+                if not source_id:
+                    missing_source_count += 1
+                if not text_hash:
+                    missing_hash_count += 1
+                has_text = bool(
+                    self._safe_report_text(evidence.get("title"))
+                    or self._safe_report_text(evidence.get("evidence_excerpt"))
+                    or self._safe_report_text(evidence.get("evidence_overview"))
+                )
+                if not has_text:
+                    empty_text_count += 1
+                full_text_available = self._safe_report_bool(evidence.get("full_text_available"))
+                if full_text_available:
+                    full_text_count += 1
+                is_traceable = trace_status == "traceable" and bool(source_id)
+                if is_traceable:
+                    traceable_count += 1
+                is_reliable = (
+                    is_traceable
+                    and has_text
+                    and full_text_available
+                    and bool(text_hash)
+                    and has_quality
+                    and quality >= min_quality_score
+                )
+                if is_reliable:
+                    reliable_count += 1
+                    reliable_quality_values.append(quality)
+                    evidence_id = self._safe_report_text(evidence.get("evidence_id"))
+                    if evidence_id:
+                        top_evidence_ids.append(evidence_id)
+                source_type = self._safe_report_text(evidence.get("source_type"))
+                if source_type and source_type not in source_types:
+                    source_types.append(source_type)
+
+            is_weak_signal = signal_type == "weak_signal"
+            gate_passed = reliable_count >= 1 if is_weak_signal else True
+            reasons = []
+            if is_weak_signal:
+                if total_count == 0:
+                    reasons.append("无关联证据")
+                if traceable_count == 0:
+                    reasons.append("无可回连源文本的证据")
+                if reliable_count == 0 and low_quality_count > 0:
+                    reasons.append(f"证据质量低于{min_quality_score:g}分")
+                if reliable_count == 0 and missing_source_count > 0:
+                    reasons.append("存在缺失source_id的证据")
+                if reliable_count == 0 and missing_hash_count > 0:
+                    reasons.append("存在缺失源文本哈希的证据")
+                if reliable_count == 0 and empty_text_count > 0:
+                    reasons.append("存在空标题/空摘录证据")
+                if reliable_count == 0 and full_text_count == 0:
+                    reasons.append("未保存可展开源文本")
+            status = (
+                "confirmed_weak_signal"
+                if is_weak_signal and gate_passed
+                else "evidence_insufficient_candidate"
+                if is_weak_signal
+                else "not_applicable"
+            )
+            rows.append(
+                {
+                    "signal_id": signal_id,
+                    "signal_type": signal_type,
+                    "candidate_id": self._safe_report_text(signal.get("candidate_id")),
+                    "candidate_cluster_id": self._safe_report_text(signal.get("candidate_cluster_id")),
+                    "display_candidate_name": self._safe_report_text(
+                        signal.get("display_candidate_name")
+                        or signal.get("tech_name")
+                        or signal.get("technology")
+                    ),
+                    "evidence_gate_passed": bool(gate_passed),
+                    "evidence_gate_status": status,
+                    "evidence_gate_reason": "；".join(reasons) if reasons else "至少1条证据可回连源文本、质量达标且哈希可校验",
+                    "total_evidence_count": total_count,
+                    "traceable_evidence_count": traceable_count,
+                    "reliable_evidence_count": reliable_count,
+                    "low_quality_evidence_count": low_quality_count,
+                    "missing_source_id_count": missing_source_count,
+                    "missing_text_hash_count": missing_hash_count,
+                    "empty_evidence_text_count": empty_text_count,
+                    "full_text_available_count": full_text_count,
+                    "max_event_quality_score": max(quality_values) if quality_values else 0.0,
+                    "min_reliable_quality_score": min(reliable_quality_values) if reliable_quality_values else 0.0,
+                    "source_types": source_types,
+                    "top_evidence_ids": top_evidence_ids[:10],
+                }
+            )
+
+        return pd.DataFrame(rows, columns=columns)
+
+    def _apply_signal_reliability_gate(
+        self,
+        signals_df: pd.DataFrame,
+        signal_reliability_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        signals_df = self._ensure_dataframe(signals_df)
+        reliability_df = self._ensure_dataframe(signal_reliability_df)
+        if signals_df.empty or reliability_df.empty or "signal_id" not in signals_df.columns:
+            return signals_df
+        reliability_columns = [
+            "signal_id",
+            "evidence_gate_passed",
+            "evidence_gate_status",
+            "evidence_gate_reason",
+            "reliable_evidence_count",
+            "traceable_evidence_count",
+            "low_quality_evidence_count",
+            "missing_source_id_count",
+            "missing_text_hash_count",
+            "full_text_available_count",
+            "top_evidence_ids",
+        ]
+        available = [column for column in reliability_columns if column in reliability_df.columns]
+        overlap = [column for column in available if column != "signal_id" and column in signals_df.columns]
+        if overlap:
+            signals_df = signals_df.drop(columns=overlap)
+        merged = signals_df.merge(reliability_df[available], on="signal_id", how="left")
+        merged["confirmed_signal_type"] = merged.apply(
+            lambda row: (
+                "confirmed_weak_signal"
+                if self._safe_report_text(row.get("signal_type")) == "weak_signal"
+                and self._safe_report_bool(row.get("evidence_gate_passed"))
+                else "evidence_insufficient_candidate"
+                if self._safe_report_text(row.get("signal_type")) == "weak_signal"
+                else self._safe_report_text(row.get("signal_type"))
+            ),
+            axis=1,
+        )
+        return merged
 
     def run_from_events(
         self,
@@ -356,7 +1166,8 @@ class AnalysisPipeline:
         print("  报告生成完成")
 
         print("\n[保存结果] ...")
-        self._save_results(result_dir, events_df, candidate_forms_df, scored_df, refined_df, validated_df, signals_output, report)
+        self._save_results(result_dir, events_df, candidate_forms_df, scored_df, refined_df, validated_df, signals_output, report, raw_data=raw_data)
+        signals_df = self._assign_signal_ids(signals_df)
 
         return {
             "result_dir": result_dir,
@@ -377,6 +1188,9 @@ class AnalysisPipeline:
             "final_shortlist_df": self.latest_final_shortlist_df,
             "frequency_baseline_df": self.latest_frequency_baseline_df,
             "baseline_comparison_df": self.latest_baseline_comparison_df,
+            "source_documents_df": self.latest_source_documents_df,
+            "signal_evidence_links_df": self.latest_signal_evidence_links_df,
+            "signal_reliability_df": self.latest_signal_reliability_df,
             "report": report,
             "raw_data": raw_data,
         }
@@ -467,7 +1281,7 @@ class AnalysisPipeline:
 
         signals_output = self._signals_output_from_signals_df(signals_df)
         report = self._generate_report(signals_output)
-        self._save_results(target_dir, events_df, candidate_forms_df, scored_df, refined_df, validated_df, signals_output, report)
+        self._save_results(target_dir, events_df, candidate_forms_df, scored_df, refined_df, validated_df, signals_output, report, raw_data=raw_data)
 
         return {
             "result_dir": target_dir,
@@ -489,6 +1303,9 @@ class AnalysisPipeline:
             "final_shortlist_df": self.latest_final_shortlist_df,
             "frequency_baseline_df": self.latest_frequency_baseline_df,
             "baseline_comparison_df": self.latest_baseline_comparison_df,
+            "source_documents_df": self.latest_source_documents_df,
+            "signal_evidence_links_df": self.latest_signal_evidence_links_df,
+            "signal_reliability_df": self.latest_signal_reliability_df,
             "report": report,
             "raw_data": raw_data,
         }
@@ -1262,6 +2079,13 @@ class AnalysisPipeline:
         except Exception:
             pass
         return []
+
+    @staticmethod
+    def _report_normalize_key(value: Any) -> str:
+        text = AnalysisPipeline._safe_report_text(value).lower()
+        text = re.sub(r"[\s_\-]+", "", text)
+        text = re.sub(r"[^\w\u4e00-\u9fff]+", "", text)
+        return text
 
     def _signal_display_name(self, row: pd.Series) -> str:
         return (
@@ -3402,6 +4226,7 @@ class AnalysisPipeline:
         validated_df: pd.DataFrame,
         signals_df,
         report: str,
+        raw_data: Optional[pd.DataFrame] = None,
     ):
         """保存所有结果"""
         # 确保所有数据都是DataFrame
@@ -3425,6 +4250,14 @@ class AnalysisPipeline:
         refined_df = ensure_df(refined_df)
         validated_df = ensure_df(validated_df)
         signals_df = ensure_df(signals_df)
+        signals_df = self._assign_signal_ids(signals_df)
+        source_documents_df = self._build_source_documents(raw_data, events_df)
+        signal_evidence_links_df = self._build_signal_evidence_links(signals_df, source_documents_df)
+        signal_reliability_df = self._build_signal_reliability_table(signals_df, signal_evidence_links_df)
+        signals_df = self._apply_signal_reliability_gate(signals_df, signal_reliability_df)
+        self.latest_source_documents_df = source_documents_df
+        self.latest_signal_evidence_links_df = signal_evidence_links_df
+        self.latest_signal_reliability_df = signal_reliability_df
         reverse_validation_df = ensure_df(self.latest_reverse_validation_df)
         family_metrics_df = ensure_df(self.latest_family_metrics_df)
         final_shortlist_df = ensure_df(self.latest_final_shortlist_df)
@@ -3449,6 +4282,11 @@ class AnalysisPipeline:
         refined_df.to_json(result_dir / "refined.json", orient='records', force_ascii=False, indent=2)
         validated_df.to_json(result_dir / "validated.json", orient='records', force_ascii=False, indent=2)
         signals_df.to_json(result_dir / "signals.json", orient='records', force_ascii=False, indent=2)
+        source_documents_df.to_json(result_dir / "source_documents.json", orient='records', force_ascii=False, indent=2)
+        signal_evidence_links_df.to_json(result_dir / "signal_evidence_links.json", orient='records', force_ascii=False, indent=2)
+        signal_evidence_links_df.to_csv(result_dir / "signal_evidence_links.csv", index=False, encoding='utf-8-sig')
+        signal_reliability_df.to_json(result_dir / "signal_reliability.json", orient='records', force_ascii=False, indent=2)
+        signal_reliability_df.to_csv(result_dir / "signal_reliability.csv", index=False, encoding='utf-8-sig')
         if not reverse_validation_df.empty:
             reverse_validation_df.to_json(result_dir / "reverse_validation.json", orient='records', force_ascii=False, indent=2)
             reverse_validation_df.to_csv(result_dir / "reverse_validation.csv", index=False, encoding='utf-8-sig')
@@ -3469,6 +4307,7 @@ class AnalysisPipeline:
 
         # 保存CSV格式（便于查看）
         signals_df.to_csv(result_dir / "signals.csv", index=False, encoding='utf-8-sig')
+        source_documents_df.to_csv(result_dir / "source_documents.csv", index=False, encoding='utf-8-sig')
 
         validation_lines = [
             "# 分阶段改造验证记录",
@@ -3494,6 +4333,9 @@ class AnalysisPipeline:
             f"- 最终短名单记录数: {len(final_shortlist_df)}",
             f"- 频次基线记录数: {len(frequency_baseline_df)}",
             f"- 基线对照记录数: {len(baseline_comparison_df)}",
+            f"- 源文档记录数: {len(source_documents_df)}",
+            f"- 证据链记录数: {len(signal_evidence_links_df)}",
+            f"- 证据可靠性记录数: {len(signal_reliability_df)}",
             "",
             "## feat 参考对照",
             "",
