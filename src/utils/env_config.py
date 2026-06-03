@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_KEYS = {
     "DEEPSEEK_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",

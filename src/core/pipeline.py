@@ -3,6 +3,7 @@
 import json
 import re
 import hashlib
+import shutil
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
@@ -10,33 +11,36 @@ from typing import Dict, List, Optional, Any
 
 # 导入各模块
 from ..extraction.event_schema import WEAK_SIGNAL_EVENT_SCHEMA_VERSION, backfill_events_dataframe
-from ..extraction.event_extractor import process_events, load_event_cache, save_event_cache
+from ..extraction.event_extractor import (
+    process_events,
+    load_event_cache,
+    save_event_cache,
+    _renormalize_cached_events_with_source,
+)
 from ..extraction.candidate_former import build_candidate_forms
 
 from ..scoring.scorer import score_all_candidates, refresh_research_layers
 from ..scoring.signal_generator import generate_candidate_outputs
 from ..scoring.topic_refiner import refine_research_scored_candidates
-from ..scoring.key_core_scorer import score_key_core_candidates, build_key_core_candidate_table
 
 from ..validation.reverse_validator import build_reverse_validation_table, merge_reverse_validation_into_manual_review
 from ..validation.object_family_canonicalizer import ObjectFamilyCanonicalizer
 from ..validation.family_evaluator import evaluate_families, generate_family_report
-from ..validation.final_shortlist import build_final_shortlist
-from ..validation.baseline_compare import build_frequency_baseline_table, build_baseline_comparison_table
 from ..validation.event_quality import (
     build_event_quality_table,
     merge_event_quality_into_events,
     merge_event_quality_into_raw_data,
     merge_event_quality_into_candidates,
 )
-from ..validation.tech_chain_mapper import (
-    load_tech_chain_data,
-    build_tech_chain_mapping_table,
-    merge_tech_chain_mapping_into_candidates,
-)
 from ..validation.temporal_validator import (
     build_temporal_validation_table,
     merge_temporal_validation_into_candidates,
+)
+from ..domain import (
+    DomainContext,
+    DomainPack,
+    load_domain_context,
+    save_domain_pack_snapshot,
 )
 
 from ..utils.config import Config
@@ -51,24 +55,67 @@ ensure_env_loaded()
 class AnalysisPipeline:
     """分析流水线"""
 
-    def __init__(self):
-        self.canonicalizer = ObjectFamilyCanonicalizer()
+    def __init__(
+        self,
+        domain_context: Optional[Any] = None,
+        domain_pack_ref: Optional[Any] = None,
+    ):
+        self.domain_context = self._coerce_domain_context(domain_context, domain_pack_ref)
+        self.canonicalizer = ObjectFamilyCanonicalizer(domain_pack=self.domain_context.domain_pack)
+        self.domain_context_recovery_status = "provided" if domain_context is not None else "pipeline_default"
+        self.domain_pack_dry_run_report_path: Optional[Path] = None
         self.results = {}
         self.report_artifacts: Dict[str, Any] = {}
         self.latest_event_quality_df = pd.DataFrame()
-        self.latest_tech_chain_mapping_df = pd.DataFrame()
         self.latest_temporal_validation_df = pd.DataFrame()
-        self.latest_key_core_scored_df = pd.DataFrame()
-        self.latest_key_core_candidates_df = pd.DataFrame()
         self.latest_reverse_validation_df = pd.DataFrame()
         self.latest_family_metrics_df = pd.DataFrame()
-        self.latest_final_shortlist_df = pd.DataFrame()
-        self.latest_shortlist_dedup_df = pd.DataFrame()
-        self.latest_frequency_baseline_df = pd.DataFrame()
-        self.latest_baseline_comparison_df = pd.DataFrame()
         self.latest_source_documents_df = pd.DataFrame()
         self.latest_signal_evidence_links_df = pd.DataFrame()
         self.latest_signal_reliability_df = pd.DataFrame()
+        self.latest_weak_signals_comparison_df = pd.DataFrame()
+
+    @staticmethod
+    def _coerce_domain_context(
+        domain_context: Optional[Any] = None,
+        domain_pack_ref: Optional[Any] = None,
+    ) -> DomainContext:
+        if isinstance(domain_context, DomainContext):
+            return domain_context
+        if isinstance(domain_context, DomainPack):
+            return DomainContext.from_pack(domain_context)
+        if domain_context is not None:
+            return load_domain_context(domain_context)
+        if domain_pack_ref is not None:
+            return load_domain_context(domain_pack_ref)
+        return load_domain_context("neutral")
+
+    def _set_domain_context(
+        self,
+        domain_context: Optional[Any],
+        *,
+        recovery_status: str,
+    ) -> DomainContext:
+        self.domain_context = self._coerce_domain_context(domain_context)
+        self.canonicalizer = ObjectFamilyCanonicalizer(domain_pack=self.domain_context.domain_pack)
+        self.domain_context_recovery_status = recovery_status
+        return self.domain_context
+
+    def _domain_metadata(self) -> Dict[str, Any]:
+        context = self.domain_context
+        return {
+            "domain_pack_id": context.domain_pack_id,
+            "domain_pack_version": context.domain_pack_version,
+            "domain_pack_hash": context.domain_pack_hash,
+            "domain_runtime_mode": context.runtime_mode,
+            "domain_context_source": self.domain_context_recovery_status,
+        }
+
+    def _attach_domain_metadata(self, df: pd.DataFrame) -> pd.DataFrame:
+        frame = self._ensure_dataframe(df)
+        for key, value in self._domain_metadata().items():
+            frame[key] = value
+        return frame
 
     def run_full_pipeline(
         self,
@@ -77,6 +124,7 @@ class AnalysisPipeline:
         use_cache: bool = True,
         cache_dir: Optional[Path] = None,
         source_config: Optional[Dict[str, Any]] = None,
+        domain_context: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         运行完整分析流水线
@@ -91,6 +139,9 @@ class AnalysisPipeline:
         Returns:
             分析结果字典
         """
+        if domain_context is not None:
+            self._set_domain_context(domain_context, recovery_status="provided")
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         result_dir = Config.RESULT_DIR / timestamp
         result_dir.mkdir(parents=True, exist_ok=True)
@@ -105,20 +156,15 @@ class AnalysisPipeline:
             return {}
         print(f"  加载了 {len(raw_data)} 条数据")
 
-        # 阶段2: 事件抽取
-        print("\n[阶段2] 事件抽取...")
-        events_df = self._extract_events(raw_data, use_cache, cache_dir, data_path=data_path)
+        # 阶段2: 事件抽取与质量评分
+        print("\n[阶段2] 事件抽取与质量评分...")
+        events_df = self._extract_events(raw_data, use_cache, cache_dir, data_path=data_path, source_config=source_config)
         if events_df is None or events_df.empty:
             print("[ERROR] 事件抽取失败")
             return {}
-        print(f"  抽取了 {len(events_df)} 个事件")
-
-        # 阶段2.5: 事件质量评分
-        print("\n[阶段2.5] 事件质量评分...")
-        event_quality_df = self._score_event_quality(events_df, raw_data)
-        events_df = merge_event_quality_into_events(events_df, event_quality_df)
+        event_quality_df = self.latest_event_quality_df.copy()
         raw_data = merge_event_quality_into_raw_data(raw_data, event_quality_df)
-        print(f"  事件质量评分完成，共 {len(event_quality_df)} 条")
+        print(f"  抽取了 {len(events_df)} 个事件，并完成 {len(event_quality_df)} 条事件质量评分")
 
         # 阶段3: 候选成形
         print("\n[阶段3] 候选对象成形...")
@@ -143,25 +189,14 @@ class AnalysisPipeline:
         validated_df = self._validate_reverse(refined_df, candidate_forms_df)
         print(f"  反向验证完成")
 
-        # 阶段6.5: 技术链映射
-        print("\n[阶段6.5] 技术链映射...")
-        validated_df = self._map_tech_chain(validated_df)
-        print(f"  技术链映射完成，共 {len(self.latest_tech_chain_mapping_df)} 条")
-
-        # 阶段6.6: 时间验证
-        print("\n[阶段6.6] 时间验证...")
+        # 阶段7: 时间验证
+        print("\n[阶段7] 时间验证...")
         temporal_validation_df = self._validate_temporal(validated_df, events_df, raw_data)
         validated_df = merge_temporal_validation_into_candidates(validated_df, temporal_validation_df)
         print(f"  时间验证完成，共 {len(temporal_validation_df)} 条")
 
-        # 阶段6.7: 关键核心潜力评分
-        print("\n[阶段6.7] 关键核心潜力评分...")
-        validated_df = self._score_key_core_potential(validated_df, temporal_validation_df)
-        self._build_research_validation_artifacts(validated_df)
-        print(f"  关键核心潜力评分完成，共 {len(self.latest_key_core_scored_df)} 条")
-
-        # 阶段7: 信号生成
-        print("\n[阶段7] 信号生成...")
+        # 阶段8: 信号生成
+        print("\n[阶段8] 信号生成...")
         signals_output = self._generate_signals(validated_df, raw_data)
         if isinstance(signals_output, dict):
             signals_df = signals_output.get("candidates_df", pd.DataFrame())
@@ -171,8 +206,8 @@ class AnalysisPipeline:
             signals_df = pd.DataFrame(signals_output if signals_output is not None else [])
         print(f"  生成了 {len(signals_df)} 个信号")
 
-        # 阶段8: 报告生成
-        print("\n[阶段8] 报告生成...")
+        # 阶段9: 报告生成
+        print("\n[阶段9] 报告生成...")
         report = self._generate_report(signals_output)
         print(f"  报告生成完成")
 
@@ -185,26 +220,22 @@ class AnalysisPipeline:
 
         return {
             "result_dir": result_dir,
+            "domain_context": self.domain_context,
             "events_df": events_df,
             "event_quality_df": self.latest_event_quality_df,
             "candidate_forms_df": candidate_forms_df,
             "scored_df": scored_df,
             "refined_df": refined_df,
             "reverse_validation_df": self.latest_reverse_validation_df,
-            "tech_chain_mapping_df": self.latest_tech_chain_mapping_df,
             "temporal_validation_df": self.latest_temporal_validation_df,
-            "key_core_scored_df": self.latest_key_core_scored_df,
-            "key_core_candidates_df": self.latest_key_core_candidates_df,
             "validated_df": validated_df,
             "signals_df": signals_df,
             "signals_output": signals_output,
             "family_metrics_df": self.latest_family_metrics_df,
-            "final_shortlist_df": self.latest_final_shortlist_df,
-            "frequency_baseline_df": self.latest_frequency_baseline_df,
-            "baseline_comparison_df": self.latest_baseline_comparison_df,
             "source_documents_df": self.latest_source_documents_df,
             "signal_evidence_links_df": self.latest_signal_evidence_links_df,
             "signal_reliability_df": self.latest_signal_reliability_df,
+            "weak_signals_comparison_df": self.latest_weak_signals_comparison_df,
             "report": report,
         }
 
@@ -247,6 +278,107 @@ class AnalysisPipeline:
                 except Exception:
                     continue
         return pd.DataFrame()
+
+    def _resolve_domain_context(
+        self,
+        *,
+        domain_context: Optional[Any] = None,
+        source_result_dir: Optional[Path] = None,
+        events_df: Optional[pd.DataFrame] = None,
+        raw_data: Optional[pd.DataFrame] = None,
+    ) -> DomainContext:
+        if domain_context is not None:
+            return self._set_domain_context(domain_context, recovery_status="provided")
+
+        restored = self._restore_domain_context_from_result_dir(source_result_dir)
+        if restored is not None:
+            return restored
+
+        restored = self._restore_domain_context_from_frames(events_df, raw_data)
+        if restored is not None:
+            return restored
+
+        if self.domain_context.domain_pack_id != "neutral":
+            self.domain_context_recovery_status = "pipeline_default"
+            return self.domain_context
+
+        print("  [Domain Pack] 未能恢复历史 Domain Pack，使用 neutral pack")
+        self.domain_context_recovery_status = "neutral_fallback"
+        return self.domain_context
+
+    def _restore_domain_context_from_result_dir(
+        self,
+        source_result_dir: Optional[Path],
+    ) -> Optional[DomainContext]:
+        if source_result_dir is None:
+            return None
+        source_dir = Path(source_result_dir)
+        pack_path = source_dir / "domain_pack.yaml"
+        if not pack_path.exists():
+            return None
+        try:
+            context = self._set_domain_context(pack_path, recovery_status="result_snapshot")
+            dry_run_path = source_dir / "domain_pack_dry_run.json"
+            self.domain_pack_dry_run_report_path = dry_run_path if dry_run_path.exists() else None
+            return context
+        except Exception as exc:
+            print(f"  [Domain Pack] 读取历史结果 Domain Pack 失败，使用后续恢复策略: {exc}")
+            return None
+
+    def _restore_domain_context_from_frames(
+        self,
+        *frames: Optional[pd.DataFrame],
+    ) -> Optional[DomainContext]:
+        metadata = None
+        for frame in frames:
+            metadata = self._domain_metadata_from_frame(frame)
+            if metadata:
+                break
+        if not metadata:
+            return None
+
+        payload = {
+            "schema_version": "domain_pack_v1",
+            "pack_id": metadata.get("domain_pack_id") or "restored_domain",
+            "pack_name": metadata.get("domain_pack_id") or "Restored Domain Pack",
+            "pack_version": metadata.get("domain_pack_version") or "restored.v1",
+            "source": {
+                "mode": "restored_metadata",
+                "based_on_user_input": {
+                    "field_id": metadata.get("domain_pack_id") or "restored_domain",
+                    "field_name": metadata.get("domain_pack_id") or "Restored Domain",
+                    "keywords": [],
+                    "synonyms": [],
+                    "exclude_terms": [],
+                },
+            },
+            "domain_identity": {
+                "field_id": metadata.get("domain_pack_id") or "restored_domain",
+                "field_name": metadata.get("domain_pack_id") or "Restored Domain",
+                "domain_boundary": "Restored from result metadata only.",
+            },
+        }
+        pack = DomainPack.from_dict(payload)
+        if metadata.get("domain_pack_hash"):
+            pack.domain_pack_hash = str(metadata["domain_pack_hash"])
+        context = DomainContext.from_pack(pack, runtime_mode="restored_metadata")
+        self.domain_context = context
+        self.domain_context_recovery_status = "frame_metadata"
+        return context
+
+    def _domain_metadata_from_frame(self, frame: Optional[pd.DataFrame]) -> Dict[str, Any]:
+        df = self._ensure_dataframe(frame)
+        if df.empty or "domain_pack_hash" not in df.columns:
+            return {}
+        row = df.iloc[0]
+        pack_hash = self._safe_report_text(row.get("domain_pack_hash"))
+        if not pack_hash:
+            return {}
+        return {
+            "domain_pack_id": self._safe_report_text(row.get("domain_pack_id")) or "restored_domain",
+            "domain_pack_version": self._safe_report_text(row.get("domain_pack_version")) or "restored.v1",
+            "domain_pack_hash": pack_hash,
+        }
 
     def _raw_data_from_events(self, events_df: pd.DataFrame) -> pd.DataFrame:
         events_df = self._ensure_dataframe(events_df)
@@ -789,9 +921,6 @@ class AnalysisPipeline:
                     raw_candidate_text,
                     candidate_name,
                     self._safe_report_text(row.get("canonical_candidate_name_en")),
-                    self._safe_report_text(row.get("matched_term")),
-                    self._safe_report_text(row.get("tech_chain_name")),
-                    self._safe_report_text(row.get("tech_chain_official_name")),
                     self._safe_report_text(row.get("mechanism_core")),
                     self._safe_report_text(row.get("relation_target")),
                     self._safe_report_text(row.get("relation_task")),
@@ -1108,14 +1237,16 @@ class AnalysisPipeline:
         events_df: Optional[pd.DataFrame] = None,
         raw_data_path: Optional[Path] = None,
         result_name_suffix: str = "from_events",
+        domain_context: Optional[Any] = None,
+        source_result_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """Continue analysis from already extracted events, skipping raw loading and extraction."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         result_dir = Config.RESULT_DIR / f"{timestamp}_{result_name_suffix}"
         result_dir.mkdir(parents=True, exist_ok=True)
 
-        events_df = self._ensure_dataframe(events_df) if events_df is not None else self._read_dataframe_file(Path(events_path))
-        events_df = backfill_events_dataframe(events_df)
+        input_events_df = self._ensure_dataframe(events_df) if events_df is not None else self._read_dataframe_file(Path(events_path))
+        events_df = backfill_events_dataframe(input_events_df)
         if events_df.empty:
             print("[ERROR] 已抽取事件为空，无法继续分析")
             return {}
@@ -1123,15 +1254,21 @@ class AnalysisPipeline:
         raw_data = self._read_dataframe_file(Path(raw_data_path)) if raw_data_path else pd.DataFrame()
         if raw_data.empty:
             raw_data = self._raw_data_from_events(events_df)
+        self._resolve_domain_context(
+            domain_context=domain_context,
+            source_result_dir=source_result_dir,
+            events_df=input_events_df,
+            raw_data=raw_data,
+        )
 
         print(f"[{timestamp}] 从已抽取事件继续分析...")
         print(f"  事件数: {len(events_df)}，原始上下文记录数: {len(raw_data)}")
 
-        print("\n[阶段2.5] 事件质量评分...")
-        event_quality_df = self._score_event_quality(events_df, raw_data)
-        events_df = merge_event_quality_into_events(events_df, event_quality_df)
+        print("\n[阶段2] 事件结构化与质量评分...")
+        events_df = self._score_events_during_extraction(events_df, raw_data)
+        event_quality_df = self.latest_event_quality_df.copy()
         raw_data = merge_event_quality_into_raw_data(raw_data, event_quality_df)
-        print(f"  事件质量评分完成，共 {len(event_quality_df)} 条")
+        print(f"  已补齐事件质量评分，共 {len(event_quality_df)} 条")
 
         print("\n[阶段3] 候选对象成形...")
         candidate_forms_df = self._form_candidates(events_df, raw_data)
@@ -1152,26 +1289,17 @@ class AnalysisPipeline:
         validated_df = self._validate_reverse(refined_df, candidate_forms_df)
         print("  反向验证完成")
 
-        print("\n[阶段6.5] 技术链映射...")
-        validated_df = self._map_tech_chain(validated_df)
-        print(f"  技术链映射完成，共 {len(self.latest_tech_chain_mapping_df)} 条")
-
-        print("\n[阶段6.6] 时间验证...")
+        print("\n[阶段7] 时间验证...")
         temporal_validation_df = self._validate_temporal(validated_df, events_df, raw_data)
         validated_df = merge_temporal_validation_into_candidates(validated_df, temporal_validation_df)
         print(f"  时间验证完成，共 {len(temporal_validation_df)} 条")
 
-        print("\n[阶段6.7] 关键核心潜力评分...")
-        validated_df = self._score_key_core_potential(validated_df, temporal_validation_df)
-        self._build_research_validation_artifacts(validated_df)
-        print(f"  关键核心潜力评分完成，共 {len(self.latest_key_core_scored_df)} 条")
-
-        print("\n[阶段7] 信号生成...")
+        print("\n[阶段8] 信号生成...")
         signals_output = self._generate_signals(validated_df, raw_data)
         signals_df = self._ensure_dataframe(signals_output)
         print(f"  生成了 {len(signals_df)} 个信号")
 
-        print("\n[阶段8] 报告生成...")
+        print("\n[阶段9] 报告生成...")
         report = self._generate_report(signals_output)
         print("  报告生成完成")
 
@@ -1181,26 +1309,22 @@ class AnalysisPipeline:
 
         return {
             "result_dir": result_dir,
+            "domain_context": self.domain_context,
             "events_df": events_df,
             "event_quality_df": self.latest_event_quality_df,
             "candidate_forms_df": candidate_forms_df,
             "scored_df": scored_df,
             "refined_df": refined_df,
             "reverse_validation_df": self.latest_reverse_validation_df,
-            "tech_chain_mapping_df": self.latest_tech_chain_mapping_df,
             "temporal_validation_df": self.latest_temporal_validation_df,
-            "key_core_scored_df": self.latest_key_core_scored_df,
-            "key_core_candidates_df": self.latest_key_core_candidates_df,
             "validated_df": validated_df,
             "signals_df": signals_df,
             "signals_output": signals_output,
             "family_metrics_df": self.latest_family_metrics_df,
-            "final_shortlist_df": self.latest_final_shortlist_df,
-            "frequency_baseline_df": self.latest_frequency_baseline_df,
-            "baseline_comparison_df": self.latest_baseline_comparison_df,
             "source_documents_df": self.latest_source_documents_df,
             "signal_evidence_links_df": self.latest_signal_evidence_links_df,
             "signal_reliability_df": self.latest_signal_reliability_df,
+            "weak_signals_comparison_df": self.latest_weak_signals_comparison_df,
             "report": report,
             "raw_data": raw_data,
         }
@@ -1212,6 +1336,7 @@ class AnalysisPipeline:
     ) -> Dict[str, Any]:
         """Regenerate report from a saved result directory without rerunning extraction/scoring."""
         source_dir = Path(result_dir)
+        self._resolve_domain_context(source_result_dir=source_dir)
         signals_df = self._load_result_dataframe(source_dir, "signals")
         if signals_df.empty:
             print("[ERROR] 历史目录缺少 signals 文件，无法重生成报告")
@@ -1227,25 +1352,9 @@ class AnalysisPipeline:
         scored_df = self._load_result_dataframe(source_dir, "scored")
         refined_df = self._load_result_dataframe(source_dir, "refined")
         validated_df = self._load_result_dataframe(source_dir, "validated")
-        self.latest_tech_chain_mapping_df = self._load_result_dataframe(source_dir, "tech_chain_mapping")
         self.latest_temporal_validation_df = self._load_result_dataframe(source_dir, "temporal_validation")
-        self.latest_key_core_scored_df = self._load_result_dataframe(source_dir, "key_core_scored")
-        self.latest_key_core_candidates_df = self._load_result_dataframe(source_dir, "key_core_candidates")
         self.latest_reverse_validation_df = self._load_result_dataframe(source_dir, "reverse_validation")
         self.latest_family_metrics_df = self._load_result_dataframe(source_dir, "family_evaluation")
-        self.latest_final_shortlist_df = self._load_result_dataframe(source_dir, "final_shortlist")
-        self.latest_shortlist_dedup_df = self._load_result_dataframe(source_dir, "final_shortlist_dedup_map")
-        self.latest_frequency_baseline_df = self._load_result_dataframe(source_dir, "frequency_baseline")
-        self.latest_baseline_comparison_df = self._load_result_dataframe(source_dir, "baseline_comparison")
-
-        if self.latest_tech_chain_mapping_df.empty and not signals_df.empty:
-            tech_chain_data = load_tech_chain_data(Config.DATA_DIR / "tech_chain")
-            self.latest_tech_chain_mapping_df = build_tech_chain_mapping_table(signals_df, tech_chain_data)
-
-        if not self.latest_tech_chain_mapping_df.empty:
-            signals_df = merge_tech_chain_mapping_into_candidates(signals_df, self.latest_tech_chain_mapping_df)
-            if not validated_df.empty:
-                validated_df = merge_tech_chain_mapping_into_candidates(validated_df, self.latest_tech_chain_mapping_df)
 
         raw_data = events_df.copy() if not events_df.empty else pd.DataFrame(columns=["source_type"])
         if self.latest_temporal_validation_df.empty and not signals_df.empty:
@@ -1256,66 +1365,29 @@ class AnalysisPipeline:
             if not validated_df.empty:
                 validated_df = merge_temporal_validation_into_candidates(validated_df, self.latest_temporal_validation_df)
 
-        if self.latest_key_core_scored_df.empty and not signals_df.empty:
-            self.latest_key_core_scored_df = score_key_core_candidates(signals_df, self.latest_temporal_validation_df)
-            self.latest_key_core_candidates_df = build_key_core_candidate_table(self.latest_key_core_scored_df, top_k=20)
-            signals_df = self.latest_key_core_scored_df
-        elif not self.latest_key_core_scored_df.empty and "key_core_score" not in signals_df.columns:
-            key_core_columns = [
-                "candidate_id",
-                "key_core_score",
-                "key_core_tier",
-                "weak_signal_component",
-                "growth_validation_component",
-                "tech_chain_bottleneck_component",
-                "strategic_importance_component",
-                "evidence_confidence_component",
-                "asset_support_component",
-                "quality_gate_passed",
-                "mapping_gate_passed",
-                "temporal_gate_passed",
-                "object_gate_passed",
-                "key_core_gate_passed",
-                "key_core_reason",
-                "key_core_risk",
-                "recommended_action",
-                "top_evidence_ids",
-            ]
-            available_columns = [column for column in key_core_columns if column in self.latest_key_core_scored_df.columns]
-            if "candidate_id" in signals_df.columns and "candidate_id" in available_columns:
-                signals_df = signals_df.merge(
-                    self.latest_key_core_scored_df[available_columns],
-                    on="candidate_id",
-                    how="left",
-                )
-
         signals_output = self._signals_output_from_signals_df(signals_df)
         report = self._generate_report(signals_output)
         self._save_results(target_dir, events_df, candidate_forms_df, scored_df, refined_df, validated_df, signals_output, report, raw_data=raw_data)
 
         return {
             "result_dir": target_dir,
+            "domain_context": self.domain_context,
             "events_df": events_df,
             "event_quality_df": self.latest_event_quality_df,
             "candidate_forms_df": candidate_forms_df,
             "scored_df": scored_df,
             "refined_df": refined_df,
             "reverse_validation_df": self.latest_reverse_validation_df,
-            "tech_chain_mapping_df": self.latest_tech_chain_mapping_df,
             "temporal_validation_df": self.latest_temporal_validation_df,
-            "key_core_scored_df": self.latest_key_core_scored_df,
-            "key_core_candidates_df": self.latest_key_core_candidates_df,
             "validated_df": validated_df,
             "signals_df": signals_df,
             "signals_output": signals_output,
             "near_strong_df": signals_output.get("near_strong_candidates_df", pd.DataFrame()),
             "family_metrics_df": self.latest_family_metrics_df,
-            "final_shortlist_df": self.latest_final_shortlist_df,
-            "frequency_baseline_df": self.latest_frequency_baseline_df,
-            "baseline_comparison_df": self.latest_baseline_comparison_df,
             "source_documents_df": self.latest_source_documents_df,
             "signal_evidence_links_df": self.latest_signal_evidence_links_df,
             "signal_reliability_df": self.latest_signal_reliability_df,
+            "weak_signals_comparison_df": self.latest_weak_signals_comparison_df,
             "report": report,
             "raw_data": raw_data,
         }
@@ -1326,18 +1398,105 @@ class AnalysisPipeline:
         return text[:80] or "dataset"
 
     @staticmethod
-    def _data_cache_fingerprint(raw_data: pd.DataFrame, data_path: Optional[Path] = None) -> str:
+    def _source_query_value(source_config: Optional[Dict[str, Any]], attr: str, default: Any = None) -> Any:
+        if not source_config:
+            return default
+        query = source_config.get("query", source_config)
+        if hasattr(query, attr):
+            value = getattr(query, attr, default)
+        elif isinstance(query, dict):
+            value = query.get(attr, default)
+        else:
+            value = default
+        return default if value is None else value
+
+    @classmethod
+    def _source_config_analysis_metadata(cls, source_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not source_config:
+            return {}
+        metadata = {
+            "analysis_tech_field_id": cls._source_query_value(source_config, "tech_field_id", ""),
+            "analysis_tech_field_name": cls._source_query_value(source_config, "tech_field_name", ""),
+            "analysis_keywords": cls._source_query_value(source_config, "keywords", []),
+            "analysis_synonyms": cls._source_query_value(source_config, "synonyms", []),
+        }
+        return {
+            key: value
+            for key, value in metadata.items()
+            if value not in ("", None, []) and value != {}
+        }
+
+    @classmethod
+    def _source_config_fingerprint_part(cls, source_config: Optional[Dict[str, Any]]) -> str:
+        if not source_config:
+            return ""
+        values = {
+            "backend": source_config.get("backend", ""),
+            "tech_field_id": cls._source_query_value(source_config, "tech_field_id", ""),
+            "tech_field_name": cls._source_query_value(source_config, "tech_field_name", ""),
+            "keywords": cls._source_query_value(source_config, "keywords", []),
+            "synonyms": cls._source_query_value(source_config, "synonyms", []),
+            "exclude_terms": cls._source_query_value(source_config, "exclude_terms", []),
+            "source_types": cls._source_query_value(source_config, "source_types", []),
+            "counts": cls._source_query_value(source_config, "counts", {}),
+            "use_topic_index": cls._source_query_value(source_config, "use_topic_index", True),
+            "sort": cls._source_query_value(source_config, "sort", "relevance"),
+        }
+        return json.dumps(values, ensure_ascii=False, sort_keys=True, default=str)
+
+    @staticmethod
+    def _data_cache_fingerprint(
+        raw_data: pd.DataFrame,
+        data_path: Optional[Path] = None,
+        source_config: Optional[Dict[str, Any]] = None,
+        domain_pack_hash: str = "",
+    ) -> str:
+        domain_part = str(domain_pack_hash or "neutral")
+        if source_config and source_config.get("backend") == "db":
+            query = source_config["query"]
+            def get_val(obj, attr, default=None):
+                return getattr(obj, attr, None) if hasattr(obj, attr) else obj.get(attr, default) if isinstance(obj, dict) else default
+
+            tech_field_id = get_val(query, "tech_field_id", "")
+            tech_field_name = get_val(query, "tech_field_name", "")
+            start_date = get_val(query, "start_date", "")
+            end_date = get_val(query, "end_date", "")
+            source_types = get_val(query, "source_types", [])
+            counts = get_val(query, "counts", {})
+            keywords = get_val(query, "keywords", [])
+            synonyms = get_val(query, "synonyms", [])
+            exclude_terms = get_val(query, "exclude_terms", [])
+            use_topic_index = get_val(query, "use_topic_index", True)
+            sort_mode = get_val(query, "sort", "relevance")
+
+            fingerprint_str = "::".join([
+                str(tech_field_id),
+                str(tech_field_name),
+                str(start_date),
+                str(end_date),
+                str(sorted(source_types)),
+                str(sorted(counts.items())),
+                str(sorted(keywords)),
+                str(sorted(synonyms)),
+                str(sorted(exclude_terms)),
+                str(use_topic_index),
+                str(sort_mode),
+                domain_part,
+            ])
+            return hashlib.sha1(fingerprint_str.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+        source_config_part = AnalysisPipeline._source_config_fingerprint_part(source_config)
         if data_path:
             path = Path(data_path)
             try:
                 stat = path.stat()
-                raw = f"{path.resolve()}::{stat.st_size}::{int(stat.st_mtime)}"
+                raw = f"{path.resolve()}::{stat.st_size}::{int(stat.st_mtime)}::{source_config_part}::{domain_part}"
             except OSError:
-                raw = str(path)
+                raw = f"{path}::{source_config_part}::{domain_part}"
             return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
         ids = raw_data.get("id", pd.Series(dtype="object")).astype(str).tolist()
-        raw = "|".join(ids[:500]) + f"::{len(raw_data)}"
+        raw = "|".join(ids[:500]) + f"::{len(raw_data)}::{source_config_part}::{domain_part}"
         return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
     def _event_cache_path(
@@ -1345,27 +1504,61 @@ class AnalysisPipeline:
         raw_data: pd.DataFrame,
         cache_dir: Optional[Path],
         data_path: Optional[Path] = None,
+        source_config: Optional[Dict[str, Any]] = None
     ) -> Optional[Path]:
         if cache_dir is None:
             return None
+
+        if source_config and source_config.get("backend") == "db":
+            query = source_config["query"]
+            q_id = getattr(query, "tech_field_id", None)
+            if not q_id and isinstance(query, dict):
+                q_id = query.get("tech_field_id")
+            q_id = q_id or "db"
+            slug = self._slugify_cache_part(f"db_{q_id}")
+            domain_hash = self.domain_context.domain_pack_hash
+            fingerprint = self._data_cache_fingerprint(
+                raw_data,
+                data_path,
+                source_config=source_config,
+                domain_pack_hash=domain_hash,
+            )
+            return cache_dir / "events" / f"{slug}__{domain_hash}__{fingerprint}.json"
+
         dataset_name = Path(data_path).stem if data_path else "selected_sources"
         slug = self._slugify_cache_part(dataset_name)
-        fingerprint = self._data_cache_fingerprint(raw_data, data_path)
-        return cache_dir / "events" / f"{slug}__{fingerprint}.json"
+        domain_hash = self.domain_context.domain_pack_hash
+        fingerprint = self._data_cache_fingerprint(
+            raw_data,
+            data_path,
+            source_config=source_config,
+            domain_pack_hash=domain_hash,
+        )
+        return cache_dir / "events" / f"{slug}__{domain_hash}__{fingerprint}.json"
 
     def _load_data(self, data_path: Optional[Path], sample_size: int, source_config: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         """加载数据并标准化列名"""
+        analysis_metadata = self._source_config_analysis_metadata(source_config)
+
+        def attach_analysis_metadata(df: pd.DataFrame) -> pd.DataFrame:
+            if df is None or df.empty or not analysis_metadata:
+                return df
+            enriched = df.copy()
+            for column, value in analysis_metadata.items():
+                enriched[column] = [value] * len(enriched) if isinstance(value, list) else value
+            return enriched
+
         def standardize_df(df: pd.DataFrame, source_type: str = "未知") -> pd.DataFrame:
             """标准化DataFrame，确保有text、id、source_type列"""
             # 可能的文本列名
-            text_cols = ['text', 'content', 'abstract', '标题', '摘要', '内容', 
+            text_cols = ['text', 'content', 'abstract', '标题', '摘要', '内容',
                         'title', '专利名称', '发明名称', 'name', '专利标题', '名称',
                         'title_cn', 'abstract_first', 'summary', 'snippet', 'description']
             # 可能的ID列名
             id_cols = ['id', 'ID', '编号', '专利号', '申请号', '公开号', 'doc_id', 'source_id']
-            
+
             result = pd.DataFrame()
-            
+
             available_text_cols = [col for col in text_cols if col in df.columns]
             title_source_col = next(
                 (col for col in ['title', '标题', '专利名称', '发明名称', 'title_cn', 'name', '名称'] if col in df.columns),
@@ -1391,20 +1584,20 @@ class AnalysisPipeline:
                 abstract_text = df[abstract_source_col].fillna("").astype(str)
                 combined_text = (title_text + "\n" + abstract_text).str.strip()
                 result['text'] = result['text'].where(result['text'].str.strip() != "", combined_text)
-            
+
             # 查找ID列
             id_col = None
             for col in id_cols:
                 if col in df.columns:
                     id_col = col
                     break
-            
+
             if id_col:
                 result['id'] = df[id_col].fillna("").astype(str)
             else:
                 # 生成默认ID
                 result['id'] = [f"{source_type}_{i}" for i in range(len(df))]
-            
+
             # 添加来源类型
             source_type_col = next(
                 (col for col in ['source_type', 'type', '来源类型', '数据源类型'] if col in df.columns),
@@ -1429,11 +1622,37 @@ class AnalysisPipeline:
                     result['date'] = df[col]
                     break
 
-            # 标准化机构/来源
-            org_cols = ['org', 'organization', 'institution', 'source', 'author_org', 'applicant', '申请人', '机构']
+            # 标准化机构/来源。专利优先使用申请人/权利人，论文优先使用机构/单位。
+            org_cols = [
+                'org', 'organization', 'organizations', 'institution', 'institutions',
+                'affiliation', 'affiliations', 'author_org', 'source',
+                'applicants_norm', 'applicants', 'applicant', 'applicant_cn',
+                'applicant_en', 'applicant_name', 'assignee', 'assignees',
+                'assignee_cn', 'assignee_en', 'owner', 'patentee',
+                '申请人', '申请单位', '专利申请人', '申请机构', '专利权人', '权利人',
+                '机构', '单位', '所属机构', '来源机构',
+            ]
             for col in org_cols:
                 if col in df.columns:
                     result['org'] = df[col]
+                    break
+
+            author_cols = [
+                'authors', 'author', 'inventors', 'inventor', 'inventor_cn',
+                'inventor_en', '作者', '发明人',
+            ]
+            for col in author_cols:
+                if col in df.columns:
+                    result['authors'] = df[col]
+                    break
+
+            affiliation_cols = [
+                'affiliations', 'affiliation', 'institution', 'institutions',
+                'organization', 'author_org', '申请机构', '所属机构',
+            ]
+            for col in affiliation_cols:
+                if col in df.columns:
+                    result['affiliations'] = df[col]
                     break
 
             # 标准化链接
@@ -1449,9 +1668,9 @@ class AnalysisPipeline:
 
             result['text'] = result['text'].fillna("").astype(str)
             result = result[result['text'].str.strip() != ""].reset_index(drop=True)
-             
+
             return result
-        
+
         def load_single_file(file_path: Path) -> Optional[pd.DataFrame]:
             """加载单个文件"""
             try:
@@ -1464,7 +1683,7 @@ class AnalysisPipeline:
             except Exception as e:
                 print(f"  警告: 无法加载 {file_path}: {e}")
             return None
-        
+
         def infer_source_type(filename: str) -> tuple:
             """根据文件名推断来源类型，返回 (中文名, 英文key)"""
             fname = filename.lower()
@@ -1472,19 +1691,30 @@ class AnalysisPipeline:
                 return ('专利', 'patent')
             elif '文献' in fname or 'literature' in fname or 'paper' in fname:
                 return ('文献', 'literature')
+            elif '政策' in fname or 'policy' in fname:
+                return ('政策', 'policy')
             elif '研报' in fname or 'report' in fname:
                 return ('研报', 'report')
             elif '资讯' in fname or 'news' in fname:
                 return ('资讯', 'news')
             return ('未知', 'unknown')
-        
+
+        # 数据库分支
+        if source_config and source_config.get("backend") == "db":
+            from src.data_access.repository import DataRepository
+            query = source_config["query"]
+            print(f"  [数据访问层] 正在从实时数据库检索数据...")
+            raw_data = DataRepository.from_env().load_documents(query)
+            return attach_analysis_metadata(standardize_df(raw_data, "数据库"))
+
         # 加载指定文件
         if data_path and data_path.exists():
             df = load_single_file(data_path)
             if df is not None:
                 source_type, _ = infer_source_type(data_path.name)
                 standardized = standardize_df(df, source_type)
-                return standardized.head(sample_size) if sample_size else standardized
+                standardized = standardized.head(sample_size) if sample_size else standardized
+                return attach_analysis_metadata(standardized)
             return pd.DataFrame()
 
         # 默认加载data目录下所有数据
@@ -1497,26 +1727,29 @@ class AnalysisPipeline:
         source_files = {
             '专利': [],
             '文献': [],
+            '政策': [],
             '研报': [],
             '资讯': [],
             '未知': []
         }
-        
+
         for f in data_files:
             source_type, _ = infer_source_type(f.name)
             source_files[source_type].append(f)
-        
+
         # 确定每个数据源的采样数量
         source_counts = {}
         if source_config:
             counts = source_config.get('counts', {})
             sources = source_config.get('sources')
-            
+
             if counts:
                 # 使用指定的数量
                 source_key_map = {
                     'patent': '专利',
+                    'paper': '文献',
                     'literature': '文献',
+                    'policy': '政策',
                     'report': '研报',
                     'news': '资讯'
                 }
@@ -1527,7 +1760,9 @@ class AnalysisPipeline:
                 # 指定了数据源类型，平均分配
                 source_key_map = {
                     'patent': '专利',
+                    'paper': '文献',
                     'literature': '文献',
+                    'policy': '政策',
                     'report': '研报',
                     'news': '资讯'
                 }
@@ -1542,25 +1777,36 @@ class AnalysisPipeline:
                 per_source = sample_size // len(active_sources)
                 for src in active_sources:
                     source_counts[src] = per_source
-        
-        # 加载数据
+
+        # 加载数据：先按类型合并所有文件，再统一截断到指定数量
         dfs = []
         for source_type, count in source_counts.items():
+            if count <= 0:
+                continue
             files = source_files.get(source_type, [])
             if not files:
                 continue
-            
-            # 加载该类型的数据文件
+
+            # 加载该类型的所有数据文件并合并
+            type_dfs = []
             for f in files:
                 df = load_single_file(f)
                 if df is not None:
                     standardized = standardize_df(df, source_type)
-                    # 采样指定数量
-                    sampled = standardized.head(count) if count < len(standardized) else standardized
-                    dfs.append(sampled)
-                    print(f"  加载 {f.name}: {len(sampled)} 条 ({source_type})")
-        
+                    type_dfs.append(standardized)
+                    print(f"  读取 {f.name}: {len(standardized)} 条 ({source_type})")
+
+            if type_dfs:
+                # 合并同类型所有文件后，统一截断到指定数量
+                type_combined = pd.concat(type_dfs, ignore_index=True)
+                sampled = type_combined.head(count) if count < len(type_combined) else type_combined
+                dfs.append(sampled)
+                print(f"  {source_type} 合计采样: {len(sampled)}/{len(type_combined)} 条 (目标 {count})")
+
         if not dfs:
+            if source_config:
+                print("  警告: 当前来源配置未加载到数据，停止本轮分析，避免回退到无关默认样例")
+                return pd.DataFrame()
             # 如果没有按配置加载，回退到默认行为
             for f in data_files[:5]:
                 df = load_single_file(f)
@@ -1574,7 +1820,17 @@ class AnalysisPipeline:
             return pd.DataFrame()
 
         combined = pd.concat(dfs, ignore_index=True)
-        return combined.head(sample_size)
+        return attach_analysis_metadata(combined)
+
+    def _score_events_during_extraction(
+        self,
+        events_df: pd.DataFrame,
+        raw_data: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """在事件抽取阶段同步生成并回挂事件质量分。"""
+        events_df = backfill_events_dataframe(self._ensure_dataframe(events_df))
+        event_quality_df = self._score_event_quality(events_df, raw_data)
+        return merge_event_quality_into_events(events_df, event_quality_df)
 
     def _extract_events(
         self,
@@ -1582,24 +1838,34 @@ class AnalysisPipeline:
         use_cache: bool,
         cache_dir: Optional[Path],
         data_path: Optional[Path] = None,
+        source_config: Optional[Dict[str, Any]] = None,
     ) -> Optional[pd.DataFrame]:
-        """抽取事件"""
-        cache_path = self._event_cache_path(raw_data, cache_dir, data_path)
+        """抽取事件，并在同一阶段回挂事件质量分。"""
+        cache_path = self._event_cache_path(raw_data, cache_dir, data_path, source_config=source_config)
 
         # 检查缓存
         if use_cache and cache_path:
             cached = load_event_cache(cache_path, expected_ids=raw_data.get('id', []).tolist())
             if cached is not None:
                 print("  使用缓存的事件数据")
-                return cached
+                cached = _renormalize_cached_events_with_source(cached, raw_data)
+                return self._score_events_during_extraction(cached, raw_data)
 
         # 执行事件抽取
+        disable_llm = os.environ.get("DISABLE_LLM_EXTRACTION", "false").lower() in ("true", "1")
+        use_api_flag = not disable_llm
+        if disable_llm:
+            print("  [INFO] DISABLE_LLM_EXTRACTION=True，跳过 LLM API 事件抽取，仅使用本地规则模拟抽取")
+
         events_df = process_events(
             raw_data,
-            use_api=True,
+            use_api=use_api_flag,
             cache_path=cache_path if use_cache else None,
             refresh_cache=not use_cache,
+            domain_context=self.domain_context,
         )
+
+        events_df = self._score_events_during_extraction(events_df, raw_data)
 
         # 保存缓存
         if use_cache and cache_path:
@@ -1612,6 +1878,7 @@ class AnalysisPipeline:
                     "cache_fingerprint": cache_path.stem,
                     "source_ids": raw_data.get("id", pd.Series(dtype="object")).astype(str).tolist(),
                     "event_schema_version": WEAK_SIGNAL_EVENT_SCHEMA_VERSION,
+                    **self._domain_metadata(),
                 },
             )
 
@@ -1625,7 +1892,7 @@ class AnalysisPipeline:
 
     def _form_candidates(self, events_df: pd.DataFrame, raw_data: pd.DataFrame) -> pd.DataFrame:
         """候选成形"""
-        return build_candidate_forms(events_df, raw_data)
+        return build_candidate_forms(events_df, raw_data, domain_context=self.domain_context)
 
     def _apply_candidate_event_quality(
         self,
@@ -1830,6 +2097,7 @@ class AnalysisPipeline:
         if candidate_df is None or candidate_df.empty:
             return candidate_df.copy() if isinstance(candidate_df, pd.DataFrame) else pd.DataFrame()
 
+        # ---- 第一轮：精确 flow key 去重（原有逻辑）----
         groups: Dict[str, List[pd.Series]] = {}
         for index, row in candidate_df.reset_index(drop=True).iterrows():
             groups.setdefault(self._candidate_flow_key(row, index), []).append(row)
@@ -1842,15 +2110,54 @@ class AnalysisPipeline:
         for column in candidate_df.columns:
             if column not in deduped.columns:
                 deduped[column] = ""
-        return deduped.reset_index(drop=True)
+
+        # ---- 第二轮：宽松去重 ----
+        # 将 display_candidate_name + mechanism_core 归一化后相同的候选合并
+        # 解决：同名候选因 relation_task / constraint_signature 等 slot 值微小差异
+        #       产生多条重复记录的问题
+        def _relaxed_key(row: pd.Series) -> str:
+            name_text = self._safe_report_text(row.get("display_candidate_name"))
+            mechanism_text = self._safe_report_text(row.get("mechanism_core"))
+            stage_text = self._safe_report_text(row.get("candidate_stage"))
+            parts = []
+            for text in [stage_text, name_text, mechanism_text]:
+                normalized = re.sub(r"[\s_\-]+", "", text.lower())
+                normalized = re.sub(r"[^\w\u4e00-\u9fff]+", "", normalized)
+                if normalized:
+                    parts.append(normalized)
+            return "::".join(parts) if parts else ""
+
+        relaxed_groups: Dict[str, List[pd.Series]] = {}
+        fallback_rows: List[pd.Series] = []
+        for index, row in deduped.reset_index(drop=True).iterrows():
+            key = _relaxed_key(row)
+            if key:
+                relaxed_groups.setdefault(key, []).append(row)
+            else:
+                fallback_rows.append(row)
+
+        final_rows = []
+        for relaxed_key, rows in relaxed_groups.items():
+            if len(rows) == 1:
+                final_rows.append(rows[0].to_dict())
+            else:
+                final_rows.append(self._merge_candidate_flow_group(rows, relaxed_key))
+        for row in fallback_rows:
+            final_rows.append(row.to_dict())
+
+        result = pd.DataFrame(final_rows)
+        for column in candidate_df.columns:
+            if column not in result.columns:
+                result[column] = ""
+        return result.reset_index(drop=True)
 
     def _score_candidates(self, candidate_forms_df: pd.DataFrame) -> pd.DataFrame:
         """评分"""
-        return score_all_candidates(candidate_forms_df)
+        return score_all_candidates(candidate_forms_df, domain_context=self.domain_context)
 
     def _refine_topics(self, scored_df: pd.DataFrame) -> pd.DataFrame:
         """主题细化"""
-        return refine_research_scored_candidates(scored_df, top_k=20)
+        return refine_research_scored_candidates(scored_df, top_k=20, domain_context=self.domain_context)
 
     def _validate_reverse(
         self,
@@ -1863,79 +2170,31 @@ class AnalysisPipeline:
         validated_df = merge_reverse_validation_into_manual_review(scored_df, reverse_df)
         return refresh_research_layers(validated_df)
 
-    def _map_tech_chain(self, candidate_df: pd.DataFrame) -> pd.DataFrame:
-        """将候选对象映射到轻量技术链先验。"""
-        if candidate_df is None or candidate_df.empty:
-            self.latest_tech_chain_mapping_df = pd.DataFrame()
-            return candidate_df.copy() if isinstance(candidate_df, pd.DataFrame) else pd.DataFrame()
-        tech_chain_data = load_tech_chain_data(Config.DATA_DIR / "tech_chain")
-        mapping_df = build_tech_chain_mapping_table(candidate_df, tech_chain_data)
-        self.latest_tech_chain_mapping_df = mapping_df.copy()
-        return merge_tech_chain_mapping_into_candidates(candidate_df, mapping_df)
-
     def _validate_temporal(
         self,
         candidate_df: pd.DataFrame,
         events_df: pd.DataFrame,
         raw_data: pd.DataFrame,
     ) -> pd.DataFrame:
-        """生成候选级时间验证表。"""
+        """生成候选级时间验证表（仅针对弱信号进行观测）。"""
+        if candidate_df is not None and not candidate_df.empty:
+            is_weak = pd.Series(False, index=candidate_df.index)
+            if "signal_type" in candidate_df.columns:
+                is_weak = is_weak | (candidate_df["signal_type"] == "weak_signal")
+            if "candidate_stage" in candidate_df.columns:
+                is_weak = is_weak | (candidate_df["candidate_stage"] == "formed_candidate_strong")
+
+            has_stage_cols = ("signal_type" in candidate_df.columns) or ("candidate_stage" in candidate_df.columns)
+            if has_stage_cols:
+                candidate_df = candidate_df[is_weak].copy()
+
         temporal_validation_df = build_temporal_validation_table(candidate_df, events_df, raw_data)
         self.latest_temporal_validation_df = temporal_validation_df.copy()
         return temporal_validation_df
 
-    def _score_key_core_potential(
-        self,
-        candidate_df: pd.DataFrame,
-        temporal_validation_df: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """生成关键核心潜力评分并缓存关键核心候选表。"""
-        key_core_scored_df = score_key_core_candidates(candidate_df, temporal_validation_df)
-        self.latest_key_core_scored_df = key_core_scored_df.copy()
-        self.latest_key_core_candidates_df = build_key_core_candidate_table(key_core_scored_df, top_k=20)
-        return key_core_scored_df
-
-    def _build_key_core_candidates(self, key_core_scored_df: pd.DataFrame) -> pd.DataFrame:
-        """构建关键核心潜力候选短名单。"""
-        key_core_candidates_df = build_key_core_candidate_table(key_core_scored_df, top_k=20)
-        self.latest_key_core_candidates_df = key_core_candidates_df.copy()
-        return key_core_candidates_df
-
     def _generate_signals(self, candidate_df: pd.DataFrame, raw_data: pd.DataFrame) -> pd.DataFrame:
         """信号生成"""
-        return generate_candidate_outputs(candidate_df, raw_data)
-
-    def _build_research_validation_artifacts(self, validated_df: pd.DataFrame) -> None:
-        """Build shortlist and baseline comparison artifacts after reverse validation."""
-        if validated_df is None or validated_df.empty:
-            self.latest_final_shortlist_df = pd.DataFrame()
-            self.latest_shortlist_dedup_df = pd.DataFrame()
-            self.latest_frequency_baseline_df = pd.DataFrame()
-            self.latest_baseline_comparison_df = pd.DataFrame()
-            return
-
-        final_shortlist_df, shortlist_dedup_df = build_final_shortlist(validated_df, top_k=20)
-        frequency_baseline_df = build_frequency_baseline_table(
-            validated_df,
-            reverse_validation_df=self.latest_reverse_validation_df,
-            top_k=20,
-        )
-        baseline_comparison_df = build_baseline_comparison_table(
-            validated_df,
-            frequency_baseline_df,
-            reverse_validation_df=self.latest_reverse_validation_df,
-            top_k=20,
-        )
-
-        self.latest_final_shortlist_df = final_shortlist_df
-        self.latest_shortlist_dedup_df = shortlist_dedup_df
-        self.latest_frequency_baseline_df = frequency_baseline_df
-        self.latest_baseline_comparison_df = baseline_comparison_df
-        self.report_artifacts["final_shortlist_summary"] = {
-            "shortlist_count": int(len(final_shortlist_df)),
-            "frequency_baseline_count": int(len(frequency_baseline_df)),
-            "baseline_comparison_count": int(len(baseline_comparison_df)),
-        }
+        return generate_candidate_outputs(candidate_df, raw_data, domain_context=self.domain_context)
 
     @staticmethod
     def _family_priority_rank(value: Any) -> int:
@@ -2290,21 +2549,6 @@ class AnalysisPipeline:
                 "quality_risk_flag": self._safe_report_text(row.get("quality_risk_flag")),
                 "excluded_low_quality_evidence_count": low_quality_evidence_count,
             },
-            "tech_chain_mapping": {
-                "tech_chain_node_id": self._safe_report_text(row.get("tech_chain_node_id")),
-                "tech_chain_name": self._safe_report_text(row.get("tech_chain_name")),
-                "tech_chain_official_name": self._safe_report_text(row.get("tech_chain_official_name")),
-                "mapping_relation": self._safe_report_text(row.get("mapping_relation")),
-                "mapping_confidence": round(self._safe_report_float(row.get("mapping_confidence"), 0.0), 3),
-                "mapping_method": self._safe_report_text(row.get("mapping_method")),
-                "matched_term": self._safe_report_text(row.get("matched_term")),
-                "parent_technology": self._safe_report_text(row.get("parent_technology")),
-                "bottleneck_level": self._safe_report_text(row.get("bottleneck_level")),
-                "strategic_importance_level": self._safe_report_text(row.get("strategic_importance_level")),
-                "mapping_reason": self._safe_report_text(row.get("mapping_reason")),
-                "mapping_risk": self._safe_report_text(row.get("tech_chain_mapping_risk")),
-                "coverage_flag": self._safe_report_text(row.get("tech_chain_mapping_coverage_flag")),
-            },
             "temporal_validation": {
                 "tier": self._safe_report_text(row.get("temporal_validation_tier")),
                 "status": self._safe_report_text(row.get("temporal_validation_status")),
@@ -2314,25 +2558,11 @@ class AnalysisPipeline:
                 "source_growth_rate": round(self._safe_report_float(row.get("source_growth_rate"), 0.0), 3),
                 "org_growth_rate": round(self._safe_report_float(row.get("org_growth_rate"), 0.0), 3),
                 "date_coverage_ratio": round(self._safe_report_float(row.get("date_coverage_ratio"), 0.0), 3),
+                "monitoring_priority": self._safe_report_text(row.get("monitoring_priority")),
+                "monitoring_action": self._safe_report_text(row.get("monitoring_action")),
+                "next_observation_window_start": self._safe_report_text(row.get("next_observation_window_start")),
+                "next_observation_window_end": self._safe_report_text(row.get("next_observation_window_end")),
                 "reason": self._truncate_report_text(row.get("temporal_validation_reason"), 220),
-            },
-            "key_core_potential": {
-                "key_core_score": round(self._safe_report_float(row.get("key_core_score"), 0.0), 2),
-                "key_core_tier": self._safe_report_text(row.get("key_core_tier")),
-                "weak_signal_component": round(self._safe_report_float(row.get("weak_signal_component"), 0.0), 2),
-                "growth_validation_component": round(self._safe_report_float(row.get("growth_validation_component"), 0.0), 2),
-                "tech_chain_bottleneck_component": round(self._safe_report_float(row.get("tech_chain_bottleneck_component"), 0.0), 2),
-                "strategic_importance_component": round(self._safe_report_float(row.get("strategic_importance_component"), 0.0), 2),
-                "evidence_confidence_component": round(self._safe_report_float(row.get("evidence_confidence_component"), 0.0), 2),
-                "asset_support_component": round(self._safe_report_float(row.get("asset_support_component"), 0.0), 2),
-                "quality_gate_passed": self._safe_report_bool(row.get("quality_gate_passed", False)),
-                "mapping_gate_passed": self._safe_report_bool(row.get("mapping_gate_passed", False)),
-                "temporal_gate_passed": self._safe_report_bool(row.get("temporal_gate_passed", False)),
-                "object_gate_passed": self._safe_report_bool(row.get("object_gate_passed", False)),
-                "key_core_gate_passed": self._safe_report_bool(row.get("key_core_gate_passed", False)),
-                "reason": self._truncate_report_text(row.get("key_core_reason"), 260),
-                "risk": self._safe_report_text(row.get("key_core_risk")),
-                "recommended_action": self._safe_report_text(row.get("recommended_action")),
             },
             "evidence_items": evidence_items,
             "primary_evidence_ids": [item["evidence_id"] for item in evidence_items[:2]],
@@ -2342,121 +2572,6 @@ class AnalysisPipeline:
         packet["organization_summary"] = self._build_packet_org_summary(packet)
         packet["evidence_highlights"] = self._build_packet_evidence_highlights(packet)
         return packet
-
-    def _build_key_core_report_candidates(self, candidates_df: pd.DataFrame) -> List[Dict[str, Any]]:
-        if candidates_df is None or candidates_df.empty or "key_core_score" not in candidates_df.columns:
-            return []
-
-        df = candidates_df.copy()
-        weak_score_series = (
-            df["weak_signal_score"]
-            if "weak_signal_score" in df.columns
-            else pd.Series([0.0] * len(df), index=df.index)
-        )
-        df["_key_core_score"] = pd.to_numeric(df["key_core_score"], errors="coerce").fillna(0.0)
-        df["_weak_signal_score"] = pd.to_numeric(weak_score_series, errors="coerce").fillna(0.0)
-        preferred_tiers = {"core_key_candidate", "strong_key_potential", "watchlist_key_potential"}
-        tier_order = {
-            "core_key_candidate": 0,
-            "strong_key_potential": 1,
-            "watchlist_key_potential": 2,
-            "weak_signal_only": 3,
-            "insufficient_evidence": 4,
-            "not_key_core_candidate": 5,
-        }
-        tier_series = (
-            df["key_core_tier"]
-            if "key_core_tier" in df.columns
-            else pd.Series([""] * len(df), index=df.index)
-        )
-        gate_series = (
-            df["key_core_gate_passed"]
-            if "key_core_gate_passed" in df.columns
-            else pd.Series([False] * len(df), index=df.index)
-        )
-        df["_tier_order"] = tier_series.map(
-            lambda value: tier_order.get(self._safe_report_text(value), 9)
-        )
-
-        candidate_subset = df[
-            tier_series.astype(str).isin(preferred_tiers)
-            | (df["_key_core_score"] >= 50)
-            | gate_series.map(self._safe_report_bool)
-        ].copy()
-        if candidate_subset.empty:
-            candidate_subset = df[df["_key_core_score"] > 0].copy()
-        if candidate_subset.empty:
-            return []
-
-        dedupe_column = next(
-            (
-                column
-                for column in ["candidate_cluster_id", "candidate_id", "display_candidate_name", "candidate_name"]
-                if column in candidate_subset.columns
-            ),
-            None,
-        )
-        candidate_subset = candidate_subset.sort_values(
-            by=["_tier_order", "_key_core_score", "_weak_signal_score"],
-            ascending=[True, False, False],
-            na_position="last",
-        )
-        if dedupe_column:
-            candidate_subset = candidate_subset.drop_duplicates(subset=[dedupe_column], keep="first")
-
-        candidates = []
-        for rank, (_, row) in enumerate(candidate_subset.head(10).iterrows(), 1):
-            candidates.append(
-                {
-                    "rank": rank,
-                    "name": (
-                        self._safe_report_text(row.get("candidate_name"))
-                        or self._safe_report_text(row.get("display_candidate_name"))
-                        or self._safe_report_text(row.get("final_research_object_name"))
-                        or "Unknown"
-                    ),
-                    "key_core_score": round(self._safe_report_float(row.get("key_core_score"), 0.0), 2),
-                    "key_core_tier": self._safe_report_text(row.get("key_core_tier")),
-                    "key_core_gate_passed": self._safe_report_bool(row.get("key_core_gate_passed", False)),
-                    "weak_signal_score": round(self._safe_report_float(row.get("weak_signal_score"), 0.0), 2),
-                    "tech_chain_name": self._safe_report_text(row.get("tech_chain_name")),
-                    "mapping_relation": self._safe_report_text(row.get("mapping_relation")),
-                    "bottleneck_level": self._safe_report_text(row.get("bottleneck_level")),
-                    "strategic_importance_level": self._safe_report_text(row.get("strategic_importance_level")),
-                    "temporal_validation_tier": self._safe_report_text(row.get("temporal_validation_tier")),
-                    "temporal_momentum_score": round(self._safe_report_float(row.get("temporal_momentum_score"), 0.0), 2),
-                    "candidate_core_evidence_quality": round(
-                        self._safe_report_float(
-                            row.get("candidate_core_evidence_quality"),
-                            self._safe_report_float(row.get("candidate_evidence_quality"), 0.0),
-                        ),
-                        2,
-                    ),
-                    "source_count": int(self._safe_report_float(row.get("source_count"), 0.0)),
-                    "evidence_count": int(self._safe_report_float(row.get("cluster_evidence_count"), 0.0)),
-                    "reason": self._truncate_report_text(row.get("key_core_reason"), 260),
-                    "risk": self._safe_report_text(row.get("key_core_risk")),
-                    "recommended_action": self._safe_report_text(row.get("recommended_action")),
-                    "components": {
-                        "weak_signal": round(self._safe_report_float(row.get("weak_signal_component"), 0.0), 2),
-                        "growth_validation": round(self._safe_report_float(row.get("growth_validation_component"), 0.0), 2),
-                        "tech_chain_bottleneck": round(
-                            self._safe_report_float(row.get("tech_chain_bottleneck_component"), 0.0),
-                            2,
-                        ),
-                        "strategic_importance": round(
-                            self._safe_report_float(row.get("strategic_importance_component"), 0.0),
-                            2,
-                        ),
-                        "evidence_confidence": round(
-                            self._safe_report_float(row.get("evidence_confidence_component"), 0.0),
-                            2,
-                        ),
-                        "asset_support": round(self._safe_report_float(row.get("asset_support_component"), 0.0), 2),
-                    },
-                }
-            )
-        return candidates
 
     def _build_grounded_report_packets(
         self,
@@ -2487,7 +2602,6 @@ class AnalysisPipeline:
             )
 
         weak_signal_clusters = self._build_weak_signal_clusters(weak_packets)
-        key_core_candidates = self._build_key_core_report_candidates(candidates_df)
 
         evidence_lookup = {}
         signal_lookup = {}
@@ -2508,10 +2622,8 @@ class AnalysisPipeline:
                 "near_strong_count": int(len(near_strong_df)),
                 "scope_count": int(len(scope_overviews)),
                 "weak_signal_cluster_count": int(len(weak_signal_clusters)),
-                "key_core_candidate_count": int(len(key_core_candidates)),
             },
             "family_summary": self.report_artifacts.get("family_evaluation_summary", {}),
-            "key_core_candidates": key_core_candidates,
             "weak_signals": weak_packets,
             "weak_signal_clusters": weak_signal_clusters,
             "near_strong_signals": near_packets,
@@ -2656,9 +2768,7 @@ class AnalysisPipeline:
                         "reverse_validation": packet.get("reverse_validation", {}),
                         "family": packet.get("family", {}),
                         "evidence_quality": packet.get("evidence_quality", {}),
-                        "tech_chain_mapping": packet.get("tech_chain_mapping", {}),
                         "temporal_validation": packet.get("temporal_validation", {}),
-                        "key_core_potential": packet.get("key_core_potential", {}),
                         "chain_summary": packet.get("chain_summary", ""),
                         "timeline_summary": packet.get("timeline_summary", ""),
                         "organization_summary": packet.get("organization_summary", ""),
@@ -2710,7 +2820,6 @@ class AnalysisPipeline:
             "generated_at": packets.get("generated_at"),
             "summary": packets.get("summary", {}),
             "family_summary": packets.get("family_summary", {}),
-            "key_core_candidates": packets.get("key_core_candidates", []),
             "weak_signals": shrink(packets.get("weak_signals", [])[:12]),
             "weak_signal_clusters": shrink_clusters(packets.get("weak_signal_clusters", [])),
             "near_strong_signals": shrink(packets.get("near_strong_signals", [])),
@@ -2941,16 +3050,6 @@ class AnalysisPipeline:
                         "evidence_ids": primary_ids,
                     }
                 )
-            tech_chain_statement = self._safe_report_text(self._compose_packet_tech_chain_text(packet))
-            if tech_chain_statement and primary_ids:
-                key_facts.append(
-                    {
-                        "statement": tech_chain_statement,
-                        "signal_ids": [packet["signal_id"]],
-                        "evidence_ids": primary_ids,
-                    }
-                )
-
             why_it_matters = []
             if primary_ids:
                 if packet["validation"]["multi_source_validated"] or packet["validation"]["semantic_validated"] or packet["validation"]["event_doc_semantic_validated"]:
@@ -2979,9 +3078,6 @@ class AnalysisPipeline:
                 uncertainties.append("时间延续性尚未充分验证，暂不宜将其判断为稳定趋势。")
             if packet["validation"]["traceable_ratio"] < 0.5:
                 uncertainties.append("可追溯证据占比有限，需要继续补充带时间或来源标识的文本。")
-            mapping = packet.get("tech_chain_mapping", {}) or {}
-            if self._safe_report_text(mapping.get("mapping_relation")) in {"no_match", "broader_match"}:
-                uncertainties.append("技术链映射仍需复核，暂不宜作为关键核心技术结论。")
             if not uncertainties:
                 uncertainties.append("现有证据已形成初步支撑，但仍需继续观察其后续扩散情况。")
 
@@ -3554,33 +3650,6 @@ class AnalysisPipeline:
             text = (text + "；" if text else "") + f"{excluded_count} 条低于 4 分的证据未作为报告核心证据"
         return text + "。" if text else ""
 
-    def _compose_packet_tech_chain_text(self, packet: Dict[str, Any]) -> str:
-        mapping = packet.get("tech_chain_mapping", {}) or {}
-        relation = self._safe_report_text(mapping.get("mapping_relation"))
-        method = self._safe_report_text(mapping.get("mapping_method"))
-        name = self._safe_report_text(mapping.get("tech_chain_name") or mapping.get("tech_chain_official_name"))
-        if not name or relation == "no_match" or method == "no_match":
-            return "技术链映射尚未命中明确节点，后续应优先补充术语表或人工复核。"
-
-        confidence = self._safe_report_float(mapping.get("mapping_confidence"), 0.0)
-        bottleneck = self._safe_report_text(mapping.get("bottleneck_level")) or "unknown"
-        strategic = self._safe_report_text(mapping.get("strategic_importance_level")) or "unknown"
-        relation_text = {
-            "exact_match": "精确匹配",
-            "close_match": "近似匹配",
-            "broader_match": "上位方向匹配",
-            "narrower_match": "下位对象匹配",
-            "related_match": "相关匹配",
-            "manual_override": "人工指定",
-        }.get(relation, relation)
-        text = (
-            f"技术链上可映射到“{name}”，关系为{relation_text}，"
-            f"置信度约 {confidence:.2f}，卡点等级为 {bottleneck}、战略重要性为 {strategic}"
-        )
-        if relation == "broader_match" or (method == "semantic_match" and confidence < 0.7):
-            text += "；该映射只表示方向相关，不宜写成已命中确定关键节点"
-        return text + "。"
-
     def _build_frontier_subheading(self, packet: Dict[str, Any]) -> str:
         source_set = {item for item in packet.get("source_types", []) if item}
         if "paper" in source_set and "patent" in source_set and ("news" in source_set or "report" in source_set):
@@ -3726,38 +3795,6 @@ class AnalysisPipeline:
             focus.append(f"围绕{cluster.get('cluster_name')}继续跟踪{name_text}的新增证据")
         return "；".join(focus) + "。"
 
-    def _key_core_tier_label(self, tier: Any) -> str:
-        return {
-            "core_key_candidate": "核心候选",
-            "strong_key_potential": "强潜力候选",
-            "watchlist_key_potential": "观察候选",
-            "weak_signal_only": "弱信号保留",
-            "insufficient_evidence": "证据不足",
-            "not_key_core_candidate": "暂不列入",
-        }.get(self._safe_report_text(tier), self._safe_report_text(tier) or "未分层")
-
-    def _compose_key_core_candidate_lines(self, candidates: List[Dict[str, Any]], max_items: int = 5) -> List[str]:
-        lines = []
-        for item in candidates[:max_items]:
-            name = self._safe_report_text(item.get("name")) or "Unknown"
-            score = self._safe_report_float(item.get("key_core_score"), 0.0)
-            tier = self._key_core_tier_label(item.get("key_core_tier"))
-            chain_name = self._safe_report_text(item.get("tech_chain_name")) or "未命中明确节点"
-            bottleneck = self._safe_report_text(item.get("bottleneck_level")) or "unknown"
-            strategic = self._safe_report_text(item.get("strategic_importance_level")) or "unknown"
-            temporal = self._safe_report_text(item.get("temporal_validation_tier")) or "unknown"
-            action = self._safe_report_text(item.get("recommended_action"))
-            risk = self._safe_report_text(item.get("risk"))
-            suffix = f"建议：{action}" if action else "建议继续补充跨源、跨时间证据。"
-            if risk:
-                suffix += f" 风险：{risk}。"
-            lines.append(
-                f"{int(self._safe_report_float(item.get('rank'), len(lines) + 1))}. {name}：关键核心潜力得分 {score:.1f}，"
-                f"层级为{tier}，技术链映射到“{chain_name}”，卡点/战略等级为 {bottleneck}/{strategic}，"
-                f"时间验证为 {temporal}。{suffix}"
-            )
-        return lines
-
     @staticmethod
     def _cn_marker(index: int) -> str:
         numerals = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
@@ -3808,8 +3845,6 @@ class AnalysisPipeline:
                 or "相关线索已涉及" in statement
                 or "侧线索提到" in statement
                 or "证据质量均值" in statement
-                or "技术链上可映射" in statement
-                or "技术链映射尚未命中" in statement
             ):
                 continue
             detail_candidates.append(statement)
@@ -3817,7 +3852,6 @@ class AnalysisPipeline:
         insight = self._compose_signal_position(packet)
         evidence_narrative = self._compose_packet_evidence_narrative(packet, max_items=2)
         quality_text = self._compose_packet_quality_text(packet)
-        tech_chain_text = self._compose_packet_tech_chain_text(packet)
         caution = self._compact_report_paragraph(analysis.get("uncertainties", []), max_items=1)
         return " ".join(
             part
@@ -3827,7 +3861,6 @@ class AnalysisPipeline:
                 self._safe_report_text(packet.get("timeline_summary")),
                 evidence_narrative,
                 quality_text,
-                tech_chain_text,
                 self._safe_report_text(packet.get("organization_summary")),
                 details,
                 caution,
@@ -3840,7 +3873,6 @@ class AnalysisPipeline:
         weak_clusters = packets.get("weak_signal_clusters", [])
         near_packets = packets.get("near_strong_signals", [])
         scope_packets = packets.get("scope_overviews", [])
-        key_core_candidates = packets.get("key_core_candidates", [])
         summary = packets.get("summary", {})
         weak_count = int(summary.get("weak_signal_count", len(weak_packets)) or len(weak_packets))
         analysis_by_id = {item["signal_id"]: item for item in facts.get("signal_analyses", [])}
@@ -3886,39 +3918,48 @@ class AnalysisPipeline:
             report_lines.append("当前输入样本尚不足以支撑明确的前沿技术摘要，后续需要继续补充跨源且可追溯的文本证据。")
             report_lines.append("")
 
-        report_lines.extend(["二、关键核心技术候选", ""])
-        if key_core_candidates:
-            core_count = sum(
-                1
-                for item in key_core_candidates
-                if self._safe_report_text(item.get("key_core_tier")) == "core_key_candidate"
+        report_lines.extend(["二、弱信号持续观测", ""])
+        monitored_packets = [packet for packet in weak_packets if packet.get("temporal_validation", {})]
+        high_priority = [
+            packet
+            for packet in monitored_packets
+            if self._safe_report_text(packet.get("temporal_validation", {}).get("monitoring_priority")) == "high"
+        ]
+        medium_priority = [
+            packet
+            for packet in monitored_packets
+            if self._safe_report_text(packet.get("temporal_validation", {}).get("monitoring_priority")) == "medium"
+        ]
+        report_lines.append("（一）观测总体判断")
+        report_lines.append(
+            f"本轮对 {len(monitored_packets)} 个弱信号候选生成了时间验证结果，"
+            f"其中高优先级持续跟踪对象 {len(high_priority)} 个，常规观察对象 {len(medium_priority)} 个。"
+            "时间验证用于判断线索是否在后续窗口继续出现、扩散到更多来源或获得更高质量证据。"
+        )
+        report_lines.append("")
+        report_lines.append("（二）优先跟踪清单")
+        if monitored_packets:
+            priority_order = {"high": 0, "medium": 1, "reference": 2, "needs_dates": 3, "low": 4}
+            ranked_packets = sorted(
+                monitored_packets,
+                key=lambda packet: (
+                    priority_order.get(
+                        self._safe_report_text(packet.get("temporal_validation", {}).get("monitoring_priority")),
+                        9,
+                    ),
+                    -self._safe_report_float(packet.get("temporal_validation", {}).get("momentum_score"), 0.0),
+                ),
             )
-            strong_count = sum(
-                1
-                for item in key_core_candidates
-                if self._safe_report_text(item.get("key_core_tier")) == "strong_key_potential"
-            )
-            watch_count = sum(
-                1
-                for item in key_core_candidates
-                if self._safe_report_text(item.get("key_core_tier")) == "watchlist_key_potential"
-            )
-            report_lines.append("（一）候选总体判断")
-            report_lines.append(
-                f"v0.02 已在弱信号评分之外单独生成关键核心潜力评分。本轮形成 {len(key_core_candidates)} 个候选，"
-                f"其中核心候选 {core_count} 个、强潜力候选 {strong_count} 个、观察候选 {watch_count} 个。"
-                "该结论仍是潜力排序，不等同于最终关键核心技术认定。"
-            )
-            report_lines.append("")
-            report_lines.append("（二）优先复核清单")
-            report_lines.extend(self._compose_key_core_candidate_lines(key_core_candidates))
-            report_lines.append("")
+            for index, packet in enumerate(ranked_packets[:5], 1):
+                temporal = packet.get("temporal_validation", {}) or {}
+                priority = self._safe_report_text(temporal.get("monitoring_priority")) or "low"
+                action = self._safe_report_text(temporal.get("monitoring_action")) or self._build_signal_followup_priority(packet)
+                score = self._safe_report_float(temporal.get("momentum_score"), 0.0)
+                tier = self._safe_report_text(temporal.get("tier")) or "unknown"
+                report_lines.append(f"{index}. {packet['name']}：观测优先级 {priority}，时间层级 {tier}，动量分 {score:.1f}。{action}")
         else:
-            report_lines.append("（一）暂无可提升的关键核心候选")
-            report_lines.append(
-                "当前样本尚未同时满足时间增长、技术链卡点、战略重要性和证据质量等门槛，建议继续保留为弱信号观察。"
-            )
-            report_lines.append("")
+            report_lines.append("当前样本缺少可用日期，建议先补齐来源日期后再做持续观测。")
+        report_lines.append("")
 
         report_lines.extend(["三、产业科技动态", ""])
 
@@ -4035,12 +4076,12 @@ class AnalysisPipeline:
     def _generate_report(self, signals_output) -> str:
         """生成 grounded 报告。"""
         return self._generate_grounded_report(signals_output)
-    
+
     def _generate_report_with_llm(self, candidates_df, weak_signals, near_strong_df) -> str:
         """使用LLM生成报告"""
         # 构建信号信息
         signals_info = []
-        
+
         # 添加弱信号
         if not weak_signals.empty:
             for idx, row in weak_signals.head(10).iterrows():
@@ -4054,7 +4095,7 @@ class AnalysisPipeline:
                 signals_info.append(f"  - 机制: {mechanism}")
                 signals_info.append(f"  - 证据数: {evidence_count}")
                 signals_info.append(f"  - 机构数: {org_count}")
-        
+
         # 添加近强信号
         if not near_strong_df.empty:
             for _, row in near_strong_df.head(10).iterrows():
@@ -4066,7 +4107,7 @@ class AnalysisPipeline:
                 signals_info.append(f"  - 得分: {score:.2f}")
                 signals_info.append(f"  - 机制: {mechanism}")
                 signals_info.append(f"  - 证据数: {evidence_count}")
-        
+
         # 添加观察范围概览
         if not candidates_df.empty and 'candidate_stage' in candidates_df.columns:
             scope_overviews = candidates_df[candidates_df['candidate_stage'] == 'scope_overview']
@@ -4077,9 +4118,9 @@ class AnalysisPipeline:
                     name = row.get('display_candidate_name', row.get('scope_name', 'Unknown'))
                     count = row.get('cluster_evidence_count', 0)
                     signals_info.append(f"  - {name} (证据数: {count})")
-        
+
         signals_text = "\n".join(signals_info) if signals_info else "暂无有效信号"
-        
+
         prompt = f"""你是一位AI技术趋势分析师，请基于以下数据生成一份结构化的技术趋势分析报告。
 
 **分析数据：**
@@ -4101,12 +4142,12 @@ class AnalysisPipeline:
 
 请用中文撰写报告，语言专业、简洁、有洞察力。
 """
-        
+
         # 使用配置的报告生成模型
         report_model = os.getenv("REPORT_MODEL", os.getenv("OPENAI_MODEL", "Qwen/Qwen2.5-7B-Instruct"))
         print(f"  [报告生成] 使用模型: {report_model}")
         print(f"  [报告生成] 正在发送请求...")
-        
+
         result, usage_info, _ = chat_text(
             prompt,
             model=report_model,
@@ -4114,10 +4155,10 @@ class AnalysisPipeline:
             max_tokens=1000,
             timeout=60,
         )
-        
+
         print(f"  [报告生成] LLM响应长度: {len(result)} 字符")
         print(f"  [报告生成] Token使用: prompt={usage_info['prompt_tokens']}, completion={usage_info['completion_tokens']}")
-        
+
         if usage_info["prompt_tokens"] or usage_info["completion_tokens"]:
             record_call(
                 call_type="报告生成",
@@ -4125,7 +4166,7 @@ class AnalysisPipeline:
                 completion_tokens=usage_info["completion_tokens"],
                 success=True,
             )
-        
+
         # 构建完整报告
         report_lines = [
             "=" * 60,
@@ -4142,18 +4183,18 @@ class AnalysisPipeline:
             "-" * 60,
             "",
         ]
-        
+
         report_lines.append(result)
-        
+
         report_lines.extend([
             "",
             "=" * 60,
             "报告结束",
             "=" * 60,
         ])
-        
+
         return "\n".join(report_lines)
-    
+
     def _generate_report_fallback(self, candidates_df, weak_signals, near_strong_df) -> str:
         """回退生成报告（规则方式）"""
         report_lines = [
@@ -4180,7 +4221,7 @@ class AnalysisPipeline:
                 by=['weak_signal_score', 'hotspot_score'],
                 ascending=[False, False]
             ) if 'weak_signal_score' in weak_signals.columns else weak_signals
-            
+
             for idx, (_, row) in enumerate(sorted_signals.head(20).iterrows(), 1):
                 name = row.get('display_candidate_name', row.get('canonical_candidate_name_en', row.get('tech_name', 'Unknown')))
                 score = row.get('weak_signal_score', row.get('hotspot_score', 0))
@@ -4196,13 +4237,13 @@ class AnalysisPipeline:
                 report_lines.append(f"   - 机制: {mechanism}")
         else:
             report_lines.append("- 暂无弱信号")
-        
+
         # 添加观察范围概览
         if not candidates_df.empty and 'candidate_stage' in candidates_df.columns:
             scope_overviews = candidates_df[candidates_df['candidate_stage'] == 'scope_overview']
         else:
             scope_overviews = pd.DataFrame()
-        
+
         report_lines.extend(["", "## 3. 观察范围概览", ""])
         if len(scope_overviews) > 0:
             for idx, (_, row) in enumerate(scope_overviews.head(10).iterrows(), 1):
@@ -4211,7 +4252,7 @@ class AnalysisPipeline:
                 report_lines.append(f"{idx}. **{name}** (证据数: {count})")
         else:
             report_lines.append("- 暂无观察范围概览")
-        
+
         # 添加近强信号
         report_lines.extend(["", "## 4. 近强信号列表", ""])
         if len(near_strong_df) > 0:
@@ -4220,7 +4261,7 @@ class AnalysisPipeline:
                 sort_cols.append('cluster_evidence_count')
             if 'weak_signal_score' in near_strong_df.columns:
                 sort_cols.append('weak_signal_score')
-            
+
             if sort_cols:
                 sorted_near_strong = near_strong_df.sort_values(
                     by=sort_cols,
@@ -4228,7 +4269,7 @@ class AnalysisPipeline:
                 )
             else:
                 sorted_near_strong = near_strong_df
-            
+
             for idx, (_, row) in enumerate(sorted_near_strong.head(10).iterrows(), 1):
                 name = row.get('display_candidate_name', row.get('canonical_candidate_name_en', row.get('tech_name', 'Unknown')))
                 count = row.get('cluster_evidence_count', 0)
@@ -4243,6 +4284,29 @@ class AnalysisPipeline:
 
         return "\n".join(report_lines)
 
+    def _copy_domain_pack_dry_run_snapshot(self, result_dir: Path) -> Optional[Path]:
+        source_path = self.domain_pack_dry_run_report_path
+        if source_path is None:
+            return None
+        source_path = Path(source_path)
+        if not source_path.exists():
+            return None
+        target_path = Path(result_dir) / "domain_pack_dry_run.json"
+        if source_path.resolve() != target_path.resolve():
+            shutil.copyfile(source_path, target_path)
+        return target_path
+
+    def _report_metadata_payload(self, temporal_validation_df: pd.DataFrame) -> Dict[str, Any]:
+        metadata = {
+            "report_generation_mode": self.report_artifacts.get("report_generation_mode", ""),
+            "temporal_validation_count": int(len(temporal_validation_df)),
+        }
+        metadata.update(self._domain_metadata())
+        metadata["domain_pack_dry_run_snapshot"] = bool(
+            (Path(self.domain_pack_dry_run_report_path).exists() if self.domain_pack_dry_run_report_path else False)
+        )
+        return metadata
+
     def _save_results(
         self,
         result_dir: Path,
@@ -4256,6 +4320,11 @@ class AnalysisPipeline:
         raw_data: Optional[pd.DataFrame] = None,
     ):
         """保存所有结果"""
+        result_dir = Path(result_dir)
+        result_dir.mkdir(parents=True, exist_ok=True)
+        save_domain_pack_snapshot(self.domain_context.domain_pack, result_dir=result_dir)
+        self._copy_domain_pack_dry_run_snapshot(result_dir)
+
         # 确保所有数据都是DataFrame
         def ensure_df(data):
             if isinstance(data, dict):
@@ -4265,45 +4334,45 @@ class AnalysisPipeline:
             elif not isinstance(data, pd.DataFrame):
                 return pd.DataFrame(data if data else [])
             return data
-        
+
         events_df = ensure_df(events_df)
         event_quality_df = ensure_df(self.latest_event_quality_df)
-        tech_chain_mapping_df = ensure_df(self.latest_tech_chain_mapping_df)
         temporal_validation_df = ensure_df(self.latest_temporal_validation_df)
-        key_core_scored_df = ensure_df(self.latest_key_core_scored_df)
-        key_core_candidates_df = ensure_df(self.latest_key_core_candidates_df)
         candidate_forms_df = ensure_df(candidate_forms_df)
         scored_df = ensure_df(scored_df)
         refined_df = ensure_df(refined_df)
         validated_df = ensure_df(validated_df)
         signals_df = ensure_df(signals_df)
+        events_df = self._attach_domain_metadata(events_df)
+        event_quality_df = self._attach_domain_metadata(event_quality_df)
+        temporal_validation_df = self._attach_domain_metadata(temporal_validation_df)
+        candidate_forms_df = self._attach_domain_metadata(candidate_forms_df)
+        scored_df = self._attach_domain_metadata(scored_df)
+        refined_df = self._attach_domain_metadata(refined_df)
+        validated_df = self._attach_domain_metadata(validated_df)
+        signals_df = self._attach_domain_metadata(signals_df)
         signals_df = self._assign_signal_ids(signals_df)
         source_documents_df = self._build_source_documents(raw_data, events_df)
         signal_evidence_links_df = self._build_signal_evidence_links(signals_df, source_documents_df)
         signal_reliability_df = self._build_signal_reliability_table(signals_df, signal_evidence_links_df)
         signals_df = self._apply_signal_reliability_gate(signals_df, signal_reliability_df)
+        source_documents_df = self._attach_domain_metadata(source_documents_df)
+        signal_evidence_links_df = self._attach_domain_metadata(signal_evidence_links_df)
+        signal_reliability_df = self._attach_domain_metadata(signal_reliability_df)
         self.latest_source_documents_df = source_documents_df
         self.latest_signal_evidence_links_df = signal_evidence_links_df
         self.latest_signal_reliability_df = signal_reliability_df
         reverse_validation_df = ensure_df(self.latest_reverse_validation_df)
         family_metrics_df = ensure_df(self.latest_family_metrics_df)
-        final_shortlist_df = ensure_df(self.latest_final_shortlist_df)
-        shortlist_dedup_df = ensure_df(self.latest_shortlist_dedup_df)
-        frequency_baseline_df = ensure_df(self.latest_frequency_baseline_df)
-        baseline_comparison_df = ensure_df(self.latest_baseline_comparison_df)
-        
+        reverse_validation_df = self._attach_domain_metadata(reverse_validation_df)
+        family_metrics_df = self._attach_domain_metadata(family_metrics_df)
+
         # 保存为JSON
         events_df.to_json(result_dir / "events.json", orient='records', force_ascii=False, indent=2)
         event_quality_df.to_json(result_dir / "event_quality.json", orient='records', force_ascii=False, indent=2)
         event_quality_df.to_csv(result_dir / "event_quality.csv", index=False, encoding='utf-8-sig')
-        tech_chain_mapping_df.to_json(result_dir / "tech_chain_mapping.json", orient='records', force_ascii=False, indent=2)
-        tech_chain_mapping_df.to_csv(result_dir / "tech_chain_mapping.csv", index=False, encoding='utf-8-sig')
         temporal_validation_df.to_json(result_dir / "temporal_validation.json", orient='records', force_ascii=False, indent=2)
         temporal_validation_df.to_csv(result_dir / "temporal_validation.csv", index=False, encoding='utf-8-sig')
-        key_core_scored_df.to_json(result_dir / "key_core_scored.json", orient='records', force_ascii=False, indent=2)
-        key_core_scored_df.to_csv(result_dir / "key_core_scored.csv", index=False, encoding='utf-8-sig')
-        key_core_candidates_df.to_json(result_dir / "key_core_candidates.json", orient='records', force_ascii=False, indent=2)
-        key_core_candidates_df.to_csv(result_dir / "key_core_candidates.csv", index=False, encoding='utf-8-sig')
         candidate_forms_df.to_json(result_dir / "candidate_forms.json", orient='records', force_ascii=False, indent=2)
         scored_df.to_json(result_dir / "scored.json", orient='records', force_ascii=False, indent=2)
         refined_df.to_json(result_dir / "refined.json", orient='records', force_ascii=False, indent=2)
@@ -4320,14 +4389,6 @@ class AnalysisPipeline:
         if not family_metrics_df.empty:
             family_metrics_df.to_json(result_dir / "family_evaluation.json", orient='records', force_ascii=False, indent=2)
             family_metrics_df.to_csv(result_dir / "family_evaluation.csv", index=False, encoding='utf-8-sig')
-        final_shortlist_df.to_json(result_dir / "final_shortlist.json", orient='records', force_ascii=False, indent=2)
-        final_shortlist_df.to_csv(result_dir / "final_shortlist.csv", index=False, encoding='utf-8-sig')
-        shortlist_dedup_df.to_json(result_dir / "final_shortlist_dedup_map.json", orient='records', force_ascii=False, indent=2)
-        shortlist_dedup_df.to_csv(result_dir / "final_shortlist_dedup_map.csv", index=False, encoding='utf-8-sig')
-        frequency_baseline_df.to_json(result_dir / "frequency_baseline.json", orient='records', force_ascii=False, indent=2)
-        frequency_baseline_df.to_csv(result_dir / "frequency_baseline.csv", index=False, encoding='utf-8-sig')
-        baseline_comparison_df.to_json(result_dir / "baseline_comparison.json", orient='records', force_ascii=False, indent=2)
-        baseline_comparison_df.to_csv(result_dir / "baseline_comparison.csv", index=False, encoding='utf-8-sig')
 
         with open(result_dir / "report.txt", 'w', encoding='utf-8') as f:
             f.write(report)
@@ -4343,23 +4404,17 @@ class AnalysisPipeline:
             "",
             "- 旧主线 CLI 已完成一次端到端运行。",
             "- `report.txt` 继续按旧主线报告样式生成。",
-            "- 本轮已保存增强后的证据链、对象族评估、最终短名单和基线对照产物。",
+            "- 本轮已保存增强后的证据链、对象族评估和时间持续观测产物。",
             "",
             "## 产物计数",
             "",
             f"- 事件数: {len(events_df)}",
             f"- 事件质量记录数: {len(event_quality_df)}",
-            f"- 技术链映射记录数: {len(tech_chain_mapping_df)}",
             f"- 时间验证记录数: {len(temporal_validation_df)}",
-            f"- 关键核心评分记录数: {len(key_core_scored_df)}",
-            f"- 关键核心候选记录数: {len(key_core_candidates_df)}",
             f"- 候选数: {len(candidate_forms_df)}",
             f"- 评分候选数: {len(scored_df)}",
             f"- 反向验证记录数: {len(reverse_validation_df)}",
             f"- 对象族评估记录数: {len(family_metrics_df)}",
-            f"- 最终短名单记录数: {len(final_shortlist_df)}",
-            f"- 频次基线记录数: {len(frequency_baseline_df)}",
-            f"- 基线对照记录数: {len(baseline_comparison_df)}",
             f"- 源文档记录数: {len(source_documents_df)}",
             f"- 证据链记录数: {len(signal_evidence_links_df)}",
             f"- 证据可靠性记录数: {len(signal_reliability_df)}",
@@ -4367,7 +4422,7 @@ class AnalysisPipeline:
             "## feat 参考对照",
             "",
             "- `focus_sample`、`balanced600`、`supplement_v2` 冻结结果继续作为参考样本，不直接作为当前主线结果。",
-            "- 当前主线已覆盖 feat 中最关键的中间产物类型：反向验证、对象族评估、最终短名单、频次基线和基线对照。",
+            "- 当前主线已覆盖弱信号识别和持续观测所需的中间产物类型：反向验证、对象族评估、时间验证和证据链。",
             "- 后续若使用相同大样本数据运行，可直接用本目录 CSV 与 feat 冻结 CSV 做对象级对照。",
             "",
             "## 剩余风险",
@@ -4399,20 +4454,6 @@ class AnalysisPipeline:
                     json.dumps(grounding_check, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
-            metadata = {
-                "report_generation_mode": self.report_artifacts.get("report_generation_mode", ""),
-                "final_shortlist_count": int(len(final_shortlist_df)),
-                "frequency_baseline_count": int(len(frequency_baseline_df)),
-                "baseline_comparison_count": int(len(baseline_comparison_df)),
-                "tech_chain_mapping_count": int(len(tech_chain_mapping_df)),
-                "temporal_validation_count": int(len(temporal_validation_df)),
-                "key_core_scored_count": int(len(key_core_scored_df)),
-                "key_core_candidates_count": int(len(key_core_candidates_df)),
-            }
-            (result_dir / "report_metadata.json").write_text(
-                json.dumps(metadata, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
             family_report = self.report_artifacts.get("family_evaluation_report")
             if family_report:
                 (result_dir / "family_evaluation_report.md").write_text(
@@ -4425,3 +4466,132 @@ class AnalysisPipeline:
                     str(raw_response),
                     encoding="utf-8",
                 )
+
+        (result_dir / "report_metadata.json").write_text(
+            json.dumps(self._report_metadata_payload(temporal_validation_df), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        # 提取、归档并比对弱信号
+        self._compare_and_archive_weak_signals(result_dir, signals_df)
+
+    def _compare_and_archive_weak_signals(
+        self,
+        result_dir: Path,
+        signals_df: pd.DataFrame,
+    ):
+        """
+        提取弱信号，将其存档，并与历史记录进行比对，得出趋势（增长/减弱/持平/新增）。
+        """
+        signals_df = self._ensure_dataframe(signals_df)
+        if signals_df.empty:
+            self.latest_weak_signals_comparison_df = pd.DataFrame()
+            return
+
+        # 1. 过滤出弱信号
+        is_weak = pd.Series(False, index=signals_df.index)
+        if "signal_type" in signals_df.columns:
+            is_weak = is_weak | (signals_df["signal_type"] == "weak_signal")
+        if "confirmed_signal_type" in signals_df.columns:
+            is_weak = is_weak | (signals_df["confirmed_signal_type"] == "confirmed_weak_signal")
+        if "candidate_stage" in signals_df.columns:
+            is_weak = is_weak | (signals_df["candidate_stage"] == "formed_candidate_strong")
+
+        weak_df = signals_df[is_weak].copy()
+
+        # 2. 创建存档目录
+        archive_dir = Config.RESULT_DIR / "weak_signals_archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        # 3. 存档当前弱信号
+        archive_filename = f"weak_signals_{result_dir.name}.json"
+        archive_path = archive_dir / archive_filename
+        weak_df.to_json(archive_path, orient='records', force_ascii=False, indent=2)
+
+        # 同时也保存在当前运行目录中
+        weak_df.to_json(result_dir / "weak_signals.json", orient='records', force_ascii=False, indent=2)
+        weak_df.to_csv(result_dir / "weak_signals.csv", index=False, encoding='utf-8-sig')
+
+        # 4. 寻找到最近一次的过往弱信号记录文件进行比对
+        all_archive_files = sorted(list(archive_dir.glob("weak_signals_*.json")))
+        previous_files = [f for f in all_archive_files if f.name != archive_filename]
+
+        previous_weak_df = pd.DataFrame()
+        if previous_files:
+            latest_previous_file = previous_files[-1]
+            try:
+                previous_weak_df = pd.read_json(latest_previous_file)
+            except Exception as e:
+                print(f"  读取历史弱信号存档失败: {latest_previous_file}, 错误: {e}")
+
+        # 5. 进行比对
+        def get_name(row):
+            return self._safe_report_text(
+                row.get("display_candidate_name")
+                or row.get("tech_name")
+                or row.get("technology")
+            )
+
+        past_mentions_dict = {}
+        if not previous_weak_df.empty:
+            for _, row in previous_weak_df.iterrows():
+                name = get_name(row)
+                if name:
+                    mentions = self._safe_report_float(row.get("total_mentions"), 0.0)
+                    past_mentions_dict[name] = mentions
+
+        comparison_rows = []
+        for _, row in weak_df.iterrows():
+            name = get_name(row)
+            if not name:
+                continue
+
+            current_mentions = self._safe_report_float(row.get("total_mentions"), 0.0)
+            past_mentions = past_mentions_dict.get(name, None)
+
+            if past_mentions is None:
+                trend = "新增"
+                trend_symbol = "🆕 新增"
+                past_mentions_val = 0.0
+            else:
+                past_mentions_val = past_mentions
+                if current_mentions > past_mentions:
+                    trend = "增长"
+                    trend_symbol = "↗️ 增长"
+                elif current_mentions < past_mentions:
+                    trend = "减弱"
+                    trend_symbol = "↘️ 减弱"
+                else:
+                    trend = "持平"
+                    trend_symbol = "➡️ 持平"
+
+            comparison_rows.append({
+                "candidate_name": name,
+                "signal_id": self._safe_report_text(row.get("signal_id")),
+                "current_mentions": int(current_mentions),
+                "past_mentions": int(past_mentions_val),
+                "trend": trend,
+                "trend_symbol": trend_symbol,
+                "first_seen_date": self._safe_report_text(row.get("first_seen_date")),
+                "last_seen_date": self._safe_report_text(row.get("last_seen_date")),
+                "temporal_momentum_score": round(self._safe_report_float(row.get("temporal_momentum_score"), 0.0), 2),
+                "growth_rate": round(self._safe_report_float(row.get("growth_rate"), 0.0), 4),
+                "monitoring_priority": self._safe_report_text(row.get("monitoring_priority")),
+                "monitoring_action": self._safe_report_text(row.get("monitoring_action")),
+                "temporal_validation_reason": self._safe_report_text(row.get("temporal_validation_reason")),
+            })
+
+        comparison_df = pd.DataFrame(comparison_rows)
+        if comparison_df.empty:
+            comparison_df = pd.DataFrame(columns=[
+                "candidate_name", "signal_id", "current_mentions", "past_mentions",
+                "trend", "trend_symbol", "first_seen_date", "last_seen_date",
+                "temporal_momentum_score", "growth_rate", "monitoring_priority",
+                "monitoring_action", "temporal_validation_reason"
+            ])
+
+        self.latest_weak_signals_comparison_df = comparison_df.copy()
+
+        # 保存比对结果在当前运行目录中
+        comparison_df.to_json(result_dir / "weak_signals_comparison.json", orient='records', force_ascii=False, indent=2)
+        comparison_df.to_csv(result_dir / "weak_signals_comparison.csv", index=False, encoding='utf-8-sig')

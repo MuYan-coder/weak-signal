@@ -1,5 +1,16 @@
 # Changelog
 
+## Local Maintenance - 2026-06-02
+
+### 新增
+
+- 新增根目录本地维护文档：`PROJECT_OVERVIEW.md`、`ARCHITECTURE.md`、`TASKS.md`、`DECISIONS.md`、`KNOWN_ISSUES.md`。
+- 在 `.gitignore` 中追加本地维护文档忽略规则，避免新建维护文档进入后续提交。
+
+### 说明
+
+- `CHANGELOG.md` 当前已经是 Git 跟踪文件，`.gitignore` 不会自动忽略它的后续改动；如需彻底转为本地维护文档，需要单独执行索引移除操作。
+
 ## v0.02 - 2026-05-25
 
 ### 新增
@@ -11,6 +22,7 @@
 - CLI 新增 `--backfill-events` 与 `--backfill-output`，可将历史 `events.json/csv` 补齐为新版 schema 并输出摘要。
 - 事件质量评分新增 `evidence_span_score`、`confidence_score`、`uncertainty_risk_score` 和 `foresight_relevance_score`。
 - 候选证据聚合新增 `candidate_evidence_foresight_relevance` 与 `high_foresight_evidence_count`。
+- 时间验证新增持续观测字段，包括 `monitoring_priority`、`monitoring_action` 和下一观测窗口，用于弱信号后续跟踪。
 
 ### 改进
 
@@ -19,6 +31,8 @@
 - `from-events` 路径自动回填历史事件 schema，避免旧事件文件阻断后续评分、候选成形和报告生成。
 - 报告证据排序优先考虑预见相关度、事件质量、证据片段质量和置信度，降低空泛或低质量证据进入核心报告的概率。
 - Web 页面补充展示新版事件字段、事件质量细分分数和候选证据预见相关度，便于人工复核。
+- 主流程移除当前项目暂不需要的技术链映射、关键核心潜力评分、关键核心候选短名单、频次基线和基线对照产物。
+- 报告结构改为弱信号持续观测导向，不再输出关键核心技术候选章节。
 
 ## v2.7.0 - 2026-05-07
 

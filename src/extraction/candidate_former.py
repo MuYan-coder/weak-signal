@@ -8,9 +8,10 @@ import re
 
 import pandas as pd
 
-from .event_schema import coerce_event_list, safe_event_text
+from .event_schema import clean_event_list, clean_event_text
 from .tech_lexicon import (
     BARE_MECHANISM_CORES,
+    build_domain_lexicon,
     detect_supported_observation_scopes,
     extract_data_modifier_tokens,
     extract_mechanism_core_tokens,
@@ -484,13 +485,6 @@ def _bridge_confidence(unit):
     return round(min(score, 0.95), 2)
 
 
-def _resolved_preferred_object_surface(unit):
-    explicit_surface = str(unit.get("preferred_object_surface", "")).strip()
-    if explicit_surface:
-        return explicit_surface
-    return _infer_bridged_object_surface(unit)
-
-
 def _display_title_object_surface(unit):
     preferred = str(unit.get("display_preferred_object_surface", "")).strip()
     if preferred:
@@ -681,32 +675,6 @@ def _strong_slot_labels(values, key):
 def _fallback_slot_labels(values):
     labels = []
     for value in _dedupe_preserve_order(values):
-        label = _label_for_token(value, prefer_zh=True)
-        if label:
-            labels.append(label)
-    return _dedupe_preserve_order(labels)
-
-
-def _object_slot_labels(values):
-    labels = []
-    for value in _dedupe_preserve_order(values):
-        normalized = normalize_proxy_token(value)
-        if normalized in {"manipulator", "manipulators"}:
-            continue
-        if _is_generic_constraint(value, "object_modifier_tokens") or _is_scope_shell_constraint(value, "object_modifier_tokens"):
-            continue
-        label = _label_for_token(value, prefer_zh=True)
-        if label:
-            labels.append(label)
-    return _dedupe_preserve_order(labels)
-
-
-def _fallback_object_slot_labels(values):
-    labels = []
-    for value in _dedupe_preserve_order(values):
-        normalized = normalize_proxy_token(value)
-        if normalized in {"manipulator", "manipulators"}:
-            continue
         label = _label_for_token(value, prefer_zh=True)
         if label:
             labels.append(label)
@@ -1684,6 +1652,33 @@ def _normalize_scope_names(raw_value):
     return []
 
 
+def _analysis_scope_from_context(context):
+    for field in ["analysis_tech_field_name", "tech_field_name", "analysis_domain", "selected_domain"]:
+        text = clean_event_text((context or {}).get(field, ""))
+        if text and text != "未知":
+            return text
+    return ""
+
+
+def _freeform_schema_token(value, *, allow_generic_action=False, max_len=90):
+    text = clean_event_text(value)
+    if not text or text == "未知":
+        return ""
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"[\[\]{}<>]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" ，,。.;；:：")
+    if not text or len(text) > max_len:
+        return ""
+    generic_actions = {
+        "提出", "研发", "研制", "设计", "发布", "开源", "测试", "验证",
+        "propose", "proposed", "develop", "developed", "design", "designed",
+        "release", "released", "test", "tested", "validate", "validated",
+    }
+    if not allow_generic_action and text.lower() in generic_actions:
+        return ""
+    return text
+
+
 def _normalize_candidate_units(raw_value):
     if isinstance(raw_value, list):
         return [item for item in raw_value if isinstance(item, dict)]
@@ -1691,11 +1686,11 @@ def _normalize_candidate_units(raw_value):
 
 
 def _event_list_field(event, field):
-    return coerce_event_list(event.get(field))
+    return clean_event_list(event.get(field))
 
 
 def _event_text_field(event, field):
-    return safe_event_text(event.get(field))
+    return clean_event_text(event.get(field))
 
 
 def _schema_field_text(event):
@@ -1757,12 +1752,17 @@ def _schema_tokens_from_fields(event, explicit_field, extractor, *source_fields)
     )
 
 
-def _schema_object_tokens(event):
+def _schema_object_tokens(event, domain_lexicon=None):
     values = []
     values.extend(_event_list_field(event, "object_modifier_tokens"))
     technical_object = _event_text_field(event, "technical_object")
+    extractor = (
+        domain_lexicon.extract_object_modifier_tokens
+        if domain_lexicon is not None
+        else extract_object_modifier_tokens
+    )
     values.extend(
-        extract_object_modifier_tokens(
+        extractor(
             technical_object,
             _event_text_field(event, "task"),
             _event_text_field(event, "scene"),
@@ -1812,35 +1812,62 @@ def _schema_relation_summary(object_tokens, task_tokens, data_tokens, method_tok
     return " | ".join(parts)
 
 
-def _schema_candidate_units(event, observation_scopes):
+def _schema_candidate_units(event, observation_scopes, domain_lexicon=None):
     event = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
     if not _has_schema_candidate_fields(event):
         return []
     technical_object = _event_text_field(event, "technical_object")
+    schema_text = _schema_field_text(event)
+    analysis_scope = _freeform_schema_token(event.get("analysis_tech_field_name"), max_len=80)
+    scope_names = (
+        _normalize_scope_names(observation_scopes)
+        or (
+            domain_lexicon.detect_supported_observation_scopes(schema_text)
+            if domain_lexicon is not None
+            else detect_supported_observation_scopes(schema_text)
+        )
+        or ([analysis_scope] if analysis_scope else [])
+    )
+    if not scope_names:
+        return []
     mechanism_tokens = _schema_tokens_from_fields(
         event,
         "mechanism_core_tokens",
-        extract_mechanism_core_tokens,
+        domain_lexicon.extract_mechanism_core_tokens if domain_lexicon is not None else extract_mechanism_core_tokens,
         "mechanism",
         "action",
         "technical_object",
         "evidence_span",
     )
+    if not mechanism_tokens:
+        mechanism_fallback = (
+            _freeform_schema_token(event.get("mechanism"))
+            or _freeform_schema_token(event.get("capability_change"))
+            or _freeform_schema_token(event.get("action"), allow_generic_action=True, max_len=24)
+        )
+        if mechanism_fallback:
+            mechanism_tokens = [mechanism_fallback]
     task_tokens = _schema_tokens_from_fields(
         event,
         "task_constraint_tokens",
-        extract_task_constraint_tokens,
+        domain_lexicon.extract_task_constraint_tokens if domain_lexicon is not None else extract_task_constraint_tokens,
         "task",
         "problem_solved",
         "capability_change",
         "scene",
         "technical_object",
     )
-    object_tokens = _schema_object_tokens(event)
+    object_tokens = _schema_object_tokens(event, domain_lexicon=domain_lexicon)
+    if not object_tokens:
+        for tech in _event_list_field(event, "technology"):
+            tech_token = _freeform_schema_token(tech)
+            if tech_token and tech_token not in scope_names:
+                object_tokens = [tech_token]
+                break
     data_tokens = _schema_tokens_from_fields(
         event,
         "data_modifier_tokens",
-        extract_data_modifier_tokens,
+        domain_lexicon.extract_data_modifier_tokens if domain_lexicon is not None else extract_data_modifier_tokens,
         "technical_object",
         "task",
         "evidence_span",
@@ -1849,24 +1876,33 @@ def _schema_candidate_units(event, observation_scopes):
     method_tokens = _schema_tokens_from_fields(
         event,
         "method_modifier_tokens",
-        extract_method_modifier_tokens,
+        domain_lexicon.extract_method_modifier_tokens if domain_lexicon is not None else extract_method_modifier_tokens,
         "mechanism",
         "technical_object",
         "evidence_span",
     )
     method_tokens = _dedupe_preserve_order(method_tokens + [_normalize_schema_token(item) for item in _event_list_field(event, "method")])
     scene_tokens = _dedupe_preserve_order(
-        extract_scene_tokens(
+        (domain_lexicon.extract_scene_tokens if domain_lexicon is not None else extract_scene_tokens)(
             _event_text_field(event, "scene"),
             _event_text_field(event, "task"),
             _event_text_field(event, "technical_object"),
         )
     )
-    schema_text = _schema_field_text(event)
-    scope_names = _normalize_scope_names(observation_scopes) or detect_supported_observation_scopes(schema_text)
-    if not scope_names:
-        return []
-    if not mechanism_tokens:
+    evidence_present = bool(_event_text_field(event, "evidence_span"))
+    if not mechanism_tokens and not (
+        domain_lexicon is not None
+        and not domain_lexicon.use_legacy_robot_rules
+        and domain_lexicon.valid_candidate_pattern_matches(
+            task_tokens=task_tokens,
+            object_tokens=object_tokens,
+            data_tokens=data_tokens,
+            scene_tokens=scene_tokens,
+            mechanism_tokens=mechanism_tokens,
+            method_tokens=method_tokens,
+            evidence_present=evidence_present,
+        )
+    ):
         return []
 
     has_anchor = bool(object_tokens or task_tokens or data_tokens or method_tokens or technical_object)
@@ -1899,8 +1935,8 @@ def _schema_candidate_units(event, observation_scopes):
         {
             "raw_phrase": raw_candidate_text,
             "raw_candidate_text": raw_candidate_text,
-            "raw_phrase_type": "schema_object_mechanism",
-            "mechanism_core": mechanism_tokens[0],
+            "raw_phrase_type": "schema_object_mechanism" if mechanism_tokens else "schema_domain_pack_pattern",
+            "mechanism_core": mechanism_tokens[0] if mechanism_tokens else "",
             "secondary_mechanism_cores": mechanism_tokens[1:],
             "scope_names": scope_names,
             "mechanism_core_tokens": mechanism_tokens,
@@ -1911,13 +1947,14 @@ def _schema_candidate_units(event, observation_scopes):
             "scene_tokens": scene_tokens,
             "action_tokens": mechanism_tokens,
             "is_scope_echo": False,
-            "has_mechanism_core": True,
+            "has_mechanism_core": bool(mechanism_tokens),
             "has_task_constraint": bool(task_tokens),
             "scope_context_supported": True,
             "has_non_scope_constraint": True,
             "generic_core_only": False,
             "source_extraction_mode": schema_source_mode,
             "scope_match_mode": _event_text_field(event, "scope_match_mode") or "schema_field",
+            "evidence_span": _event_text_field(event, "evidence_span"),
             "relation_target": object_tokens[0] if object_tokens else technical_object,
             "relation_task": task_tokens[0] if task_tokens else "",
             "relation_data_modality": data_tokens[0] if data_tokens else "",
@@ -1950,8 +1987,8 @@ def _merge_candidate_units(schema_units, rule_units):
     return merged
 
 
-def _candidate_units_for_event(event, observation_scopes):
-    schema_units = _schema_candidate_units(event, observation_scopes)
+def _candidate_units_for_event(event, observation_scopes, domain_lexicon=None):
+    schema_units = _schema_candidate_units(event, observation_scopes, domain_lexicon=domain_lexicon)
     rule_units = _normalize_candidate_units(event.get("candidate_units", []))
     return _merge_candidate_units(schema_units, rule_units)
 
@@ -2915,8 +2952,6 @@ def _naturalized_topic_name(unit, fallback_name):
     profile = _scope_shell_profile(unit)
     slot_name = _technical_object_name_from_slots(unit, include_suffix=True)
     if slot_name:
-        if bool(profile.get("scope_shell_heavy", False)) and not bool(profile.get("survives_without_scope", False)):
-            return f"{slot_name}线索待收口" if "待收口" not in slot_name else slot_name
         return slot_name
     relation_summary = str(unit.get("relation_summary", "")).strip()
     if relation_summary:
@@ -2954,9 +2989,9 @@ def _naturalized_topic_name(unit, fallback_name):
         mechanism_label = _label_for_token(unit.get("mechanism_core", ""), prefer_zh=True)
         labels = _dedupe_preserve_order([label for label in task_object_labels + data_labels if label])
         if labels and mechanism_label:
-            return "".join(labels[:2] + [mechanism_label, "线索待收口"])
+            return "".join(labels[:2] + [mechanism_label])
         fallback = str(fallback_name or "").strip()
-        return f"{fallback}线索待收口" if fallback and "待收口" not in fallback else fallback
+        return fallback
     return str(fallback_name or "").strip()
 
 
@@ -3077,7 +3112,156 @@ def _patent_friendly_display_name(canonical_name_en, unit):
     return _sanitize_display_candidate_name("".join(_dedupe_preserve_order(labels)), unit)
 
 
-def _unit_row(event_id, scope_names, unit, source_type=""):
+def _term_in_text(term, text):
+    term_norm = str(term or "").strip().lower()
+    text_norm = str(text or "").strip().lower()
+    return bool(term_norm and term_norm in text_norm)
+
+
+def _domain_pack_candidate_trace(unit, domain_lexicon=None):
+    if domain_lexicon is None or domain_lexicon.use_legacy_robot_rules:
+        return {
+            "domain_pack_candidate_rule_ids": "",
+            "domain_pack_candidate_reason": "",
+            "domain_pack_candidate_status": "",
+            "domain_pack_candidate_slot_hits": {},
+        }
+
+    text_parts = [
+        unit.get("raw_phrase", ""),
+        unit.get("raw_candidate_text", ""),
+        unit.get("source_title", ""),
+        unit.get("source_text", ""),
+        unit.get("relation_summary", ""),
+        unit.get("relation_target", ""),
+        unit.get("relation_task", ""),
+        unit.get("relation_data_modality", ""),
+        unit.get("relation_method", ""),
+    ]
+    text = " ".join(str(part or "") for part in text_parts if str(part or "").strip())
+
+    slot_hits = {
+        "technical_object": _dedupe_preserve_order(
+            list(unit.get("object_modifier_tokens", []) or [])
+            + domain_lexicon.match_terms(domain_lexicon.object_aliases, text)
+        ),
+        "mechanism": _dedupe_preserve_order(
+            list(unit.get("mechanism_core_tokens", []) or [])
+            + ([unit.get("mechanism_core")] if unit.get("mechanism_core") else [])
+            + domain_lexicon.match_terms(domain_lexicon.mechanism_aliases, text)
+        ),
+        "performance": _dedupe_preserve_order(
+            list(unit.get("task_constraint_tokens", []) or [])
+            + domain_lexicon.match_terms(domain_lexicon.task_aliases, text)
+        ),
+        "data_modality": _dedupe_preserve_order(
+            list(unit.get("data_modifier_tokens", []) or [])
+            + domain_lexicon.match_terms(domain_lexicon.data_aliases, text)
+        ),
+        "method": _dedupe_preserve_order(
+            list(unit.get("method_modifier_tokens", []) or [])
+            + domain_lexicon.match_terms(domain_lexicon.method_aliases, text)
+        ),
+        "scene": _dedupe_preserve_order(
+            list(unit.get("scene_tokens", []) or [])
+            + domain_lexicon.match_terms(domain_lexicon.scene_aliases, text)
+        ),
+    }
+    for key, values in list(slot_hits.items()):
+        slot_hits[key] = [
+            value
+            for value in _dedupe_preserve_order(values)
+            if value and not domain_lexicon.is_generic_or_shell(value)
+        ]
+    data_hit_set = set(slot_hits.get("data_modality", []))
+    slot_hits["method"] = [value for value in slot_hits.get("method", []) if value not in data_hit_set]
+
+    specific_slots = [key for key, values in slot_hits.items() if values]
+    specific_slot_count = len(specific_slots)
+    evidence_present = bool(
+        str(unit.get("evidence_span", "")).strip()
+        or str(unit.get("source_text", "")).strip()
+        or str(unit.get("source_title", "")).strip()
+    )
+
+    rule_ids = []
+    reasons = []
+    status = ""
+    for pattern in domain_lexicon.invalid_candidate_patterns:
+        if not isinstance(pattern, dict):
+            continue
+        reject_terms = pattern.get("reject_terms", [])
+        max_specific = int(pattern.get("max_specific_slot_count", 999) or 999)
+        if any(_term_in_text(term, text) for term in reject_terms or []) and specific_slot_count <= max_specific:
+            pattern_id = str(pattern.get("pattern_id", "")).strip()
+            if pattern_id:
+                rule_ids.append(pattern_id)
+            status = "rejected"
+            reasons.append(f"invalid_pattern={pattern_id or 'domain_pack_invalid'}")
+            reasons.append(f"specific_slot_count={specific_slot_count}")
+            break
+
+    min_slots = int(domain_lexicon.minimum_specificity_rule.get("min_non_shell_slots", 0) or 0)
+    evidence_required = bool(domain_lexicon.minimum_specificity_rule.get("require_evidence_span", False))
+    if not status and evidence_required and not evidence_present:
+        status = "rejected"
+        reasons.append("evidence=missing")
+    if not status and min_slots and specific_slot_count < min_slots:
+        status = "rejected"
+        reasons.append(f"minimum_specificity={specific_slot_count}/{min_slots}")
+
+    if not status:
+        for pattern in domain_lexicon.valid_candidate_patterns:
+            if not isinstance(pattern, dict):
+                continue
+            required_slots = [str(slot or "").strip() for slot in pattern.get("required_slots", []) if str(slot or "").strip()]
+            min_required = int(pattern.get("min_required_slot_count", len(required_slots)) or len(required_slots))
+            required_hit_count = 0
+            for slot in required_slots:
+                if slot in {"technical_object", "object"} and slot_hits["technical_object"]:
+                    required_hit_count += 1
+                elif slot == "mechanism" and slot_hits["mechanism"]:
+                    required_hit_count += 1
+                elif slot in {"task", "performance"} and slot_hits["performance"]:
+                    required_hit_count += 1
+                elif slot in {"data_modality", "data"} and slot_hits["data_modality"]:
+                    required_hit_count += 1
+                elif slot == "method" and slot_hits["method"]:
+                    required_hit_count += 1
+                elif slot == "scene" and slot_hits["scene"]:
+                    required_hit_count += 1
+                elif slot == "evidence_span" and evidence_present:
+                    required_hit_count += 1
+            if required_hit_count >= min_required and (not pattern.get("evidence_required") or evidence_present):
+                pattern_id = str(pattern.get("pattern_id", "")).strip()
+                if pattern_id:
+                    rule_ids.append(pattern_id)
+                status = "accepted"
+                break
+
+    if (
+        not status
+        and not domain_lexicon.valid_candidate_patterns
+        and (not evidence_required or evidence_present)
+        and specific_slot_count >= max(min_slots, 1)
+    ):
+        status = "accepted"
+
+    for key, values in slot_hits.items():
+        if values:
+            reasons.append(f"{key}={','.join(values[:3])}")
+    if evidence_present:
+        reasons.append("evidence=present")
+
+    return {
+        "domain_pack_candidate_rule_ids": ";".join(_dedupe_preserve_order(rule_ids)),
+        "domain_pack_candidate_reason": "; ".join(_dedupe_preserve_order(reasons)),
+        "domain_pack_candidate_status": status,
+        "domain_pack_candidate_slot_hits": slot_hits,
+    }
+
+
+def _unit_row(event_id, scope_names, unit, source_type="", domain_lexicon=None):
     mechanism_core_tokens = _dedupe_preserve_order(unit.get("mechanism_core_tokens", []))
     task_constraint_tokens = _dedupe_preserve_order(unit.get("task_constraint_tokens", []))
     object_modifier_tokens = _dedupe_preserve_order(unit.get("object_modifier_tokens", []))
@@ -3088,14 +3272,24 @@ def _unit_row(event_id, scope_names, unit, source_type=""):
     mechanism_core = str(unit.get("mechanism_core", "")).strip() or (mechanism_core_tokens[0] if mechanism_core_tokens else "")
     has_mechanism_core = bool(mechanism_core)
     has_task_constraint = bool(task_constraint_tokens)
-    has_non_scope_constraint_flag = has_non_scope_constraint(
-        task_constraint_tokens,
-        object_modifier_tokens,
-        data_modifier_tokens,
-        scene_tokens,
-        [mechanism_core],
-        method_modifier_tokens,
-    )
+    if domain_lexicon is not None and not domain_lexicon.use_legacy_robot_rules:
+        has_non_scope_constraint_flag = domain_lexicon.has_non_scope_constraint(
+            task_constraint_tokens,
+            object_modifier_tokens,
+            data_modifier_tokens,
+            scene_tokens,
+            [mechanism_core],
+            method_modifier_tokens,
+        )
+    else:
+        has_non_scope_constraint_flag = has_non_scope_constraint(
+            task_constraint_tokens,
+            object_modifier_tokens,
+            data_modifier_tokens,
+            scene_tokens,
+            [mechanism_core],
+            method_modifier_tokens,
+        )
     canonical_name_en = _canonical_candidate_name_en(
         {
             **unit,
@@ -3150,6 +3344,26 @@ def _unit_row(event_id, scope_names, unit, source_type=""):
         ),
         source_type=source_type,
     )
+    evidence_present = bool(
+        str(unit.get("evidence_span", "")).strip()
+        or str(unit.get("source_text", "")).strip()
+        or str(unit.get("source_title", "")).strip()
+    )
+    domain_pack_valid_pattern_ready = bool(
+        domain_lexicon is not None
+        and not domain_lexicon.use_legacy_robot_rules
+        and domain_lexicon.valid_candidate_pattern_matches(
+            task_tokens=task_constraint_tokens,
+            object_tokens=object_modifier_tokens,
+            data_tokens=data_modifier_tokens,
+            scene_tokens=scene_tokens,
+            mechanism_tokens=mechanism_core_tokens,
+            method_tokens=method_modifier_tokens,
+            evidence_present=evidence_present,
+        )
+    )
+    if domain_pack_valid_pattern_ready and not canonical_name_en:
+        canonical_name_en = raw_phrase
 
     if bool(unit.get("is_scope_echo", False)):
         stage = "filtered_scope_echo"
@@ -3159,10 +3373,19 @@ def _unit_row(event_id, scope_names, unit, source_type=""):
         stage = "unformed_generic_core"
         strong_ready_reason = "generic_core_only"
         source_penetration_reason = "generic_core_only"
-    elif has_mechanism_core and has_non_scope_constraint_flag and canonical_name_en and canonical_name_en != mechanism_core:
+    elif (
+        (has_mechanism_core or domain_pack_valid_pattern_ready)
+        and has_non_scope_constraint_flag
+        and canonical_name_en
+        and canonical_name_en != mechanism_core
+    ):
         stage = "formed_candidate"
-        strong_ready_reason = "needs_cluster_support"
-        source_penetration_reason = "patent_proxy_formed" if source_type == "patent" and scope_match_mode == "proxy_patent" else "explicit_scope_formed"
+        strong_ready_reason = "domain_pack_valid_pattern" if domain_pack_valid_pattern_ready else "needs_cluster_support"
+        source_penetration_reason = (
+            "domain_pack_pattern_formed"
+            if domain_pack_valid_pattern_ready
+            else "patent_proxy_formed" if source_type == "patent" and scope_match_mode == "proxy_patent" else "explicit_scope_formed"
+        )
     else:
         stage = "filtered_scope_echo"
         strong_ready_reason = "insufficient_structure"
@@ -3222,6 +3445,21 @@ def _unit_row(event_id, scope_names, unit, source_type=""):
             "relation_data_modality": str(unit.get("relation_data_modality", "")).strip(),
             "relation_method": str(unit.get("relation_method", "")).strip(),
         }
+    )
+    domain_pack_trace = _domain_pack_candidate_trace(
+        {
+            **unit,
+            "raw_phrase": raw_phrase,
+            "raw_candidate_text": raw_phrase,
+            "mechanism_core": mechanism_core,
+            "mechanism_core_tokens": mechanism_core_tokens,
+            "task_constraint_tokens": task_constraint_tokens,
+            "object_modifier_tokens": object_modifier_tokens,
+            "data_modifier_tokens": data_modifier_tokens,
+            "method_modifier_tokens": method_modifier_tokens,
+            "scene_tokens": scene_tokens,
+        },
+        domain_lexicon=domain_lexicon,
     )
 
     return {
@@ -3335,10 +3573,12 @@ def _unit_row(event_id, scope_names, unit, source_type=""):
         "bridged_object_subtype_candidate": _infer_bridged_object_surface(granularity_input),
         "bridged_object_bridge_reason": _bridge_reason(granularity_input) if _infer_bridged_object_surface(granularity_input) else "",
         "bridged_object_bridge_confidence": _bridge_confidence(granularity_input),
+        **domain_pack_trace,
     }
 
 
-def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame) -> pd.DataFrame:
+def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain_context=None, domain_pack=None) -> pd.DataFrame:
+    domain_lexicon = build_domain_lexicon(domain_context or domain_pack)
     columns = [
         "id", "raw_phrase", "raw_candidate_text", "raw_phrase_type", "source_extraction_mode",
         "mechanism_core", "secondary_mechanism_cores", "mechanism_core_tokens",
@@ -3377,6 +3617,8 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame) -> pd.
         "topic_granularity", "display_tier", "non_scope_constraint_count",
         "survives_without_scope", "scope_shell_heavy", "scope_shell_reason",
         "topic_granularity_reason", "display_candidate_name_issue",
+        "domain_pack_candidate_rule_ids", "domain_pack_candidate_reason",
+        "domain_pack_candidate_status", "domain_pack_candidate_slot_hits",
         # 旁路 bridge 字段
         "bridged_object_subtype_candidate", "bridged_object_bridge_reason", "bridged_object_bridge_confidence",
     ]
@@ -3396,6 +3638,10 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame) -> pd.
                 "org": record.get("org", ""),
                 "date": record.get("date", ""),
                 "url": record.get("url", ""),
+                "analysis_tech_field_name": record.get("analysis_tech_field_name", ""),
+                "analysis_tech_field_id": record.get("analysis_tech_field_id", ""),
+                "analysis_keywords": record.get("analysis_keywords", []),
+                "analysis_synonyms": record.get("analysis_synonyms", []),
             }
     event_meta_map = {}
     for _, event in events_df.iterrows():
@@ -3515,7 +3761,12 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame) -> pd.
     for _, event in events_df.iterrows():
         event_id = event.get("id")
         source_type = source_type_map.get(event_id, str(event.get("source_type", "")))
-        for scope in _normalize_scope_names(event.get("observation_scopes", [])):
+        context = source_context_map.get(event_id, {})
+        observation_scopes = _normalize_scope_names(event.get("observation_scopes", []))
+        if not observation_scopes:
+            analysis_scope = _analysis_scope_from_context(context)
+            observation_scopes = [analysis_scope] if analysis_scope else []
+        for scope in observation_scopes:
             scope_items_map.setdefault(scope, []).append(
                 {
                     "id": event_id,
@@ -3527,8 +3778,17 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame) -> pd.
     for _, event in events_df.iterrows():
         event_id = event.get("id")
         source_type = source_type_map.get(event_id, str(event.get("source_type", "")))
-        observation_scopes = _normalize_scope_names(event.get("observation_scopes", []))
-        candidate_units = _candidate_units_for_event(event, observation_scopes)
+        context = source_context_map.get(event_id, {})
+        event_record = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
+        observation_scopes = _normalize_scope_names(event_record.get("observation_scopes", []))
+        if not observation_scopes:
+            analysis_scope = _analysis_scope_from_context(context)
+            if analysis_scope:
+                observation_scopes = [analysis_scope]
+                event_record["observation_scopes"] = observation_scopes
+                event_record["scope_match_mode"] = event_record.get("scope_match_mode") or "analysis_field"
+                event_record["analysis_tech_field_name"] = analysis_scope
+        candidate_units = _candidate_units_for_event(event_record, observation_scopes, domain_lexicon=domain_lexicon)
 
         for scope in observation_scopes:
             scope_metric_payload = _build_metric_payload(scope_items_map.get(scope, []), display_name=SCOPE_LABELS.get(scope, scope), raw_candidate_text=scope)
@@ -3637,7 +3897,7 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame) -> pd.
                     "display_candidate_name_issue": "",
                     "strong_ready_reason": "scope_overview",
                     "source_penetration_reason": "scope_overview",
-                    "scope_match_mode": str(event.get("scope_match_mode", "explicit")).strip() or "explicit",
+                    "scope_match_mode": str(event_record.get("scope_match_mode", "explicit")).strip() or "explicit",
                     "source_type": source_type,
                     "bridged_object_subtype_candidate": "",
                     "bridged_object_bridge_reason": "",
@@ -3652,9 +3912,11 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame) -> pd.
                 scope_names,
                 {
                     **unit,
+                    "evidence_span": event_record.get("evidence_span", ""),
                     **source_context_map.get(event_id, {}),
                 },
                 source_type=source_type,
+                domain_lexicon=domain_lexicon,
             )
             if row["candidate_stage"] == "formed_candidate":
                 formed_rows.append(row)

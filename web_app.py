@@ -92,10 +92,12 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from src.core.pipeline import AnalysisPipeline
 from src.core.agent import TechForesightAgent
+from src.data_access.models import SourceQuery
+from src.data_access.repository import DataRepository
 from src.utils.config import Config
 from src.utils.env_config import ensure_env_loaded
 from src.utils.llm_client import get_provider_and_client
-from src.validation.event_quality import merge_event_quality_into_events, merge_event_quality_into_raw_data
+from src.validation.event_quality import merge_event_quality_into_raw_data
 from src.validation.temporal_validator import merge_temporal_validation_into_candidates
 
 ensure_env_loaded()
@@ -103,15 +105,12 @@ Config.ensure_dirs()
 
 STAGE_NAMES = [
     "数据加载",
-    "事件抽取",
-    "事件质量评分",
+    "事件抽取与质量评分",
     "候选成形",
     "弱信号评分",
     "主题细化",
     "反向验证",
-    "技术链映射",
     "时间验证",
-    "关键核心潜力评分",
     "信号生成",
     "报告生成",
 ]
@@ -278,6 +277,7 @@ def start_analysis_task(
     sample_size=None,
     resume_mode=None,
     resume_path=None,
+    source_config=None,
 ):
     """启动后台分析任务"""
     st.session_state.analysis_logs = []
@@ -294,6 +294,13 @@ def start_analysis_task(
         st.session_state.analysis_run_description = f"从已抽取事件继续分析：{resume_path}"
     elif resume_mode == "report":
         st.session_state.analysis_run_description = f"从历史结果重新生成报告：{resume_path}"
+    elif source_config and source_config.get("backend") == "db":
+        query = source_config["query"]
+        q_name = getattr(query, "tech_field_name", None)
+        if not q_name and isinstance(query, dict):
+            q_name = query.get("tech_field_name")
+        q_name = q_name or "db"
+        st.session_state.analysis_run_description = f"数据库检索流程：{q_name}"
     elif data_path:
         st.session_state.analysis_run_description = f"完整流程：{data_path}"
     else:
@@ -304,7 +311,7 @@ def start_analysis_task(
     cancel_event = threading.Event()
     worker = threading.Thread(
         target=run_analysis,
-        args=(source_counts, use_cache, use_llm_strategy, event_queue, cancel_event, data_path, sample_size, resume_mode, resume_path),
+        args=(source_counts, use_cache, use_llm_strategy, event_queue, cancel_event, data_path, sample_size, resume_mode, resume_path, source_config),
         daemon=True,
         name="analysis-worker",
     )
@@ -368,9 +375,6 @@ def render_analysis_runtime_panel():
         st.session_state.analysis_full_refresh_requested = False
         st.rerun()
 
-    if st.session_state.analysis_results:
-        render_results(st.session_state.analysis_results)
-
 def render_live_analysis_panel():
     """渲染带自动刷新的运行态面板。"""
     analysis_panel = get_fragment_decorator(
@@ -383,14 +387,14 @@ def get_available_data_sources():
     data_files = list(Config.DATA_DIR.glob("*.csv")) + \
                  list(Config.DATA_DIR.glob("*.xlsx")) + \
                  list(Config.DATA_DIR.glob("*.json"))
-    
+
     sources = {
         '专利': {'files': [], 'count': 0},
         '文献': {'files': [], 'count': 0},
         '研报': {'files': [], 'count': 0},
         '资讯': {'files': [], 'count': 0}
     }
-    
+
     for f in data_files:
         fname = f.name.lower()
         try:
@@ -403,7 +407,7 @@ def get_available_data_sources():
             count = len(df)
         except:
             count = 0
-        
+
         if '专利' in fname or 'patent' in fname:
             sources['专利']['files'].append(f.name)
             sources['专利']['count'] += count
@@ -416,52 +420,49 @@ def get_available_data_sources():
         elif '资讯' in fname or 'news' in fname:
             sources['资讯']['files'].append(f.name)
             sources['资讯']['count'] += count
-    
+
     return sources
 
 def render_sidebar():
     """渲染侧边栏"""
     with st.sidebar:
         st.markdown("## 🔧 分析流程")
-        
+
         stages = [
             ("📁 数据加载", "从多种数据源加载技术文本"),
-            ("📝 事件抽取", "使用LLM抽取五维事件要素"),
-            ("🧾 事件质量评分", "评估事件完整性、技术相关性和可追溯性"),
+            ("📝 事件抽取与质量评分", "抽取结构化事件并同步评估证据质量"),
             ("🔧 候选成形", "生成候选技术对象"),
             ("📊 弱信号评分", "计算多维评分指标"),
             ("🎯 主题细化", "LLM小主题判断与收口"),
             ("✅ 反向验证", "验证候选有效性"),
-            ("🧭 技术链映射", "映射候选到产业技术链节点"),
             ("⏱ 时间验证", "验证候选证据的跨时间增长与延续性"),
-            ("🧩 关键核心潜力评分", "综合弱信号、时间增长、卡点和证据质量评分"),
             ("🚀 信号生成", "生成弱信号列表"),
             ("📋 报告生成", "LLM生成分析报告")
         ]
-        
+
         for name, desc in stages:
             with st.expander(name):
                 st.markdown(f"*{desc}*")
-        
+
         st.markdown("---")
-        
+
         st.markdown("## 🤖 LLM状态")
         provider, client = get_provider_and_client()
         if client:
             st.success(f"✅ {provider} API 已连接")
-            
+
             extraction_model = os.getenv("EXTRACTION_MODEL", "未配置")
             report_model = os.getenv("REPORT_MODEL", "未配置")
             agent_model = os.getenv("AGENT_MODEL", "未配置")
-            
+
             st.markdown(f"**事件抽取**: `{extraction_model}`")
             st.markdown(f"**报告生成**: `{report_model}`")
             st.markdown(f"**智能体**: `{agent_model}`")
         else:
             st.error("❌ LLM未连接")
-        
+
         st.markdown("---")
-        
+
         st.markdown("## 📚 历史结果")
         result_dirs = sorted(Config.RESULT_DIR.iterdir(), key=lambda x: x.name, reverse=True)[:5]
         for rd in result_dirs:
@@ -477,21 +478,21 @@ def render_header():
 def render_data_source_selection(sources):
     """渲染数据源选择"""
     st.markdown("## 📁 数据源配置")
-    
+
     cols = st.columns(4)
     source_counts = {}
-    
+
     for i, (source_name, info) in enumerate(sources.items()):
         with cols[i]:
             st.markdown(f"""
-            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                         border-radius: 15px; padding: 15px; color: white; text-align: center;
                         box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 10px;">
                 <div style="font-size: 2rem; font-weight: bold;">{info['count']}</div>
                 <div style="font-size: 0.9rem;">{source_name}数据</div>
             </div>
             """, unsafe_allow_html=True)
-            
+
             count = st.number_input(
                 f"采样数量",
                 min_value=0,
@@ -501,10 +502,10 @@ def render_data_source_selection(sources):
                 key=f"count_{source_name}"
             )
             source_counts[source_name] = count
-    
+
     total = sum(source_counts.values())
     st.info(f"📊 总计选择 **{total}** 条数据")
-    
+
     return source_counts, total
 
 def run_analysis(
@@ -517,6 +518,7 @@ def run_analysis(
     sample_size=None,
     resume_mode=None,
     resume_path=None,
+    source_config=None,
 ):
     """运行分析流程"""
 
@@ -543,32 +545,39 @@ def run_analysis(
         if cancel_event.is_set():
             raise InterruptedError("analysis_cancelled")
 
-    source_counts = source_counts or {}
-    source_config = {
-        'counts': {
-            'patent': source_counts.get('专利', 0),
-            'literature': source_counts.get('文献', 0),
-            'report': source_counts.get('研报', 0),
-            'news': source_counts.get('资讯', 0)
+    if source_config and source_config.get("backend") == "db":
+        query = source_config["query"]
+        q_counts = getattr(query, "counts", None)
+        if q_counts is None and isinstance(query, dict):
+            q_counts = query.get("counts", {})
+        q_counts = q_counts or {}
+        total_samples = sum(q_counts.values())
+    else:
+        source_counts = source_counts or {}
+        source_config = {
+            'counts': {
+                'patent': source_counts.get('专利', 0),
+                'literature': source_counts.get('文献', 0),
+                'report': source_counts.get('研报', 0),
+                'news': source_counts.get('资讯', 0)
+            }
         }
-    }
-    
-    total_samples = int(sample_size or sum(source_counts.values()))
-    
+        total_samples = int(sample_size or sum(source_counts.values()))
+
     if total_samples == 0 and not data_path and not resume_mode:
         add_log("请至少选择一个数据源", "error")
         emit_event("error", message="未选择任何数据源")
         return None
-    
+
     if resume_mode == "events":
         add_log("开始从已抽取事件继续分析", "info")
     elif resume_mode == "report":
         add_log("开始从历史结果重新生成报告", "info")
     else:
         add_log(f"开始分析，共 {total_samples} 条数据", "info")
-    
+
     pipeline = AnalysisPipeline()
-    
+
     try:
         if resume_mode == "events":
             add_log(f"从已抽取事件继续分析: {resume_path}", "info")
@@ -583,16 +592,16 @@ def run_analysis(
             raw_data = pipeline._raw_data_from_events(events_df)
             add_log(f"读取了 {len(events_df)} 个事件，已跳过数据加载和事件抽取", "success")
 
-            update_stage("事件质量评分", "active", 2)
-            add_log("正在进行事件质量评分...", "info")
+            update_stage("事件抽取与质量评分", "active", 1)
+            add_log("正在回挂事件质量评分...", "info")
             check_cancel()
-            event_quality_df = pipeline._score_event_quality(events_df, raw_data)
-            events_df = merge_event_quality_into_events(events_df, event_quality_df)
+            events_df = pipeline._score_events_during_extraction(events_df, raw_data)
+            event_quality_df = pipeline.latest_event_quality_df.copy()
             raw_data = merge_event_quality_into_raw_data(raw_data, event_quality_df)
             check_cancel()
-            add_log(f"事件质量评分完成，共 {len(event_quality_df)} 条", "success")
+            add_log(f"事件结构化与质量评分完成，共 {len(event_quality_df)} 条", "success")
 
-            update_stage("候选成形", "active", 3)
+            update_stage("候选成形", "active", 2)
             add_log("正在进行候选成形...", "info")
             check_cancel()
             candidate_forms_df = pipeline._form_candidates(events_df, raw_data)
@@ -602,35 +611,28 @@ def run_analysis(
             check_cancel()
             add_log(f"生成了 {candidate_count_before_dedupe} 个候选对象，流转去重后 {len(candidate_forms_df)} 个", "success")
 
-            update_stage("弱信号评分", "active", 4)
+            update_stage("弱信号评分", "active", 3)
             add_log("正在进行弱信号评分...", "info")
             check_cancel()
             scored_df = pipeline._score_candidates(candidate_forms_df)
             check_cancel()
             add_log(f"评分完成，共 {len(scored_df)} 个候选", "success")
 
-            update_stage("主题细化", "active", 5)
+            update_stage("主题细化", "active", 4)
             add_log("正在进行主题细化...", "info")
             check_cancel()
             refined_df = pipeline._refine_topics(scored_df)
             check_cancel()
             add_log("主题细化完成", "success")
 
-            update_stage("反向验证", "active", 6)
+            update_stage("反向验证", "active", 5)
             add_log("正在进行反向验证...", "info")
             check_cancel()
             validated_df = pipeline._validate_reverse(refined_df, candidate_forms_df)
             check_cancel()
             add_log("反向验证完成", "success")
 
-            update_stage("技术链映射", "active", 7)
-            add_log("正在进行技术链映射...", "info")
-            check_cancel()
-            validated_df = pipeline._map_tech_chain(validated_df)
-            check_cancel()
-            add_log(f"技术链映射完成，共 {len(pipeline.latest_tech_chain_mapping_df)} 条", "success")
-
-            update_stage("时间验证", "active", 8)
+            update_stage("时间验证", "active", 6)
             add_log("正在进行时间验证...", "info")
             check_cancel()
             temporal_validation_df = pipeline._validate_temporal(validated_df, events_df, raw_data)
@@ -638,15 +640,7 @@ def run_analysis(
             check_cancel()
             add_log(f"时间验证完成，共 {len(temporal_validation_df)} 条", "success")
 
-            update_stage("关键核心潜力评分", "active", 9)
-            add_log("正在进行关键核心潜力评分...", "info")
-            check_cancel()
-            validated_df = pipeline._score_key_core_potential(validated_df, temporal_validation_df)
-            pipeline._build_research_validation_artifacts(validated_df)
-            check_cancel()
-            add_log(f"关键核心潜力评分完成，共 {len(pipeline.latest_key_core_scored_df)} 条", "success")
-
-            update_stage("信号生成", "active", 10)
+            update_stage("信号生成", "active", 7)
             add_log("正在生成信号...", "info")
             check_cancel()
             signals_output = pipeline._generate_signals(validated_df, raw_data)
@@ -660,7 +654,7 @@ def run_analysis(
                 near_strong_df = pd.DataFrame()
             add_log(f"生成了 {len(signals_df)} 个信号", "success")
 
-            update_stage("报告生成", "active", 11)
+            update_stage("报告生成", "active", 8)
             add_log("正在生成报告...", "info")
             check_cancel()
             report = pipeline._generate_report(signals_output)
@@ -682,21 +676,16 @@ def run_analysis(
                 "scored_df": scored_df,
                 "refined_df": refined_df,
                 "reverse_validation_df": pipeline.latest_reverse_validation_df,
-                "tech_chain_mapping_df": pipeline.latest_tech_chain_mapping_df,
                 "temporal_validation_df": pipeline.latest_temporal_validation_df,
-                "key_core_scored_df": pipeline.latest_key_core_scored_df,
-                "key_core_candidates_df": pipeline.latest_key_core_candidates_df,
                 "validated_df": validated_df,
                 "signals_df": signals_df,
                 "signals_output": signals_output,
                 "near_strong_df": near_strong_df,
                 "family_metrics_df": pipeline.latest_family_metrics_df,
-                "final_shortlist_df": pipeline.latest_final_shortlist_df,
-                "frequency_baseline_df": pipeline.latest_frequency_baseline_df,
-                "baseline_comparison_df": pipeline.latest_baseline_comparison_df,
                 "source_documents_df": pipeline.latest_source_documents_df,
                 "signal_evidence_links_df": pipeline.latest_signal_evidence_links_df,
                 "signal_reliability_df": pipeline.latest_signal_reliability_df,
+                "weak_signals_comparison_df": pipeline.latest_weak_signals_comparison_df,
                 "report": report,
                 "raw_data": raw_data,
             }
@@ -707,7 +696,7 @@ def run_analysis(
             return results
 
         if resume_mode == "report":
-            update_stage("报告生成", "active", 11)
+            update_stage("报告生成", "active", 8)
             add_log(f"从历史结果重新生成报告: {resume_path}", "info")
             check_cancel()
 
@@ -726,83 +715,76 @@ def run_analysis(
         update_stage("数据加载", "active", 0)
         add_log("正在加载数据...", "info")
         check_cancel()
-        
+
         raw_data = pipeline._load_data(Path(data_path) if data_path else None, total_samples, source_config)
         check_cancel()
-        
+
         if raw_data.empty:
             add_log("数据加载失败", "error")
             emit_event("error", message="数据加载失败")
             return None
-        
+
         add_log(f"加载了 {len(raw_data)} 条数据", "success")
-        update_stage("事件抽取", "active", 1)
-        add_log("正在进行事件抽取...", "info")
+        update_stage("事件抽取与质量评分", "active", 1)
+        add_log("正在进行事件抽取与质量评分...", "info")
         check_cancel()
-        
+
         cache_dir = Config.MEMORY_DIR / "cache"
-        events_df = pipeline._extract_events(raw_data, use_cache, cache_dir, data_path=Path(data_path) if data_path else None)
+        events_df = pipeline._extract_events(
+            raw_data,
+            use_cache,
+            cache_dir,
+            data_path=Path(data_path) if data_path else None,
+            source_config=source_config,
+        )
         check_cancel()
-        
+
         if events_df is None or events_df.empty:
             add_log("事件抽取失败", "error")
             emit_event("error", message="事件抽取失败")
             return None
-        
-        add_log(f"抽取了 {len(events_df)} 个事件", "success")
-        update_stage("事件质量评分", "active", 2)
-        add_log("正在进行事件质量评分...", "info")
-        check_cancel()
 
-        event_quality_df = pipeline._score_event_quality(events_df, raw_data)
-        events_df = merge_event_quality_into_events(events_df, event_quality_df)
+        event_quality_df = pipeline.latest_event_quality_df.copy()
         raw_data = merge_event_quality_into_raw_data(raw_data, event_quality_df)
         check_cancel()
-        add_log(f"事件质量评分完成，共 {len(event_quality_df)} 条", "success")
+        add_log(f"抽取了 {len(events_df)} 个事件，并完成 {len(event_quality_df)} 条事件质量评分", "success")
 
-        update_stage("候选成形", "active", 3)
+        update_stage("候选成形", "active", 2)
         add_log("正在进行候选成形...", "info")
         check_cancel()
-        
+
         candidate_forms_df = pipeline._form_candidates(events_df, raw_data)
         candidate_forms_df = pipeline._apply_candidate_event_quality(candidate_forms_df, event_quality_df)
         candidate_count_before_dedupe = len(candidate_forms_df)
         candidate_forms_df = pipeline._dedupe_candidate_flow(candidate_forms_df)
         check_cancel()
         add_log(f"生成了 {candidate_count_before_dedupe} 个候选对象，流转去重后 {len(candidate_forms_df)} 个", "success")
-        
-        update_stage("弱信号评分", "active", 4)
+
+        update_stage("弱信号评分", "active", 3)
         add_log("正在进行弱信号评分...", "info")
         check_cancel()
-        
+
         scored_df = pipeline._score_candidates(candidate_forms_df)
         check_cancel()
         add_log(f"评分完成，共 {len(scored_df)} 个候选", "success")
-        
-        update_stage("主题细化", "active", 5)
+
+        update_stage("主题细化", "active", 4)
         add_log("正在进行主题细化...", "info")
         check_cancel()
-        
+
         refined_df = pipeline._refine_topics(scored_df)
         check_cancel()
         add_log("主题细化完成", "success")
-        
-        update_stage("反向验证", "active", 6)
+
+        update_stage("反向验证", "active", 5)
         add_log("正在进行反向验证...", "info")
         check_cancel()
-        
+
         validated_df = pipeline._validate_reverse(refined_df, candidate_forms_df)
         check_cancel()
         add_log("反向验证完成", "success")
-        
-        update_stage("技术链映射", "active", 7)
-        add_log("正在进行技术链映射...", "info")
-        check_cancel()
-        validated_df = pipeline._map_tech_chain(validated_df)
-        check_cancel()
-        add_log(f"技术链映射完成，共 {len(pipeline.latest_tech_chain_mapping_df)} 条", "success")
 
-        update_stage("时间验证", "active", 8)
+        update_stage("时间验证", "active", 6)
         add_log("正在进行时间验证...", "info")
         check_cancel()
         temporal_validation_df = pipeline._validate_temporal(validated_df, events_df, raw_data)
@@ -810,46 +792,38 @@ def run_analysis(
         check_cancel()
         add_log(f"时间验证完成，共 {len(temporal_validation_df)} 条", "success")
 
-        update_stage("关键核心潜力评分", "active", 9)
-        add_log("正在进行关键核心潜力评分...", "info")
-        check_cancel()
-        validated_df = pipeline._score_key_core_potential(validated_df, temporal_validation_df)
-        pipeline._build_research_validation_artifacts(validated_df)
-        check_cancel()
-        add_log(f"关键核心潜力评分完成，共 {len(pipeline.latest_key_core_scored_df)} 条", "success")
-
-        update_stage("信号生成", "active", 10)
+        update_stage("信号生成", "active", 7)
         add_log("正在生成信号...", "info")
         check_cancel()
-        
+
         signals_output = pipeline._generate_signals(validated_df, raw_data)
         check_cancel()
-        
+
         if isinstance(signals_output, dict):
             signals_df = signals_output.get('candidates_df', pd.DataFrame())
             near_strong_df = signals_output.get('near_strong_candidates_df', pd.DataFrame())
         else:
             signals_df = signals_output
             near_strong_df = pd.DataFrame()
-        
+
         add_log(f"生成了 {len(signals_df)} 个信号", "success")
-        
-        update_stage("报告生成", "active", 11)
+
+        update_stage("报告生成", "active", 8)
         add_log("正在生成报告...", "info")
         check_cancel()
-        
+
         report = pipeline._generate_report(signals_output)
         check_cancel()
         add_log("报告生成完成", "success")
-        
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         result_dir = Config.RESULT_DIR / timestamp
         result_dir.mkdir(parents=True, exist_ok=True)
-        
+
         pipeline._save_results(result_dir, events_df, candidate_forms_df, scored_df, refined_df, validated_df, signals_output, report, raw_data=raw_data)
         signals_df = pipeline._assign_signal_ids(signals_df)
         add_log(f"结果已保存到: {result_dir}", "success")
-        
+
         update_stage("完成", "complete", len(STAGE_NAMES))
         add_log("🎉 分析流程全部完成！", "success")
 
@@ -860,21 +834,16 @@ def run_analysis(
             'scored_df': scored_df,
             'refined_df': refined_df,
             'reverse_validation_df': pipeline.latest_reverse_validation_df,
-            'tech_chain_mapping_df': pipeline.latest_tech_chain_mapping_df,
             'temporal_validation_df': pipeline.latest_temporal_validation_df,
-            'key_core_scored_df': pipeline.latest_key_core_scored_df,
-            'key_core_candidates_df': pipeline.latest_key_core_candidates_df,
             'validated_df': validated_df,
             'signals_df': signals_df,
             'signals_output': signals_output,
             'near_strong_df': near_strong_df,
             'family_metrics_df': pipeline.latest_family_metrics_df,
-            'final_shortlist_df': pipeline.latest_final_shortlist_df,
-            'frequency_baseline_df': pipeline.latest_frequency_baseline_df,
-            'baseline_comparison_df': pipeline.latest_baseline_comparison_df,
             'source_documents_df': pipeline.latest_source_documents_df,
             'signal_evidence_links_df': pipeline.latest_signal_evidence_links_df,
             'signal_reliability_df': pipeline.latest_signal_reliability_df,
+            'weak_signals_comparison_df': pipeline.latest_weak_signals_comparison_df,
             'report': report,
             'result_dir': str(result_dir),
             'raw_data': raw_data
@@ -886,7 +855,7 @@ def run_analysis(
         add_log("分析已停止。", "warning")
         emit_event("cancelled")
         return None
-        
+
     except Exception as e:
         add_log(f"分析失败: {e}", "error")
         add_log(traceback.format_exc(), "error")
@@ -1072,9 +1041,9 @@ def render_results(results):
             .properties(height=height)
         )
         st.altair_chart(chart, use_container_width=True)
-    
+
     st.markdown("## 📈 分析结果")
-    
+
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
         st.metric("📋 抽取事件", len(results['events_df']))
@@ -1090,32 +1059,33 @@ def render_results(results):
             weak_count = len(signals_df)
         st.metric("🎯 弱信号", weak_count)
     with col5:
-        key_core_candidates_df = results.get('key_core_candidates_df', pd.DataFrame())
-        candidate_count = len(key_core_candidates_df) if isinstance(key_core_candidates_df, pd.DataFrame) else 0
-        st.metric("🧩 核心候选", candidate_count)
+        temporal_validation_df = results.get('temporal_validation_df', pd.DataFrame())
+        if isinstance(temporal_validation_df, pd.DataFrame) and 'monitoring_priority' in temporal_validation_df.columns:
+            watch_count = int((temporal_validation_df['monitoring_priority'].astype(str) == 'high').sum())
+        else:
+            watch_count = 0
+        st.metric("⏱ 高频观测", watch_count)
     with col6:
         st.metric("📝 报告", "已生成")
-    
+
     tabs = st.tabs([
         "📊 概览",
         "📋 事件列表",
         "🧾 事件质量",
         "🔧 候选成形",
-        "📊 评分结果",
-        "🎯 弱信号",
-        "🧭 技术链映射",
-        "⏱ 时间验证",
-        "🧩 核心候选",
+        "📊 弱信号评分",
+        "🎯 弱信号生成",
+        "⏱ 持续观测",
         "📝 分析报告",
     ])
-    
+
     with tabs[0]:
         st.markdown("### 📊 数据源分布")
         raw_data = results['raw_data']
         if 'source_type' in raw_data.columns:
             source_dist = raw_data['source_type'].value_counts()
             render_horizontal_bar_chart(source_dist, "数据源", "数量")
-        
+
         st.markdown("### 📈 信号类型分布")
         signals_df = results['signals_df']
         if 'signal_type' in signals_df.columns:
@@ -1123,16 +1093,10 @@ def render_results(results):
             render_horizontal_bar_chart(signal_dist, "信号类型", "数量")
 
         event_quality_df = results.get('event_quality_df', pd.DataFrame())
-        tech_chain_mapping_df = results.get('tech_chain_mapping_df', pd.DataFrame())
-        if (
-            isinstance(event_quality_df, pd.DataFrame)
-            and not event_quality_df.empty
-            and isinstance(tech_chain_mapping_df, pd.DataFrame)
-            and not tech_chain_mapping_df.empty
-        ):
-            st.markdown("### v0.02 质量与技术链概览")
-            v26_cols = st.columns(4)
-            with v26_cols[0]:
+        if isinstance(event_quality_df, pd.DataFrame) and not event_quality_df.empty:
+            st.markdown("### 证据质量概览")
+            quality_cols = st.columns(3)
+            with quality_cols[0]:
                 quality_series = (
                     event_quality_df['event_quality_score']
                     if 'event_quality_score' in event_quality_df.columns
@@ -1140,18 +1104,7 @@ def render_results(results):
                 )
                 avg_quality = pd.to_numeric(quality_series, errors='coerce').fillna(0).mean()
                 st.metric("事件平均质量", f"{avg_quality:.1f}")
-            with v26_cols[1]:
-                relation_series = (
-                    tech_chain_mapping_df['mapping_relation']
-                    if 'mapping_relation' in tech_chain_mapping_df.columns
-                    else pd.Series(["no_match"] * len(tech_chain_mapping_df))
-                )
-                mapped_count = int((relation_series.astype(str) != 'no_match').sum())
-                st.metric("技术链已映射", mapped_count)
-            with v26_cols[2]:
-                coverage = mapped_count / max(len(tech_chain_mapping_df), 1)
-                st.metric("映射覆盖率", f"{coverage:.0%}")
-            with v26_cols[3]:
+            with quality_cols[1]:
                 foresight_series = (
                     event_quality_df['foresight_relevance_score']
                     if 'foresight_relevance_score' in event_quality_df.columns
@@ -1159,36 +1112,39 @@ def render_results(results):
                 )
                 avg_foresight = pd.to_numeric(foresight_series, errors='coerce').fillna(0).mean()
                 st.metric("平均预见相关度", f"{avg_foresight:.1f}")
+            with quality_cols[2]:
+                high_quality = int((pd.to_numeric(quality_series, errors='coerce').fillna(0) >= 7).sum())
+                st.metric("高质量事件", high_quality)
 
         temporal_validation_df = results.get('temporal_validation_df', pd.DataFrame())
-        key_core_scored_df = results.get('key_core_scored_df', pd.DataFrame())
-        key_core_candidates_df = results.get('key_core_candidates_df', pd.DataFrame())
         has_temporal = isinstance(temporal_validation_df, pd.DataFrame) and not temporal_validation_df.empty
-        has_key_core = isinstance(key_core_scored_df, pd.DataFrame) and not key_core_scored_df.empty
-        if has_temporal or has_key_core:
-            st.markdown("### 时间验证与关键核心潜力")
-            v27_cols = st.columns(4)
-            with v27_cols[0]:
-                if has_temporal and 'temporal_validation_passed' in temporal_validation_df.columns:
+        if has_temporal:
+            st.markdown("### 时间验证与持续观测")
+            temporal_cols = st.columns(4)
+            with temporal_cols[0]:
+                if 'temporal_validation_passed' in temporal_validation_df.columns:
                     passed = temporal_validation_df['temporal_validation_passed'].astype(str).str.lower().isin(['true', '1', 'yes', '通过']).sum()
                 else:
                     passed = 0
                 st.metric("时间验证通过", int(passed))
-            with v27_cols[1]:
-                if has_temporal and 'temporal_momentum_score' in temporal_validation_df.columns:
+            with temporal_cols[1]:
+                if 'temporal_momentum_score' in temporal_validation_df.columns:
                     momentum = pd.to_numeric(temporal_validation_df['temporal_momentum_score'], errors='coerce').fillna(0).mean()
                 else:
                     momentum = 0
                 st.metric("平均动量分", f"{momentum:.1f}")
-            with v27_cols[2]:
-                if has_key_core and 'key_core_score' in key_core_scored_df.columns:
-                    average_key_score = pd.to_numeric(key_core_scored_df['key_core_score'], errors='coerce').fillna(0).mean()
+            with temporal_cols[2]:
+                if 'monitoring_priority' in temporal_validation_df.columns:
+                    high_watch = int((temporal_validation_df['monitoring_priority'].astype(str) == 'high').sum())
                 else:
-                    average_key_score = 0
-                st.metric("平均核心潜力", f"{average_key_score:.1f}")
-            with v27_cols[3]:
-                key_candidate_count = len(key_core_candidates_df) if isinstance(key_core_candidates_df, pd.DataFrame) else 0
-                st.metric("核心候选数", key_candidate_count)
+                    high_watch = 0
+                st.metric("高频观测对象", high_watch)
+            with temporal_cols[3]:
+                if 'monitoring_priority' in temporal_validation_df.columns:
+                    needs_dates = int((temporal_validation_df['monitoring_priority'].astype(str) == 'needs_dates').sum())
+                else:
+                    needs_dates = 0
+                st.metric("待补日期", needs_dates)
 
         family_metrics_df = results.get('family_metrics_df', pd.DataFrame())
         if (
@@ -1241,34 +1197,14 @@ def render_results(results):
                 if preview_cols:
                     st.dataframe(covered_families[preview_cols].head(10), use_container_width=True)
 
-        final_shortlist_df = results.get('final_shortlist_df', pd.DataFrame())
-        if isinstance(final_shortlist_df, pd.DataFrame) and not final_shortlist_df.empty:
-            st.markdown("### 最终研究短名单")
-            shortlist_cols = [
-                'shortlist_rank',
-                'shortlist_tier',
-                'display_candidate_name',
-                'final_research_bucket',
-                'weak_signal_score',
-                'source_count',
-                'reverse_validation_status',
-                'risk_flags',
-            ]
-            shortlist_cols = [c for c in shortlist_cols if c in final_shortlist_df.columns]
-            render_paginated_dataframe(
-                final_shortlist_df,
-                shortlist_cols,
-                "final_shortlist_table",
-                page_size=20,
-                empty_message="当前结果未包含最终研究短名单。",
-            )
-    
+
     with tabs[1]:
         st.markdown("### 📋 抽取的事件要素")
         events_df = results['events_df']
         if not events_df.empty:
             display_cols = [
                 'event_id',
+                'title',
                 'event_schema_version',
                 'schema_migration_mode',
                 'subject',
@@ -1364,20 +1300,20 @@ def render_results(results):
                 page_size=20,
                 empty_message="当前结果未包含候选对象。",
             )
-            
+
             if 'topic_granularity' in candidates_df.columns:
                 st.markdown("#### 主题粒度分布")
                 granularity_dist = unique_candidates_df['topic_granularity'].value_counts()
                 render_horizontal_bar_chart(granularity_dist, "主题粒度", "数量")
-    
+
     with tabs[4]:
-        st.markdown("### 📊 评分结果")
+        st.markdown("### 📊 弱信号评分")
         scored_df = results['scored_df']
         if not scored_df.empty:
             unique_scored_df = build_unique_candidate_view(scored_df)
             score_cols = ['display_candidate_name', 'weak_signal_score', 'hotspot_score', 'source_count', 'total_mentions']
             score_cols = [c for c in score_cols if c in unique_scored_df.columns]
-            
+
             sorted_df = sort_by_available_scores(
                 unique_scored_df,
                 ['weak_signal_score', 'hotspot_score', 'source_count', 'total_mentions']
@@ -1387,10 +1323,10 @@ def render_results(results):
                 score_cols,
                 "scored_candidates_table",
                 page_size=20,
-                empty_message="当前结果未包含评分候选。",
+                empty_message="当前结果未包含弱信号评分候选。",
             )
-            
-            st.markdown("#### 评分分布")
+
+            st.markdown("#### 弱信号评分分布")
             if 'weak_signal_score' in unique_scored_df.columns:
                 score_chart_df = sorted_df.head(20).copy()
                 labels = (
@@ -1427,16 +1363,16 @@ def render_results(results):
                         page_size=20,
                         empty_message="当前结果未包含反向验证摘要。",
                     )
-    
+
     with tabs[5]:
-        st.markdown("### 🎯 识别的弱信号")
+        st.markdown("### 🎯 弱信号生成")
         signals_df = results['signals_df']
-        
+
         if 'signal_type' in signals_df.columns:
             weak_signals = signals_df[signals_df['signal_type'] == 'weak_signal']
         else:
             weak_signals = signals_df
-        
+
         if not weak_signals.empty:
             def dataframe_records(value):
                 if isinstance(value, pd.DataFrame):
@@ -1764,7 +1700,6 @@ def render_results(results):
                     'technology',
                     'canonical_candidate_name_en',
                     'matched_term',
-                    'tech_chain_name',
                     'mechanism_core',
                     'relation_target',
                     'relation_task',
@@ -1800,7 +1735,7 @@ def render_results(results):
 
                 finalized = finalize_support_terms(terms)
                 if not finalized:
-                    for field in ['display_candidate_name', 'mechanism_core', 'matched_term', 'tech_chain_name']:
+                    for field in ['display_candidate_name', 'mechanism_core']:
                         add(row.get(field))
                         if terms:
                             break
@@ -2098,7 +2033,6 @@ def render_results(results):
                     full_text = safe_text(evidence.get('full_text'))
                     raw_candidate = safe_text(evidence.get('raw_candidate_text')) or safe_text(signal_row.get('raw_candidate_text'))
                     mechanism = safe_text(signal_row.get('mechanism_core')) or safe_text(evidence.get('mechanism_core'))
-                    tech_chain = safe_text(signal_row.get('tech_chain_name')) or safe_text(evidence.get('tech_chain_name'))
                     relation_target = safe_text(signal_row.get('relation_target')) or safe_text(evidence.get('relation_target'))
                     relation_task = safe_text(signal_row.get('relation_task')) or safe_text(evidence.get('relation_task'))
                     relation_data = safe_text(signal_row.get('relation_data_modality')) or safe_text(evidence.get('relation_data_modality'))
@@ -2171,8 +2105,6 @@ def render_results(results):
                         mapping_bits.append("；".join(role_bits))
                     elif constraint_terms:
                         mapping_bits.append(f"系统还识别到这些限定信息：{'、'.join(constraint_terms[:6])}")
-                    if tech_chain:
-                        mapping_bits.append(f"因此它可以作为技术链节点“{tech_chain}”下的一个具体证据")
                     if mapping_bits:
                         paragraphs.append("关联方式：" + "；".join(mapping_bits) + "。")
 
@@ -2276,8 +2208,6 @@ def render_results(results):
                 'candidate_evidence_quality',
                 'candidate_evidence_foresight_relevance',
                 'high_foresight_evidence_count',
-                'tech_chain_name',
-                'mapping_relation',
                 'signal_bucket',
                 'source_count',
                 'cluster_evidence_count',
@@ -2285,7 +2215,7 @@ def render_results(results):
                 'reliable_evidence_count',
                 'traceable_evidence_count',
             ]
-            
+
             sorted_signals = sort_by_available_scores(
                 weak_signals,
                 ['weak_signal_score', 'hotspot_score', 'cluster_evidence_count', 'source_count']
@@ -2504,13 +2434,13 @@ def render_results(results):
                 st.dataframe(page_signals[display_cols], use_container_width=True)
             else:
                 st.info("当前筛选条件下没有弱信号。")
-            
+
             for idx, row in page_signals.iterrows():
                 name = row.get('display_candidate_name', '未知')
                 score = get_display_score(row)
                 mechanism = row.get('mechanism_core', '')
                 signal_id = safe_text(row.get('signal_id')) or f"WS{idx + 1:03d}"
-                
+
                 with st.expander(f"🎯 {signal_id} · {name} (得分: {score:.2f})"):
                     evidence_records = signal_evidence_cache.get(signal_id, evidence_records_for_signal(row))
                     reliability = signal_reliability_cache.get(signal_id, infer_signal_reliability(row, evidence_records))
@@ -2544,9 +2474,6 @@ def render_results(results):
                     alignment_risk = safe_text(row.get('release_alignment_risk'))
                     evidence_quality = safe_text(row.get('candidate_evidence_quality'))
                     evidence_foresight = safe_text(row.get('candidate_evidence_foresight_relevance'))
-                    tech_chain_name = safe_text(row.get('tech_chain_name'))
-                    mapping_relation = safe_text(row.get('mapping_relation'))
-                    mapping_confidence = safe_text(row.get('mapping_confidence'))
                     constraint_signature = safe_preview(row.get('constraint_signature'), limit=120)
                     temporal_tier = safe_text(row.get('temporal_validation_tier'))
                     temporal_reason = safe_preview(row.get('temporal_validation_reason'), limit=180)
@@ -2568,15 +2495,12 @@ def render_results(results):
                         st.markdown(f"**证据质量**: {evidence_quality}")
                     if evidence_foresight:
                         st.markdown(f"**证据预见相关度**: {evidence_foresight}")
-                    if tech_chain_name:
-                        mapping_parts = [tech_chain_name, mapping_relation, mapping_confidence]
-                        st.markdown(f"**技术链映射**: {' / '.join([part for part in mapping_parts if part])}")
                     if constraint_signature:
                         st.markdown(f"**约束签名**: {constraint_signature}")
                     if temporal_tier or temporal_reason:
                         st.markdown(f"**时间验证**: {' / '.join([part for part in [temporal_tier, temporal_reason] if part])}")
                     if change_type or change_reason:
-                        st.markdown(f"**技术链变化**: {' / '.join([part for part in [change_type, change_reason] if part])}")
+                        st.markdown(f"**弱信号变化**: {' / '.join([part for part in [change_type, change_reason] if part])}")
 
                     basis_rows = []
                     for label, column in [
@@ -2719,86 +2643,52 @@ def render_results(results):
                                         st.info("该历史证据只保留了概述或截断片段，未保存完整源文本。")
         else:
             st.info("未识别到弱信号")
-    
+
     with tabs[6]:
-        st.markdown("### 🧭 技术链映射")
-        tech_chain_mapping_df = results.get('tech_chain_mapping_df', pd.DataFrame())
-        if isinstance(tech_chain_mapping_df, pd.DataFrame) and not tech_chain_mapping_df.empty:
-            mapping_cols = [
+        st.markdown("### ⏱ 弱信号持续跟踪与趋势观测")
+
+        # 1. 弱信号趋势比对
+        weak_signals_comparison_df = results.get('weak_signals_comparison_df', pd.DataFrame())
+        if isinstance(weak_signals_comparison_df, pd.DataFrame) and not weak_signals_comparison_df.empty:
+            st.markdown("#### 📈 弱信号变化趋势")
+            col1, col2, col3, col4 = st.columns(4)
+            total_ws = len(weak_signals_comparison_df)
+            new_ws = int((weak_signals_comparison_df['trend'] == '新增').sum())
+            growing_ws = int((weak_signals_comparison_df['trend'] == '增长').sum())
+            declining_ws = int((weak_signals_comparison_df['trend'] == '减弱').sum())
+
+            col1.metric("监测中弱信号总数", f"{total_ws} 个")
+            col2.metric("新增弱信号 🆕", f"{new_ws} 个")
+            col3.metric("提及增加 ↗️", f"{growing_ws} 个")
+            col4.metric("提及减少 ↘️", f"{declining_ws} 个")
+
+            comparison_cols = [
+                'signal_id',
                 'candidate_name',
-                'tech_chain_name',
-                'mapping_relation',
-                'mapping_confidence',
-                'mapping_method',
-                'matched_term',
-                'bottleneck_level',
-                'strategic_importance_level',
-                'mapping_reason',
+                'trend_symbol',
+                'current_mentions',
+                'past_mentions',
+                'temporal_momentum_score',
+                'monitoring_priority',
+                'monitoring_action',
+                'temporal_validation_reason'
             ]
-            mapping_cols = [c for c in mapping_cols if c in tech_chain_mapping_df.columns]
-            mapping_view = tech_chain_mapping_df.copy()
-            dedupe_cols = [
-                column
-                for column in [
-                    'candidate_id',
-                    'candidate_name',
-                    'tech_chain_node_id',
-                    'tech_chain_name',
-                    'mapping_relation',
-                    'mapping_method',
-                    'matched_term',
-                ]
-                if column in mapping_view.columns
-            ]
-            if dedupe_cols:
-                mapping_view = mapping_view.drop_duplicates(subset=dedupe_cols, keep='first')
-            if 'mapping_confidence' in mapping_view.columns:
-                mapping_view['mapping_confidence'] = pd.to_numeric(mapping_view['mapping_confidence'], errors='coerce')
-                mapping_view = mapping_view.sort_values(
-                    by='mapping_confidence',
-                    ascending=False,
-                    na_position='last',
-                )
-            if len(mapping_view) < len(tech_chain_mapping_df):
-                st.caption(f"已合并重复映射：展示 {len(mapping_view)} 条唯一映射，原始记录 {len(tech_chain_mapping_df)} 条。")
+            comparison_cols = [c for c in comparison_cols if c in weak_signals_comparison_df.columns]
+
             render_paginated_dataframe(
-                mapping_view,
-                mapping_cols,
-                "tech_chain_mapping_table",
+                weak_signals_comparison_df.copy(),
+                comparison_cols,
+                "weak_signals_comparison_table",
                 page_size=20,
-                empty_message="当前结果未包含技术链映射。",
+                empty_message="暂无弱信号趋势比对数据。",
             )
-            if 'mapping_relation' in tech_chain_mapping_df.columns:
-                st.markdown("#### 映射关系分布")
-                render_horizontal_bar_chart(mapping_view['mapping_relation'].value_counts(), "映射关系", "数量")
+            st.markdown("---")
         else:
-            st.info("当前结果未包含技术链映射。")
+            st.info("💡 当前运行结果或历史数据中未包含弱信号持续观测比对记录（需运行多次产生多次弱信号归档方可比对，或当前运行未识别到弱信号）。")
+            st.markdown("---")
 
-        validated_df = results.get('validated_df', pd.DataFrame())
-        if isinstance(validated_df, pd.DataFrame) and not validated_df.empty:
-            enriched_cols = [
-                'display_candidate_name',
-                'candidate_evidence_quality',
-                'candidate_evidence_foresight_relevance',
-                'high_foresight_evidence_count',
-                'quality_adjusted_rank_score',
-                'tech_chain_name',
-                'mapping_relation',
-                'tech_chain_mapping_risk',
-            ]
-            enriched_cols = [c for c in enriched_cols if c in validated_df.columns]
-            if enriched_cols:
-                st.markdown("#### 候选增强字段")
-                render_paginated_dataframe(
-                    validated_df,
-                    enriched_cols,
-                    "validated_enriched_table",
-                    page_size=20,
-                    empty_message="当前结果未包含候选增强字段。",
-                )
-
-    with tabs[7]:
-        st.markdown("### ⏱ 时间验证")
+        # 2. 详细时间验证数据
+        st.markdown("#### ⏱ 时间验证与窗口观测指标")
         temporal_validation_df = results.get('temporal_validation_df', pd.DataFrame())
         if isinstance(temporal_validation_df, pd.DataFrame) and not temporal_validation_df.empty:
             temporal_view_source = temporal_validation_df.copy()
@@ -2810,7 +2700,7 @@ def render_results(results):
             if temporal_dedupe_cols:
                 temporal_view_source = temporal_view_source.drop_duplicates(subset=temporal_dedupe_cols, keep='first')
             if len(temporal_view_source) < len(temporal_validation_df):
-                st.caption(f"已合并重复时间验证记录：展示 {len(temporal_view_source)} 条唯一候选，原始记录 {len(temporal_validation_df)} 条。")
+                st.caption(f"已合并重复时间验证记录：展示 {len(temporal_view_source)} 条唯一弱信号，原始记录 {len(temporal_validation_df)} 条。")
             temporal_cols = [
                 'candidate_name',
                 'first_seen_date',
@@ -2824,6 +2714,10 @@ def render_results(results):
                 'org_growth_rate',
                 'high_quality_growth_rate',
                 'date_coverage_ratio',
+                'monitoring_priority',
+                'monitoring_action',
+                'next_observation_window_start',
+                'next_observation_window_end',
                 'temporal_validation_reason',
             ]
             temporal_cols = [c for c in temporal_cols if c in temporal_view_source.columns]
@@ -2836,14 +2730,15 @@ def render_results(results):
                 temporal_cols,
                 "temporal_validation_table",
                 page_size=20,
-                empty_message="当前结果未包含时间验证。",
+                empty_message="当前结果未包含弱信号时间验证。",
             )
             if 'temporal_validation_tier' in temporal_view_source.columns:
-                st.markdown("#### 时间验证层级分布")
+                st.markdown("##### 时间验证层级分布")
                 render_horizontal_bar_chart(temporal_view_source['temporal_validation_tier'].value_counts(), "时间验证层级", "数量")
         else:
-            st.info("当前结果未包含时间验证。")
+            st.info("当前结果未包含弱信号时间验证。")
 
+        # 3. 弱信号时间验证候选字段
         validated_df = results.get('validated_df', pd.DataFrame())
         if isinstance(validated_df, pd.DataFrame) and not validated_df.empty:
             temporal_enriched_cols = [
@@ -2852,13 +2747,24 @@ def render_results(results):
                 'temporal_validation_tier',
                 'temporal_momentum_score',
                 'date_coverage_ratio',
+                'monitoring_priority',
+                'monitoring_action',
                 'temporal_validation_reason',
             ]
             temporal_enriched_cols = [c for c in temporal_enriched_cols if c in validated_df.columns]
-            if temporal_enriched_cols:
-                st.markdown("#### 候选时间验证字段")
+
+            # 仅保留弱信号
+            is_weak = pd.Series(False, index=validated_df.index)
+            if "signal_type" in validated_df.columns:
+                is_weak = is_weak | (validated_df["signal_type"] == "weak_signal")
+            if "candidate_stage" in validated_df.columns:
+                is_weak = is_weak | (validated_df["candidate_stage"] == "formed_candidate_strong")
+            validated_df_weak = validated_df[is_weak].copy()
+
+            if temporal_enriched_cols and not validated_df_weak.empty:
+                st.markdown("##### 弱信号时间验证候选字段详情")
                 temporal_candidates = sort_by_available_scores(
-                    validated_df,
+                    validated_df_weak,
                     ['temporal_momentum_score', 'weak_signal_score']
                 )
                 render_paginated_dataframe(
@@ -2869,119 +2775,12 @@ def render_results(results):
                     empty_message="当前结果未包含候选时间验证字段。",
                 )
 
-    with tabs[8]:
-        st.markdown("### 🧩 关键核心候选")
-        key_core_candidates_df = results.get('key_core_candidates_df', pd.DataFrame())
-        key_core_scored_df = results.get('key_core_scored_df', pd.DataFrame())
-
-        if isinstance(key_core_candidates_df, pd.DataFrame) and not key_core_candidates_df.empty:
-            candidate_view = key_core_candidates_df.copy()
-            candidate_dedupe_cols = [
-                column
-                for column in ['candidate_id', 'candidate_name', 'final_research_object_name', 'tech_chain_name']
-                if column in candidate_view.columns
-            ]
-            if candidate_dedupe_cols:
-                candidate_view = candidate_view.drop_duplicates(subset=candidate_dedupe_cols, keep='first')
-            if len(candidate_view) < len(key_core_candidates_df):
-                st.caption(f"已合并重复核心候选：展示 {len(candidate_view)} 条唯一候选，原始记录 {len(key_core_candidates_df)} 条。")
-            if 'key_core_rank' in candidate_view.columns:
-                candidate_view['_rank'] = pd.to_numeric(candidate_view['key_core_rank'], errors='coerce').fillna(999)
-                candidate_view = candidate_view.sort_values(by=['_rank']).drop(columns=['_rank'])
-            else:
-                candidate_view = sort_by_available_scores(candidate_view, ['key_core_score'])
-
-            candidate_cols = [
-                'key_core_rank',
-                'candidate_name',
-                'key_core_score',
-                'key_core_tier',
-                'tech_chain_name',
-                'bottleneck_level',
-                'strategic_importance_level',
-                'temporal_validation_tier',
-                'candidate_core_evidence_quality',
-                'source_count',
-                'cluster_evidence_count',
-                'key_core_reason',
-                'key_core_risk',
-                'recommended_action',
-            ]
-            candidate_cols = [c for c in candidate_cols if c in candidate_view.columns]
-            page_candidate_view = render_paginated_dataframe(
-                candidate_view,
-                candidate_cols,
-                "key_core_candidates_table",
-                page_size=20,
-                empty_message="当前结果未包含关键核心候选。",
-            )
-
-            for _, row in page_candidate_view.head(10).iterrows():
-                name = row.get('candidate_name', row.get('display_candidate_name', '未知'))
-                score = numeric_value(row.get('key_core_score'), default=0.0)
-                with st.expander(f"🧩 {name} (核心潜力: {score:.1f})"):
-                    st.markdown(f"**候选层级**: {safe_text(row.get('key_core_tier')) or 'unknown'}")
-                    st.markdown(f"**技术链节点**: {safe_text(row.get('tech_chain_name')) or '未命中明确节点'}")
-                    st.markdown(
-                        f"**卡点/战略等级**: {safe_text(row.get('bottleneck_level')) or 'unknown'} / "
-                        f"{safe_text(row.get('strategic_importance_level')) or 'unknown'}"
-                    )
-                    temporal_tier = safe_text(row.get('temporal_validation_tier'))
-                    if temporal_tier:
-                        st.markdown(f"**时间验证**: {temporal_tier}")
-                    reason = safe_preview(row.get('key_core_reason'), limit=320)
-                    risk = safe_text(row.get('key_core_risk'))
-                    action = safe_text(row.get('recommended_action'))
-                    if reason:
-                        st.markdown(f"**评分原因**: {reason}")
-                    if risk:
-                        st.markdown(f"**风险标记**: {risk}")
-                    if action:
-                        st.markdown(f"**建议动作**: {action}")
-
-        elif isinstance(key_core_scored_df, pd.DataFrame) and not key_core_scored_df.empty:
-            st.info("当前未形成关键核心候选短名单，下面展示潜力评分最高的候选。")
-            scored_view = sort_by_available_scores(key_core_scored_df, ['key_core_score', 'weak_signal_score'])
-            scored_dedupe_cols = [
-                column
-                for column in ['candidate_id', 'candidate_name', 'display_candidate_name', 'tech_chain_name']
-                if column in scored_view.columns
-            ]
-            if scored_dedupe_cols:
-                scored_view = scored_view.drop_duplicates(subset=scored_dedupe_cols, keep='first')
-            scored_cols = [
-                'candidate_name',
-                'display_candidate_name',
-                'key_core_score',
-                'key_core_tier',
-                'key_core_gate_passed',
-                'weak_signal_score',
-                'tech_chain_name',
-                'temporal_validation_tier',
-                'key_core_risk',
-                'recommended_action',
-            ]
-            scored_cols = [c for c in scored_cols if c in scored_view.columns]
-            render_paginated_dataframe(
-                scored_view,
-                scored_cols,
-                "key_core_scored_table",
-                page_size=20,
-                empty_message="当前结果未包含关键核心潜力评分。",
-            )
-        else:
-            st.info("当前结果未包含关键核心潜力评分。")
-
-        if isinstance(key_core_scored_df, pd.DataFrame) and not key_core_scored_df.empty and 'key_core_tier' in key_core_scored_df.columns:
-            st.markdown("#### 核心潜力层级分布")
-            render_horizontal_bar_chart(key_core_scored_df['key_core_tier'].value_counts(), "核心潜力层级", "数量")
-
-    with tabs[9]:
+    with tabs[7]:
         st.markdown("### 📝 分析报告")
         report = results['report']
         if report:
             st.markdown(report)
-            
+
             timestamp = os.path.basename(results['result_dir'])
             st.download_button(
                 label="📥 下载报告",
@@ -2995,13 +2794,7 @@ def render_results(results):
             reverse_validation_path = result_dir / "reverse_validation.json"
             evidence_packets_path = result_dir / "report_evidence_packets.json"
             grounded_facts_path = result_dir / "report_grounded_facts.json"
-            final_shortlist_path = result_dir / "final_shortlist.json"
-            tech_chain_mapping_path = result_dir / "tech_chain_mapping.json"
             temporal_validation_path = result_dir / "temporal_validation.json"
-            key_core_scored_path = result_dir / "key_core_scored.json"
-            key_core_candidates_path = result_dir / "key_core_candidates.json"
-            frequency_baseline_path = result_dir / "frequency_baseline.json"
-            baseline_comparison_path = result_dir / "baseline_comparison.json"
 
             if family_report_path.exists():
                 with st.expander("对象族评估报告"):
@@ -3019,33 +2812,9 @@ def render_results(results):
                 with st.expander("Grounded Facts"):
                     st.json(json.loads(grounded_facts_path.read_text(encoding='utf-8')))
 
-            if final_shortlist_path.exists():
-                with st.expander("最终研究短名单"):
-                    st.json(json.loads(final_shortlist_path.read_text(encoding='utf-8')))
-
-            if tech_chain_mapping_path.exists():
-                with st.expander("技术链映射"):
-                    st.json(json.loads(tech_chain_mapping_path.read_text(encoding='utf-8')))
-
             if temporal_validation_path.exists():
-                with st.expander("时间验证"):
+                with st.expander("时间验证与持续观测"):
                     st.json(json.loads(temporal_validation_path.read_text(encoding='utf-8')))
-
-            if key_core_candidates_path.exists():
-                with st.expander("关键核心候选"):
-                    st.json(json.loads(key_core_candidates_path.read_text(encoding='utf-8')))
-
-            if key_core_scored_path.exists():
-                with st.expander("关键核心潜力评分"):
-                    st.json(json.loads(key_core_scored_path.read_text(encoding='utf-8')))
-
-            if frequency_baseline_path.exists():
-                with st.expander("频次基线"):
-                    st.json(json.loads(frequency_baseline_path.read_text(encoding='utf-8')))
-
-            if baseline_comparison_path.exists():
-                with st.expander("基线对照"):
-                    st.json(json.loads(baseline_comparison_path.read_text(encoding='utf-8')))
 
 def _load_history_dataframe(folder_path: Path, stem: str) -> pd.DataFrame:
     json_path = folder_path / f"{stem}.json"
@@ -3073,10 +2842,7 @@ def _load_history_dataframe(folder_path: Path, stem: str) -> pd.DataFrame:
 def _build_history_results(folder_path: Path) -> Dict[str, Any]:
     events_df = _load_history_dataframe(folder_path, "events")
     event_quality_df = _load_history_dataframe(folder_path, "event_quality")
-    tech_chain_mapping_df = _load_history_dataframe(folder_path, "tech_chain_mapping")
     temporal_validation_df = _load_history_dataframe(folder_path, "temporal_validation")
-    key_core_scored_df = _load_history_dataframe(folder_path, "key_core_scored")
-    key_core_candidates_df = _load_history_dataframe(folder_path, "key_core_candidates")
     candidate_forms_df = _load_history_dataframe(folder_path, "candidate_forms")
     scored_df = _load_history_dataframe(folder_path, "scored")
     refined_df = _load_history_dataframe(folder_path, "refined")
@@ -3084,12 +2850,10 @@ def _build_history_results(folder_path: Path) -> Dict[str, Any]:
     signals_df = _load_history_dataframe(folder_path, "signals")
     reverse_validation_df = _load_history_dataframe(folder_path, "reverse_validation")
     family_metrics_df = _load_history_dataframe(folder_path, "family_evaluation")
-    final_shortlist_df = _load_history_dataframe(folder_path, "final_shortlist")
-    frequency_baseline_df = _load_history_dataframe(folder_path, "frequency_baseline")
-    baseline_comparison_df = _load_history_dataframe(folder_path, "baseline_comparison")
     source_documents_df = _load_history_dataframe(folder_path, "source_documents")
     signal_evidence_links_df = _load_history_dataframe(folder_path, "signal_evidence_links")
     signal_reliability_df = _load_history_dataframe(folder_path, "signal_reliability")
+    weak_signals_comparison_df = _load_history_dataframe(folder_path, "weak_signals_comparison")
 
     report_path = folder_path / "report.txt"
     report = report_path.read_text(encoding='utf-8') if report_path.exists() else ""
@@ -3107,10 +2871,7 @@ def _build_history_results(folder_path: Path) -> Dict[str, Any]:
     return {
         'events_df': events_df,
         'event_quality_df': event_quality_df,
-        'tech_chain_mapping_df': tech_chain_mapping_df,
         'temporal_validation_df': temporal_validation_df,
-        'key_core_scored_df': key_core_scored_df,
-        'key_core_candidates_df': key_core_candidates_df,
         'candidate_forms_df': candidate_forms_df,
         'scored_df': scored_df,
         'refined_df': refined_df,
@@ -3119,12 +2880,10 @@ def _build_history_results(folder_path: Path) -> Dict[str, Any]:
         'signals_df': signals_df,
         'near_strong_df': near_strong_df,
         'family_metrics_df': family_metrics_df,
-        'final_shortlist_df': final_shortlist_df,
-        'frequency_baseline_df': frequency_baseline_df,
-        'baseline_comparison_df': baseline_comparison_df,
         'source_documents_df': source_documents_df,
         'signal_evidence_links_df': signal_evidence_links_df,
         'signal_reliability_df': signal_reliability_df,
+        'weak_signals_comparison_df': weak_signals_comparison_df,
         'report': report,
         'result_dir': str(folder_path),
         'raw_data': raw_data,
@@ -3134,23 +2893,23 @@ def _build_history_results(folder_path: Path) -> Dict[str, Any]:
 def render_history_page():
     """渲染历史结果页面"""
     st.markdown("## 📚 历史分析结果")
-    
+
     result_dirs = sorted([item for item in Config.RESULT_DIR.iterdir() if item.is_dir()], key=lambda x: x.name, reverse=True)
-    
+
     if not result_dirs:
         st.info("暂无历史结果")
         return
-    
+
     selected = st.selectbox(
         "选择历史记录",
         options=[d.name for d in result_dirs],
         format_func=lambda x: f"📁 {x}"
     )
-    
+
     if selected:
         folder_path = Config.RESULT_DIR / selected
         files = list(folder_path.glob("*"))
-        
+
         st.markdown(f"**时间戳**: `{selected}`")
         st.markdown(f"**文件数量**: {len(files)} 个")
 
@@ -3173,7 +2932,7 @@ def main():
         options=["🔍 实时分析", "📚 历史结果"],
         index=0
     )
-    
+
     if page == "🔍 实时分析":
         render_sidebar()
         render_header()
@@ -3182,13 +2941,14 @@ def main():
             st.markdown("## 运行状态")
             render_live_analysis_panel()
             st.stop()
-        
+
         st.markdown("## 分析来源")
         analysis_source = st.radio(
             "选择本次分析从哪里开始",
             options=[
+                "数据库检索：完整流程",
                 "原始数据 / CSV：完整流程",
-                "已抽取事件：跳过事件抽取继续分析",
+                "已抽取事件：补齐质量评分后继续分析",
                 "历史结果：仅重新生成报告",
             ],
             horizontal=False,
@@ -3208,8 +2968,184 @@ def main():
         custom_sample_size = None
         resume_mode = None
         resume_path = None
+        custom_source_config = None
 
-        if analysis_source.startswith("原始数据"):
+        if analysis_source.startswith("数据库检索"):
+            st.markdown("### 🔍 数据库检索条件配置")
+
+            # 使用模板快速填充
+            template_options = ["人形机器人 (默认)", "具身智能", "世界模型", "太空制造", "工业软件", "智能传感器", "新型电子材料", "自定义"]
+            selected_template = st.selectbox("技术领域检索模板", options=template_options)
+
+            if selected_template == "人形机器人 (默认)":
+                default_id = "humanoid_robot"
+                default_name = "人形机器人"
+                default_keywords = "人形机器人, 人型机器人, 仿人机器人, 双足机器人, 仿生机器人, 足式机器人, 通用机器人, 具身机器人, 服务机器人, humanoid robot, bipedal robot, anthropomorphic robot, android robot, legged robot, general-purpose robot, embodied robot"
+                default_synonyms = "双足行走, 步态规划, 步态生成, 运动控制, 动态平衡, 全身控制, 质心动力学, 零力矩点, ZMP, 落脚点规划, 接触规划, 多接触运动, 地形适应, 抗扰控制, humanoid robotics, bipedal locomotion, gait planning, gait generation, locomotion control, dynamic balance, whole-body control, centroidal dynamics, zero moment point, capture point, footstep planning, multi-contact locomotion, terrain adaptation, disturbance rejection, 全身运动规划, 逆运动学, 逆动力学, 力矩控制, 阻抗控制, 导纳控制, 接触力控制, 模型预测控制, 最优控制, 运动规划, 机器人操作, 灵巧操作, 灵巧手, 抓取规划, 双臂协作, 手眼协调, 移动操作, 全身操作, 接触丰富操作, 力控抓取"
+                default_exclude = "招聘, 培训, 广告, 课程, 招生, 销售"
+            elif selected_template == "具身智能":
+                default_id = "embodied_ai"
+                default_name = "具身智能"
+                default_keywords = "具身智能, embodied intelligence, VLA, 灵巧手, 双足机器人"
+                default_synonyms = "vision-language-action, 机器人基础模型, world model, 脑体协同"
+                default_exclude = "招聘, 培训, 广告, 课程"
+            elif selected_template == "世界模型":
+                default_id = "world_model"
+                default_name = "世界模型"
+                default_keywords = "世界模型, world model, 物理世界仿真, 生成式视频"
+                default_synonyms = "physical simulation, video generation model"
+                default_exclude = "招聘, 培训, 广告, 课程"
+            elif selected_template == "太空制造":
+                default_id = "space_manufacturing"
+                default_name = "太空制造"
+                default_keywords = "太空制造, 空间制造, 轨道制造, 零重力制造, 在轨服务, 空间工厂, 太空3D打印"
+                default_synonyms = "space manufacturing, in-orbit manufacturing, zero-gravity manufacturing, in-space manufacturing, orbital factory, space 3D printing, 空间装配, 空间机器人操作"
+                default_exclude = "招聘, 培训, 广告, 科幻电影, 游戏"
+            elif selected_template == "工业软件":
+                default_id = "industrial_software"
+                default_name = "工业软件"
+                default_keywords = "工业软件, CAD, CAM, CAE, PLM, MES, ERP, 工业互联网, 数字孪生, 制造执行系统"
+                default_synonyms = "industrial software, computer-aided design, computer-aided engineering, product lifecycle management, manufacturing execution system, digital twin, 工业自动化软件, 研发设计类软件, 生产制造类软件, 运维服务类软件"
+                default_exclude = "招聘, 培训, 广告, 销售, 代理"
+            elif selected_template == "智能传感器":
+                default_id = "smart_sensors"
+                default_name = "智能传感器"
+                default_keywords = "智能传感器, 柔性传感器, 激光雷达, 视觉传感器, 触觉传感器, 惯性传感器, 仿生传感器, MEMS"
+                default_synonyms = "smart sensor, flexible sensor, LiDAR, vision sensor, tactile sensor, inertial sensor, biomimetic sensor, micro-electromechanical systems, 边缘计算传感器, 智能感知, 多模态感知"
+                default_exclude = "招聘, 培训, 广告, 手机评测, 相机评测"
+            elif selected_template == "新型电子材料":
+                default_id = "new_electronic_materials"
+                default_name = "新型电子材料"
+                default_keywords = "新型电子材料, 半导体材料, 宽禁带半导体, 碳化硅, 氮化镓, 二维材料, 钙钛矿, 拓扑绝缘体"
+                default_synonyms = "new electronic materials, semiconductor materials, wide bandgap semiconductor, SiC, GaN, 2D materials, perovskite, topological insulator, 量子材料, 柔性电子材料, 纳米电子材料"
+                default_exclude = "招聘, 培训, 广告, 股票分析, 行情"
+            elif selected_template == "自定义":
+                default_id = ""
+                default_name = ""
+                default_keywords = ""
+                default_synonyms = ""
+                default_exclude = ""
+
+            col_id, col_name = st.columns(2)
+            with col_id:
+                tech_field_id = st.text_input("技术领域 ID", value=default_id)
+            with col_name:
+                tech_field_name = st.text_input("技术领域名称", value=default_name)
+
+            keywords_input = st.text_area("检索词 (英文逗号分隔)", value=default_keywords)
+            synonyms_input = st.text_area("同义词 / 扩展词 (英文逗号分隔)", value=default_synonyms)
+            exclude_input = st.text_area("排除词 (英文逗号分隔)", value=default_exclude)
+
+            col_start, col_end = st.columns(2)
+            with col_start:
+                start_date_val = st.date_input("开始日期", datetime(2023, 1, 1))
+            with col_end:
+                end_date_val = st.date_input("结束日期", datetime.now())
+
+            # 转换日期为 YYYY-MM-DD
+            start_date_str = start_date_val.strftime("%Y-%m-%d")
+            end_date_str = end_date_val.strftime("%Y-%m-%d")
+
+            keywords_list = [k.strip() for k in keywords_input.split(",") if k.strip()]
+            synonyms_list = [s.strip() for s in synonyms_input.split(",") if s.strip()]
+            exclude_list = [e.strip() for e in exclude_input.split(",") if e.strip()]
+
+            # 获取或初始化数据库可用数量
+            if "db_counts" not in st.session_state:
+                st.session_state.db_counts = {"paper": 0, "news": 0, "policy": 0, "report": 0, "patent": 0}
+
+            # 构建查询参数用于获取统计或进行分析
+            temp_query = SourceQuery(
+                tech_field_id=tech_field_id,
+                tech_field_name=tech_field_name,
+                keywords=keywords_list,
+                synonyms=synonyms_list,
+                exclude_terms=exclude_list,
+                start_date=start_date_str,
+                end_date=end_date_str,
+                source_types=["paper", "news", "policy", "report", "patent"],
+                counts={}
+            )
+
+            st.markdown("#### 📊 可用总量统计")
+            if st.button("📊 检索并获取实时数据库可用总量"):
+                with st.spinner("正在向数据库发送 count 检索..."):
+                    try:
+                        repo = DataRepository.from_env()
+                        st.session_state.db_counts = repo.get_source_counts(temp_query)
+                        st.success("可用数据量统计更新成功！")
+                    except Exception as ex:
+                        st.error(f"查询数据库数量失败: {ex}")
+
+            # 展示数量选择
+            c_p, c_n, c_po, c_r, c_pat = st.columns(5)
+            with c_p:
+                paper_count = st.number_input(
+                    f"文献 (可用: {st.session_state.db_counts.get('paper', 0)})",
+                    min_value=0, max_value=1000, value=min(80, max(0, st.session_state.db_counts.get('paper', 0)))
+                )
+            with c_n:
+                news_count = st.number_input(
+                    f"咨询 (可用: {st.session_state.db_counts.get('news', 0)})",
+                    min_value=0, max_value=1000, value=min(50, max(0, st.session_state.db_counts.get('news', 0)))
+                )
+            with c_po:
+                policy_count = st.number_input(
+                    f"政策 (可用: {st.session_state.db_counts.get('policy', 0)})",
+                    min_value=0, max_value=1000, value=min(30, max(0, st.session_state.db_counts.get('policy', 0)))
+                )
+            with c_r:
+                report_count = st.number_input(
+                    f"研报 (可用: {st.session_state.db_counts.get('report', 0)})",
+                    min_value=0, max_value=1000, value=min(30, max(0, st.session_state.db_counts.get('report', 0)))
+                )
+            with c_pat:
+                patent_count = st.number_input(
+                    f"专利 (可用: {st.session_state.db_counts.get('patent', 0)})",
+                    min_value=0, max_value=1000, value=min(50, max(0, st.session_state.db_counts.get('patent', 0)))
+                )
+
+            col_sort, col_topic = st.columns(2)
+            with col_sort:
+                sort_ui = st.selectbox("数据排序策略", ["相关性优先 (Relevance)", "时间优先 (Date)", "平衡轮转 (Balanced)"])
+                sort_map = {
+                    "相关性优先 (Relevance)": "relevance",
+                    "时间优先 (Date)": "date",
+                    "平衡轮转 (Balanced)": "balanced"
+                }
+                sort_mode = sort_map[sort_ui]
+            with col_topic:
+                use_topic_index = st.checkbox("启用话题词库自动扩展", value=True)
+
+            # 拼装真正的 SourceQuery
+            selected_counts = {
+                "paper": int(paper_count),
+                "news": int(news_count),
+                "policy": int(policy_count),
+                "report": int(report_count),
+                "patent": int(patent_count)
+            }
+
+            source_query = SourceQuery(
+                tech_field_id=tech_field_id,
+                tech_field_name=tech_field_name,
+                keywords=keywords_list,
+                synonyms=synonyms_list,
+                exclude_terms=exclude_list,
+                start_date=start_date_str,
+                end_date=end_date_str,
+                source_types=[k for k, v in selected_counts.items() if v > 0],
+                raw_source_types=["literature", "consulting", "policy", "report", "patent"],
+                counts=selected_counts,
+                use_topic_index=use_topic_index,
+                sort=sort_mode
+            )
+
+            custom_source_config = {
+                "backend": "db",
+                "query": source_query
+            }
+        elif analysis_source.startswith("原始数据"):
             sources = get_available_data_sources()
             source_counts, total = render_data_source_selection(sources)
 
@@ -3253,7 +3189,7 @@ def main():
                         format_func=lambda name: f"📁 {name}",
                     )
                     resume_path = str(Config.RESULT_DIR / selected_events_dir / "events.json")
-                    st.caption(f"将从 `{resume_path}` 继续候选成形、评分、验证、时间验证、关键核心评分、信号生成和报告生成。")
+                    st.caption(f"将从 `{resume_path}` 补齐事件质量评分，并继续候选成形、评分、验证、时间验证、信号生成和报告生成。")
                 else:
                     st.warning("result 目录下暂时没有可用的 events.json。")
             else:
@@ -3283,10 +3219,10 @@ def main():
                 st.caption("将复用该目录中的 signals 文件，只重新生成报告和报告证据包。")
             else:
                 st.warning("result 目录下暂时没有可用于重生成报告的 signals 文件。")
-        
+
         st.markdown("## 🚀 开始分析")
         start_disabled = st.session_state.analysis_running or (resume_mode in {"events", "report"} and not resume_path)
-        
+
         col1, col2, col3 = st.columns(3)
         with col1:
             use_cache = st.checkbox("使用缓存", value=True)
@@ -3300,8 +3236,11 @@ def main():
                 use_container_width=True,
                 disabled=start_disabled,
             )
-        
+
         if start_button:
+            s_config = None
+            if analysis_source.startswith("数据库检索"):
+                s_config = custom_source_config
             start_analysis_task(
                 source_counts,
                 use_cache,
@@ -3310,9 +3249,14 @@ def main():
                 sample_size=custom_sample_size,
                 resume_mode=resume_mode,
                 resume_path=resume_path,
+                source_config=s_config,
             )
         render_live_analysis_panel()
-    
+
+        # 在 fragment 外部渲染结果，确保 tabs 内的分页/checkbox 等交互触发完整 rerun
+        if not st.session_state.analysis_running and st.session_state.analysis_results:
+            render_results(st.session_state.analysis_results)
+
     else:
         render_history_page()
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List
@@ -136,13 +135,6 @@ def _save_stats(stats: APIStats):
 _stats = _load_stats()
 
 
-def get_stats() -> APIStats:
-    """获取当前统计对象的快照。"""
-    global _stats
-    _stats = _load_stats()
-    return deepcopy(_stats)
-
-
 def record_call(
     call_type: str,
     prompt_tokens: int,
@@ -154,11 +146,4 @@ def record_call(
     global _stats
     _stats = _load_stats()
     _stats.record(call_type, prompt_tokens, completion_tokens, success, metadata=metadata)
-    _save_stats(_stats)
-
-
-def reset_stats():
-    """清空统计文件。"""
-    global _stats
-    _stats = APIStats()
     _save_stats(_stats)

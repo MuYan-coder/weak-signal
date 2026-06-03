@@ -1,9 +1,247 @@
 from collections import defaultdict
+import re
 
 import pandas as pd
 
 from ..utils.semantic_utils import semantic_similarity
-from ..validation.object_family_canonicalizer import get_canonicalizer, match_family
+from ..validation.object_family_canonicalizer import (
+    CanonicalizationResult,
+    get_canonicalizer,
+)
+
+
+_ANALYSIS_SCOPE_FIELDS = [
+    "analysis_tech_field_name", "tech_field_name", "analysis_domain", "selected_domain",
+]
+
+_OBJECT_FAMILY_SCOPE_HINTS = {
+    "robot", "robotics", "robotic", "机器人", "机械臂", "具身", "embodied",
+    "world model", "世界模型", "ai", "artificial intelligence", "人工智能",
+    "智能体", "agent", "agents", "large model", "大模型", "llm",
+}
+
+_MATERIAL_SCOPE_HINTS = {
+    "材料", "电子材料", "新型电子材料", "material", "materials",
+    "electronic material", "semiconductor", "battery", "电池", "半导体",
+}
+
+_MATERIAL_RELEVANCE_TERMS = {
+    "材料", "电子材料", "半导体", "电池", "薄膜", "钙钛矿", "氧化物",
+    "颗粒", "纳米", "界面", "钝化", "掺杂", "导电", "电化学",
+    "晶体", "晶格", "正极", "负极", "电解质", "电容", "介电", "柔性电子",
+    "material", "materials", "electronic", "semiconductor", "battery",
+    "thin film", "film", "perovskite", "oxide", "nanoparticle",
+    "interface", "passivation", "doping", "conductive", "electrochemical",
+    "crystal", "lattice", "cathode", "anode", "electrolyte", "dielectric",
+}
+
+_OFF_DOMAIN_AI_ROBOT_TOKENS = {
+    "机器人", "机械臂", "具身", "世界模型", "导航", "跑酷", "抓取",
+    "操控", "仿真", "训练技术", "规划技术", "控制技术",
+    "robot", "robotic", "robotics", "humanoid", "embodied", "agent",
+    "world model", "navigation", "parkour", "grasping", "manipulation",
+    "training", "planning", "control", "policy", "simulation",
+}
+
+_EMPTY_TEXT_VALUES = {"", "nan", "nat", "none", "null", "未知"}
+
+
+def _safe_raw_text(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in _EMPTY_TEXT_VALUES else text
+
+
+def _normalize_scope_key(value):
+    return "".join(ch.lower() for ch in _safe_raw_text(value) if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+
+
+def _coerce_text_list(value):
+    if isinstance(value, list):
+        raw_values = value
+    elif isinstance(value, (tuple, set)):
+        raw_values = list(value)
+    elif isinstance(value, str) and value.strip().startswith("[") and value.strip().endswith("]"):
+        raw_values = [part.strip(" '\"\t\r\n") for part in value.strip("[]").split(",")]
+    elif isinstance(value, str) and any(separator in value for separator in [",", "，", "、", ";", "；"]):
+        raw_values = re.split(r"[,，、;；]\s*", value)
+    else:
+        raw_values = [value]
+    values = []
+    for item in raw_values:
+        text = _safe_raw_text(item)
+        if text and text not in values:
+            values.append(text)
+    return values
+
+
+def _analysis_scope_from_record(record):
+    for field in _ANALYSIS_SCOPE_FIELDS:
+        text = _safe_raw_text((record or {}).get(field, ""))
+        if text:
+            return text
+    return ""
+
+
+def _analysis_scope_from_data(data_df):
+    if data_df is None or data_df.empty:
+        return ""
+    counts = defaultdict(int)
+    for _, row in data_df.iterrows():
+        scope = _analysis_scope_from_record(row.to_dict())
+        if scope:
+            counts[scope] += 1
+    if not counts:
+        return ""
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+
+def _concept_scope_values(concept):
+    values = []
+    for field in ["analysis_tech_field_name", "primary_scope", "scope_name"]:
+        text = _safe_raw_text((concept or {}).get(field, ""))
+        if text:
+            values.append(text)
+    values.extend(_coerce_text_list((concept or {}).get("scope_names", [])))
+    return [value for value in values if value]
+
+
+def _scope_matches_analysis(concept, analysis_scope):
+    if not analysis_scope:
+        return True
+    target_key = _normalize_scope_key(analysis_scope)
+    if not target_key:
+        return True
+    scope_values = _concept_scope_values(concept)
+    if not scope_values:
+        return True
+    for value in scope_values:
+        key = _normalize_scope_key(value)
+        if key and (key == target_key or key in target_key or target_key in key):
+            return True
+    return False
+
+
+def _attach_analysis_scope(concept, analysis_scope):
+    if not analysis_scope:
+        return concept
+    concept = dict(concept or {})
+    concept["analysis_tech_field_name"] = analysis_scope
+    if not _safe_raw_text(concept.get("primary_scope")):
+        concept["primary_scope"] = analysis_scope
+    if not _safe_raw_text(concept.get("scope_name")):
+        concept["scope_name"] = analysis_scope
+    if not _coerce_text_list(concept.get("scope_names", [])):
+        concept["scope_names"] = [analysis_scope]
+    return concept
+
+
+def _extract_domain_pack(domain_context):
+    if domain_context is None:
+        return None
+    if hasattr(domain_context, "domain_pack"):
+        return getattr(domain_context, "domain_pack")
+    if hasattr(domain_context, "canonicalization"):
+        return domain_context
+    return None
+
+
+def _domain_allows_object_family(concept, domain_context=None, canonicalizer=None):
+    if canonicalizer is not None and getattr(canonicalizer, "domain_pack", None) is not None:
+        return bool(getattr(canonicalizer, "object_family_enabled", False))
+    pack = _extract_domain_pack(domain_context)
+    if pack is not None:
+        canonicalization = getattr(pack, "canonicalization", {}) or {}
+        return bool(canonicalization.get("object_family_enabled", False))
+    scope_text = " ".join(_concept_scope_values(concept)).lower()
+    if not scope_text:
+        return True
+    return any(hint in scope_text for hint in _OBJECT_FAMILY_SCOPE_HINTS)
+
+
+def _contains_any_term(text, terms):
+    lowered = _safe_raw_text(text).lower()
+    if not lowered:
+        return False
+    return any(str(term).lower() in lowered for term in terms if str(term).strip())
+
+
+def _is_material_analysis_scope(analysis_scope):
+    scope_text = _safe_raw_text(analysis_scope).lower()
+    return any(str(term).lower() in scope_text for term in _MATERIAL_SCOPE_HINTS)
+
+
+def _candidate_surface_text(concept):
+    parts = []
+    for field in [
+        "display_candidate_name", "canonical_candidate_name_en", "raw_phrase",
+        "raw_candidate_text", "normalized_candidate_text", "mechanism_core",
+        "constraint_signature", "topic_summary_name",
+    ]:
+        text = _safe_raw_text((concept or {}).get(field, ""))
+        if text:
+            parts.append(text)
+    for field in [
+        "mechanism_core_tokens", "task_constraint_tokens", "object_modifier_tokens",
+        "data_modifier_tokens", "method_modifier_tokens",
+    ]:
+        parts.extend(_coerce_text_list((concept or {}).get(field, [])))
+    return " ".join(parts)
+
+
+def _analysis_relevance_terms(record, analysis_scope):
+    terms = []
+    for field in ["analysis_keywords", "analysis_synonyms", "keywords", "keyword"]:
+        terms.extend(_coerce_text_list((record or {}).get(field, [])))
+    if _is_material_analysis_scope(analysis_scope):
+        terms.extend(_MATERIAL_RELEVANCE_TERMS)
+    cleaned = []
+    for term in terms:
+        text = _safe_raw_text(term)
+        if text and text not in cleaned and _normalize_scope_key(text) != _normalize_scope_key(analysis_scope):
+            cleaned.append(text)
+    return cleaned
+
+
+def _concept_relevant_to_analysis(concept, record, analysis_scope, domain_context=None, canonicalizer=None):
+    if not analysis_scope or _domain_allows_object_family(concept, domain_context, canonicalizer):
+        return True
+    candidate_text = _candidate_surface_text(concept)
+    evidence_text = " ".join(
+        _safe_raw_text((record or {}).get(field, ""))
+        for field in ["title", "text", "abstract", "summary", "keywords", "keyword"]
+    )
+    relevance_terms = _analysis_relevance_terms(record, analysis_scope)
+    has_candidate_domain_anchor = _contains_any_term(candidate_text, relevance_terms)
+    has_evidence_domain_anchor = _contains_any_term(evidence_text, relevance_terms)
+    has_off_domain_candidate_anchor = _contains_any_term(candidate_text, _OFF_DOMAIN_AI_ROBOT_TOKENS)
+
+    if has_off_domain_candidate_anchor and not has_candidate_domain_anchor:
+        return False
+    if _is_material_analysis_scope(analysis_scope) and not (has_candidate_domain_anchor or has_evidence_domain_anchor):
+        return False
+    return True
+
+
+def _neutral_canonicalization(term):
+    text = _safe_raw_text(term)
+    return CanonicalizationResult(
+        surface_term=text,
+        canonical_term=text,
+        parent_term="",
+        term_type="unknown",
+        family_id="",
+        normalization_type="none",
+        cross_source_pattern="single_source",
+        patent_role="optional",
+        priority="low",
+    )
 
 
 def _canonical_group_token(value):
@@ -32,7 +270,7 @@ def _first_token(values, preferred=None):
     return normalized[0]
 
 
-def _object_family_candidate_key(concept, canonicalizer):
+def _object_family_candidate_key(concept, canonicalizer, object_family_allowed=True):
     """
     对象族感知的聚合键生成。
 
@@ -44,69 +282,21 @@ def _object_family_candidate_key(concept, canonicalizer):
     Returns:
         (cluster_key, family_info)
     """
-    # 尝试匹配对象族
-    raw_phrase = str(concept.get("raw_phrase", "")).strip()
-    display_name = str(concept.get("display_candidate_name", "")).strip()
-    canonical_name_en = str(concept.get("canonical_candidate_name_en", "")).strip()
-    mechanism_core = str(concept.get("mechanism_core", "")).strip().lower()
+    if not object_family_allowed:
+        return _coarse_family_key(concept, canonicalizer, use_canonicalizer=False), None
 
-    # 依次尝试匹配，直到找到匹配
-    family = None
-    for term in [canonical_name_en, raw_phrase, display_name]:
-        if term:
-            family = match_family(term)
-            if family:
-                break
+    family = canonicalizer.match_candidate_family(concept) if canonicalizer is not None else None
 
     if family:
         family_id = family.get('family_id', '')
         canonical_term = family.get('canonical_term', '')
-
-        # 特殊处理：simulation (of_006) 按 mechanism_core 细分
-        # 拆分规则：
-        # - mechanism_core == "simulation" → of_027 (embodied simulation)
-        # - mechanism_core == "training" → of_028 (robot training)
-        # - mechanism_core == "planning" → of_029 (robot planning)
-        if family_id == 'of_006':
-            if mechanism_core == 'simulation':
-                # 具身智能仿真
-                return "family:of_027:embodied simulation", {
-                    'family_id': 'of_027',
-                    'canonical_term': 'embodied simulation',
-                    'term_type': 'method',
-                    'cross_source_pattern': 'news_paper',
-                    'patent_role': 'optional',
-                    'priority': 'high',
-                }
-            elif mechanism_core == 'training':
-                # 机器人训练
-                return "family:of_028:robot training", {
-                    'family_id': 'of_028',
-                    'canonical_term': 'robot training',
-                    'term_type': 'method',
-                    'cross_source_pattern': 'news_paper',
-                    'patent_role': 'optional',
-                    'priority': 'medium',
-                }
-            elif mechanism_core == 'planning':
-                # 机器人规划
-                return "family:of_029:robot planning", {
-                    'family_id': 'of_029',
-                    'canonical_term': 'robot planning',
-                    'term_type': 'task',
-                    'cross_source_pattern': 'news_paper',
-                    'patent_role': 'optional',
-                    'priority': 'medium',
-                }
-            # 其他 mechanism_core 保留原 family
-
         return f"family:{family_id}:{canonical_term}", family
 
     # 退回通用键
     return _coarse_family_key(concept, canonicalizer), None
 
 
-def _coarse_family_key(concept, canonicalizer=None):
+def _coarse_family_key(concept, canonicalizer=None, use_canonicalizer=True):
     """
     候选聚合阶段的粗粒度家族键。
 
@@ -119,7 +309,7 @@ def _coarse_family_key(concept, canonicalizer=None):
        - 避免生成 scope + nan 这类空键
     4. 目标：提升跨源聚合率，减少无效空键
     """
-    if canonicalizer is None:
+    if use_canonicalizer and canonicalizer is None:
         canonicalizer = get_canonicalizer()
 
     primary_scope = str(concept.get("primary_scope", "")).strip()
@@ -155,7 +345,10 @@ def _coarse_family_key(concept, canonicalizer=None):
     canonical_term = ""
     if raw_phrase:
         # 首先尝试从整个短语中提取归一化术语
-        canonical_term, norm_type, _ = canonicalizer.extract_canonical_from_phrase(raw_phrase)
+        canonical_term = ""
+        norm_type = "none"
+        if use_canonicalizer and canonicalizer is not None:
+            canonical_term, norm_type, _ = canonicalizer.extract_canonical_from_phrase(raw_phrase)
         if norm_type != 'none':
             raw_phrase_core = canonical_term.lower()
         else:
@@ -196,7 +389,10 @@ def _coarse_family_key(concept, canonicalizer=None):
         display_name = str(concept.get("display_candidate_name", "")).strip()
         if display_name:
             # 使用 canonicalizer 归一化 display_name
-            canonical_display, norm_type, _ = canonicalizer.canonicalize(display_name)
+            canonical_display = ""
+            norm_type = "none"
+            if use_canonicalizer and canonicalizer is not None:
+                canonical_display, norm_type, _ = canonicalizer.canonicalize(display_name)
             if norm_type != 'none':
                 fallback_parts.append(canonical_display.lower())
             else:
@@ -207,25 +403,6 @@ def _coarse_family_key(concept, canonicalizer=None):
                     fallback_parts.append(filtered_name[0])
 
     return " || ".join(fallback_parts) if len(fallback_parts) > 1 else f"{primary_scope} || ungrouped"
-
-
-def _build_event_summary(event):
-    technologies = event.get("technology", [])
-    if not isinstance(technologies, list):
-        technologies = [technologies]
-    technologies = [str(item).strip() for item in technologies if str(item).strip() and str(item).strip() != "未知"]
-    reasons = event.get("weak_signal_reasons", [])
-    if not isinstance(reasons, list):
-        reasons = [reasons] if reasons else []
-    segments = [
-        str(event.get("subject", "")).strip(),
-        str(event.get("action", "")).strip(),
-        " / ".join(technologies),
-        str(event.get("scene", "")).strip(),
-        str(event.get("time", "")).strip(),
-        "；".join(str(item).strip() for item in reasons if str(item).strip()),
-    ]
-    return " | ".join(part for part in segments if part and part != "未知")
 
 
 def _normalize_scope_names(raw_value):
@@ -258,8 +435,13 @@ SOURCE_TYPE_NORMALIZATION = {
 
 
 def _safe_text(value):
-    if value is None or pd.isna(value):
+    if value is None:
         return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
     text = str(value).strip()
     return "" if text.lower() in {"", "nan", "nat", "none"} else text
 
@@ -324,6 +506,11 @@ _TECH_TERMS = {
     "3d", "three-dimensional", "autonomous", "autonomy",
     "grasping", "grasp", "motion", "dynamics", "kinematics",
     "benchmark", "benchmarks", "dataset", "datasets", "evaluation",
+    "material", "materials", "electronic", "semiconductor", "perovskite",
+    "thin", "film", "oxide", "cathode", "anode", "electrolyte", "doping",
+    "interface", "passivation", "conductive", "stability", "nanoparticle",
+    "材料", "电子材料", "半导体", "钙钛矿", "薄膜", "氧化物", "正极",
+    "负极", "电解质", "掺杂", "界面", "钝化", "导电", "稳定性", "纳米",
 }
 
 
@@ -548,25 +735,13 @@ def _empty_candidate_columns():
         "low_quality_evidence_ratio", "high_quality_evidence_count",
         "quality_risk_flag", "quality_adjusted_rank_score",
         "candidate_evidence_quality_reason",
-        "candidate_id", "tech_chain_node_id", "tech_chain_name",
-        "tech_chain_official_name", "mapping_relation", "mapping_confidence",
-        "mapping_method", "matched_term", "matched_field", "parent_technology",
-        "maturity_level", "technology_status", "bottleneck_level",
-        "strategic_importance_level", "mapping_reason",
-        "tech_chain_mapping_confidence", "tech_chain_mapping_risk",
-        "tech_chain_mapping_coverage_flag",
+        "candidate_id",
         "first_seen_date", "last_seen_date", "temporal_validation_tier",
         "temporal_validation_status", "temporal_validation_passed",
         "temporal_momentum_score", "growth_rate", "source_growth_rate",
         "org_growth_rate", "high_quality_growth_rate", "date_coverage_ratio",
-        "temporal_validation_reason",
-        "key_core_score", "key_core_tier", "weak_signal_component",
-        "growth_validation_component", "tech_chain_bottleneck_component",
-        "strategic_importance_component", "evidence_confidence_component",
-        "asset_support_component", "reverse_validation_component",
-        "quality_gate_passed", "mapping_gate_passed", "temporal_gate_passed",
-        "object_gate_passed", "key_core_gate_passed", "key_core_reason",
-        "key_core_risk", "recommended_action", "top_evidence_ids",
+        "monitoring_priority", "monitoring_action", "next_observation_window_start",
+        "next_observation_window_end", "temporal_validation_reason",
         "weak_signal_event_ratio", "low_attention_ratio", "niche_actor_ratio",
         "non_dominant_ratio", "cross_domain_ratio", "traceable_ratio", "multi_source_validated",
         "multi_source_validation_score", "semantic_validated", "semantic_validation_score",
@@ -574,7 +749,7 @@ def _empty_candidate_columns():
         "event_doc_semantic_pairs", "event_paper_semantic_score", "event_patent_semantic_score",
         "literature_validated", "patent_validated", "time_validation_early_count",
         "time_validation_recent_count", "time_validation_ratio", "time_validated",
-        "weak_signal_focus_candidate", "is_observation_scope", "scope_name", "scope_names",
+        "weak_signal_focus_candidate", "analysis_tech_field_name", "is_observation_scope", "scope_name", "scope_names",
         "is_scope_internal_candidate", "candidate_cluster_id", "display_candidate_aliases",
         "alias_count", "true_alias_count", "cluster_evidence_count", "cluster_item_count",
         "is_scope_echo", "has_mechanism_core", "has_task_constraint", "has_non_scope_constraint",
@@ -601,14 +776,13 @@ def _empty_candidate_columns():
     ]
 
 
-def generate_candidate_outputs(candidate_forms_df, data_df):
+def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None):
     empty_columns = _empty_candidate_columns()
     if candidate_forms_df is None or candidate_forms_df.empty or data_df is None or data_df.empty:
         empty_df = pd.DataFrame(columns=empty_columns)
         return {"candidates_df": empty_df, "near_strong_candidates_df": empty_df.copy()}
 
-    # 获取 canonicalizer 实例
-    canonicalizer = get_canonicalizer()
+    canonicalizer = get_canonicalizer(domain_context=domain_context)
 
     active_forms = candidate_forms_df[
         candidate_forms_df["candidate_stage"].isin(["scope_overview", "formed_candidate", "formed_candidate_strong"])
@@ -618,15 +792,37 @@ def generate_candidate_outputs(candidate_forms_df, data_df):
         return {"candidates_df": empty_df, "near_strong_candidates_df": empty_df.copy()}
 
     metadata_by_id = data_df.drop_duplicates(subset="id", keep="last").set_index("id").to_dict("index")
+    default_analysis_scope = _analysis_scope_from_data(data_df)
     group_maps = defaultdict(list)
     mechanism_collision = defaultdict(set)
     family_maps = {}  # 记录每个 cluster_key 对应的 family_info
 
-    for _, concept in active_forms.iterrows():
+    for _, concept_row in active_forms.iterrows():
+        concept = concept_row.to_dict()
+        source_record = metadata_by_id.get(concept.get("id"), {})
+        record_scope = _analysis_scope_from_record(source_record)
+        analysis_scope = record_scope or default_analysis_scope
+        if analysis_scope and not _scope_matches_analysis(concept, analysis_scope):
+            continue
+        concept = _attach_analysis_scope(concept, analysis_scope)
+        if analysis_scope and not _concept_relevant_to_analysis(
+            concept,
+            source_record,
+            analysis_scope,
+            domain_context=domain_context,
+            canonicalizer=canonicalizer,
+        ):
+            continue
+
         primary_scope = str(concept.get("primary_scope", "")).strip()
         mechanism_core = str(concept.get("mechanism_core", "")).strip()
         constraint_signature = str(concept.get("constraint_signature", "")).strip()
         canonical_name = str(concept.get("canonical_candidate_name_en", "")).strip() or str(concept.get("normalized_candidate_text", "")).strip()
+        object_family_allowed = _domain_allows_object_family(
+            concept,
+            domain_context=domain_context,
+            canonicalizer=canonicalizer,
+        )
 
         # 优先使用 candidate_forms 中已有的 candidate_cluster_id，确保整个流程中键的一致性
         existing_cluster_id = str(concept.get("candidate_cluster_id", "")).strip()
@@ -634,13 +830,17 @@ def generate_candidate_outputs(candidate_forms_df, data_df):
             cluster_key = existing_cluster_id
             # 仍然尝试获取 family_info
             family_info = None
-            family = match_family(canonical_name) if canonical_name else None
+            family = canonicalizer.match_family(canonical_name) if object_family_allowed and canonical_name else None
             if family:
                 family_info = family
                 family_maps[cluster_key] = family_info
         else:
             # 使用对象族感知聚合生成新的 cluster_key
-            cluster_key, family_info = _object_family_candidate_key(concept, canonicalizer)
+            cluster_key, family_info = _object_family_candidate_key(
+                concept,
+                canonicalizer,
+                object_family_allowed=object_family_allowed,
+            )
 
             # 记录 family_info
             if family_info:
@@ -650,7 +850,7 @@ def generate_candidate_outputs(candidate_forms_df, data_df):
         if not cluster_key:
             cluster_key = " || ".join([primary_scope, mechanism_core, constraint_signature, canonical_name]) or str(concept.get("raw_candidate_text", "")).strip()
 
-        group_maps[cluster_key].append(concept.to_dict())
+        group_maps[cluster_key].append(concept)
         if mechanism_core and constraint_signature:
             mechanism_collision[mechanism_core].add(constraint_signature)
 
@@ -727,12 +927,22 @@ def generate_candidate_outputs(candidate_forms_df, data_df):
         display_name = str(first.get("display_candidate_name", "")).strip()
         canonical_name_en = str(first.get("canonical_candidate_name_en", "")).strip()
         raw_phrase = str(first.get("raw_phrase", "")).strip()
+        object_family_allowed = _domain_allows_object_family(
+            first,
+            domain_context=domain_context,
+            canonicalizer=canonicalizer,
+        )
 
         # 使用分层归一化（始终执行，用于获取 canonical_term 等信息）
-        norm_result = canonicalizer.canonicalize_with_layers(canonical_name_en or raw_phrase or display_name)
+        norm_input = canonical_name_en or raw_phrase or display_name
+        norm_result = (
+            canonicalizer.canonicalize_with_layers(norm_input)
+            if object_family_allowed
+            else _neutral_canonicalization(norm_input)
+        )
 
         # 如果没有匹配，尝试从 raw_variant_aliases 中提取
-        if norm_result.normalization_type == 'none' and raw_variant_aliases:
+        if object_family_allowed and norm_result.normalization_type == 'none' and raw_variant_aliases:
             for alias in raw_variant_aliases:
                 alias_result = canonicalizer.canonicalize_with_layers(alias)
                 if alias_result.normalization_type != 'none':
@@ -740,7 +950,7 @@ def generate_candidate_outputs(candidate_forms_df, data_df):
                     break
 
         # 优先从 family_maps 获取拆分后的 family_info（覆盖 norm_result）
-        family_info = family_maps.get(cluster_key)
+        family_info = family_maps.get(cluster_key) if object_family_allowed else None
         if family_info:
             family_matched = True
             family_id = family_info.get('family_id', '')
@@ -821,19 +1031,6 @@ def generate_candidate_outputs(candidate_forms_df, data_df):
             _safe_float(first.get("weak_signal_score", first.get("score", 0.0))),
         )
         candidate_evidence_quality_reason = str(first.get("candidate_evidence_quality_reason", "")).strip()
-        tech_chain_source = sorted(
-            items,
-            key=lambda item: (
-                str(item.get("mapping_relation", "")).strip() == "no_match",
-                -_safe_float(item.get("mapping_confidence"), 0.0),
-            ),
-        )[0]
-        mapping_confidence = _safe_float(tech_chain_source.get("mapping_confidence"), 0.0)
-        tech_chain_mapping_confidence = _safe_float(
-            tech_chain_source.get("tech_chain_mapping_confidence"),
-            mapping_confidence,
-        )
-
         candidates.append(
             {
                 "tech_name": str(first.get("display_candidate_name", "")).strip() or str(first.get("canonical_candidate_name_en", "")).strip() or str(first.get("raw_candidate_text", "")).strip(),
@@ -874,24 +1071,7 @@ def generate_candidate_outputs(candidate_forms_df, data_df):
                 "quality_risk_flag": quality_risk_flag,
                 "quality_adjusted_rank_score": quality_adjusted_rank_score,
                 "candidate_evidence_quality_reason": candidate_evidence_quality_reason,
-                "candidate_id": str(tech_chain_source.get("candidate_id", first.get("candidate_id", ""))).strip(),
-                "tech_chain_node_id": str(tech_chain_source.get("tech_chain_node_id", "")).strip(),
-                "tech_chain_name": str(tech_chain_source.get("tech_chain_name", "")).strip(),
-                "tech_chain_official_name": str(tech_chain_source.get("tech_chain_official_name", "")).strip(),
-                "mapping_relation": str(tech_chain_source.get("mapping_relation", "")).strip(),
-                "mapping_confidence": mapping_confidence,
-                "mapping_method": str(tech_chain_source.get("mapping_method", "")).strip(),
-                "matched_term": str(tech_chain_source.get("matched_term", "")).strip(),
-                "matched_field": str(tech_chain_source.get("matched_field", "")).strip(),
-                "parent_technology": str(tech_chain_source.get("parent_technology", "")).strip(),
-                "maturity_level": str(tech_chain_source.get("maturity_level", "")).strip(),
-                "technology_status": str(tech_chain_source.get("technology_status", "")).strip(),
-                "bottleneck_level": str(tech_chain_source.get("bottleneck_level", "")).strip(),
-                "strategic_importance_level": str(tech_chain_source.get("strategic_importance_level", "")).strip(),
-                "mapping_reason": str(tech_chain_source.get("mapping_reason", "")).strip(),
-                "tech_chain_mapping_confidence": tech_chain_mapping_confidence,
-                "tech_chain_mapping_risk": str(tech_chain_source.get("tech_chain_mapping_risk", "")).strip(),
-                "tech_chain_mapping_coverage_flag": str(tech_chain_source.get("tech_chain_mapping_coverage_flag", "")).strip(),
+                "candidate_id": str(first.get("candidate_id", "")).strip(),
                 "first_seen_date": str(first.get("first_seen_date", "")).strip(),
                 "last_seen_date": str(first.get("last_seen_date", "")).strip(),
                 "temporal_validation_tier": str(first.get("temporal_validation_tier", "")).strip(),
@@ -903,25 +1083,11 @@ def generate_candidate_outputs(candidate_forms_df, data_df):
                 "org_growth_rate": _safe_float(first.get("org_growth_rate"), 0.0),
                 "high_quality_growth_rate": _safe_float(first.get("high_quality_growth_rate"), 0.0),
                 "date_coverage_ratio": _safe_float(first.get("date_coverage_ratio"), 0.0),
+                "monitoring_priority": str(first.get("monitoring_priority", "")).strip(),
+                "monitoring_action": str(first.get("monitoring_action", "")).strip(),
+                "next_observation_window_start": str(first.get("next_observation_window_start", "")).strip(),
+                "next_observation_window_end": str(first.get("next_observation_window_end", "")).strip(),
                 "temporal_validation_reason": str(first.get("temporal_validation_reason", "")).strip(),
-                "key_core_score": _safe_float(first.get("key_core_score"), 0.0),
-                "key_core_tier": str(first.get("key_core_tier", "")).strip(),
-                "weak_signal_component": _safe_float(first.get("weak_signal_component"), 0.0),
-                "growth_validation_component": _safe_float(first.get("growth_validation_component"), 0.0),
-                "tech_chain_bottleneck_component": _safe_float(first.get("tech_chain_bottleneck_component"), 0.0),
-                "strategic_importance_component": _safe_float(first.get("strategic_importance_component"), 0.0),
-                "evidence_confidence_component": _safe_float(first.get("evidence_confidence_component"), 0.0),
-                "asset_support_component": _safe_float(first.get("asset_support_component"), 0.0),
-                "reverse_validation_component": _safe_float(first.get("reverse_validation_component"), 0.0),
-                "quality_gate_passed": _safe_bool(first.get("quality_gate_passed", False)),
-                "mapping_gate_passed": _safe_bool(first.get("mapping_gate_passed", False)),
-                "temporal_gate_passed": _safe_bool(first.get("temporal_gate_passed", False)),
-                "object_gate_passed": _safe_bool(first.get("object_gate_passed", False)),
-                "key_core_gate_passed": _safe_bool(first.get("key_core_gate_passed", False)),
-                "key_core_reason": str(first.get("key_core_reason", "")).strip(),
-                "key_core_risk": str(first.get("key_core_risk", "")).strip(),
-                "recommended_action": str(first.get("recommended_action", "")).strip(),
-                "top_evidence_ids": str(first.get("top_evidence_ids", "")).strip(),
                 "weak_signal_event_ratio": round(len(mention_ids) / max(total_mentions, 1), 2),
                 "low_attention_ratio": round(sum(1 for record in mention_records if record.get("source_type") in {"paper", "patent"}) / max(total_mentions, 1), 2),
                 "niche_actor_ratio": round(sum(1 for org in orgs if org not in {"Unknown", "arXiv"}) / max(len(orgs), 1), 2),
@@ -945,6 +1111,7 @@ def generate_candidate_outputs(candidate_forms_df, data_df):
                 "time_validation_ratio": validation_ratio,
                 "time_validated": time_validated,
                 "weak_signal_focus_candidate": weak_signal_focus_candidate,
+                "analysis_tech_field_name": str(first.get("analysis_tech_field_name", "")).strip() or str(first.get("primary_scope", "")).strip(),
                 "is_observation_scope": bool(first.get("is_observation_scope", False)),
                 "scope_name": str(first.get("scope_name", "")).strip(),
                 "scope_names": _normalize_scope_names(first.get("scope_names", [])),
@@ -1044,5 +1211,5 @@ def generate_candidate_outputs(candidate_forms_df, data_df):
     }
 
 
-def generate_candidates(candidate_forms_df, data_df):
-    return generate_candidate_outputs(candidate_forms_df, data_df)["candidates_df"]
+def generate_candidates(candidate_forms_df, data_df, domain_context=None):
+    return generate_candidate_outputs(candidate_forms_df, data_df, domain_context=domain_context)["candidates_df"]

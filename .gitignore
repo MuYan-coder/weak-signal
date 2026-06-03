@@ -60,6 +60,14 @@ BUG_FIX_LOG.md
 *说明.md
 *方案.md
 
+# Local project maintenance docs
+PROJECT_OVERVIEW.md
+ARCHITECTURE.md
+TASKS.md
+CHANGELOG.md
+DECISIONS.md
+KNOWN_ISSUES.md
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
@@ -74,6 +82,7 @@ htmlcov/
 
 # Model cache
 models/
+src/.cache/
 *.pkl
 *.pth
 *.h5

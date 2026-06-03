@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import timedelta
 import json
-from pathlib import Path
 import re
 
 import pandas as pd
@@ -106,6 +105,145 @@ def _joined_evidence_text(row):
     parts.extend(_safe_list(row.get("evidence_titles", [])))
     parts.append(_safe_text(row.get("raw_phrase_example", "")))
     return " ".join(part for part in parts if part).lower()
+
+
+def _extract_domain_pack(domain_context):
+    if domain_context is None:
+        return None
+    if hasattr(domain_context, "domain_pack"):
+        return getattr(domain_context, "domain_pack")
+    if hasattr(domain_context, "weak_signal_rules"):
+        return domain_context
+    return None
+
+
+def _domain_pack_surface_text(row):
+    parts = [
+        _safe_text(row.get("display_candidate_name", "")),
+        _safe_text(row.get("tech_name", "")),
+        _safe_text(row.get("topic_summary_name", "")),
+        _safe_text(row.get("mechanism_core", "")),
+        _safe_text(row.get("constraint_signature", "")),
+        _safe_text(row.get("raw_phrase_example", "")),
+        _joined_evidence_text(row),
+    ]
+    for key in [
+        "mechanism_core_tokens",
+        "task_constraint_tokens",
+        "object_modifier_tokens",
+        "data_modifier_tokens",
+        "method_modifier_tokens",
+        "source_types",
+    ]:
+        parts.extend(str(item) for item in _safe_list(row.get(key, [])))
+    return " ".join(part for part in parts if part).lower()
+
+
+def _term_hits(text, terms):
+    hits = []
+    for term in _safe_list(terms):
+        token = _safe_text(term).lower()
+        if token and token in text and token not in hits:
+            hits.append(token)
+    return hits
+
+
+def _required_evidence_fields_present(row, required_fields):
+    for field in _safe_list(required_fields):
+        field_name = _safe_text(field)
+        if not field_name:
+            continue
+        if field_name in {"evidence_items", "evidence"}:
+            if _safe_evidence_items(row.get("evidence_items", [])):
+                continue
+            return False
+        if field_name == "evidence_span":
+            if _joined_evidence_text(row) or _safe_text(row.get("raw_phrase_example", "")):
+                continue
+            return False
+        value = row.get(field_name, "")
+        if isinstance(value, list) and value:
+            continue
+        if _safe_text(value):
+            continue
+        return False
+    return True
+
+
+_DOMAIN_MARKER_DELTAS = {
+    "early_stage_markers": 0.25,
+    "low_attention_markers": 0.15,
+    "niche_actor_markers": 0.15,
+    "cross_domain_markers": 0.2,
+    "engineering_trace_markers": 0.25,
+    "commercialization_noise_markers": -0.35,
+    "policy_or_market_noise_markers": -0.3,
+}
+
+
+def _domain_pack_scoring_profile(row, domain_context=None):
+    pack = _extract_domain_pack(domain_context)
+    rules = getattr(pack, "weak_signal_rules", {}) if pack is not None else {}
+    if not isinstance(rules, dict):
+        rules = {}
+    if not rules:
+        return {
+            "delta": 0.0,
+            "rule_ids": "",
+            "reason": "",
+            "marker_hits": {},
+        }
+
+    text = _domain_pack_surface_text(row)
+    delta = 0.0
+    marker_hits = {}
+    reasons = []
+    for marker_key, marker_delta in _DOMAIN_MARKER_DELTAS.items():
+        hits = _term_hits(text, rules.get(marker_key, []))
+        if not hits:
+            continue
+        marker_hits[marker_key] = hits
+        delta += marker_delta
+
+    rule_ids = []
+    for rule in rules.get("scoring_adjustments", []) or []:
+        if not isinstance(rule, dict):
+            continue
+        applies_to = _safe_text(rule.get("applies_to", "candidate")).lower()
+        if applies_to and applies_to not in {"candidate", "weak_signal", "all"}:
+            continue
+        match_terms = _safe_list(rule.get("match_terms", []))
+        if match_terms and not _term_hits(text, match_terms):
+            continue
+        if not _required_evidence_fields_present(row, rule.get("required_evidence_fields", [])):
+            continue
+        score_delta = _safe_float(rule.get("score_delta", 0.0), 0.0)
+        max_delta = abs(_safe_float(rule.get("max_delta", score_delta), score_delta))
+        if max_delta > 0:
+            score_delta = max(-max_delta, min(max_delta, score_delta))
+        delta += score_delta
+        rule_id = _safe_text(rule.get("rule_id", ""))
+        if rule_id:
+            rule_ids.append(rule_id)
+        reason = _safe_text(rule.get("reason_template", ""))
+        if reason:
+            reasons.append(reason)
+
+    if marker_hits:
+        marker_summary = "；".join(
+            f"{key}={','.join(values[:3])}"
+            for key, values in marker_hits.items()
+            if values
+        )
+        if marker_summary:
+            reasons.insert(0, f"领域弱信号标记命中：{marker_summary}")
+
+    return {
+        "delta": round(delta, 2),
+        "rule_ids": ",".join(rule_ids),
+        "reason": "；".join(reasons),
+        "marker_hits": marker_hits,
+    }
 
 
 def _parse_datetime(raw_value):
@@ -914,6 +1052,7 @@ def _weak_signal_score(row):
         + row["growth_score"]
         + row["novelty_score"]
         + row["validation_bonus"]
+        + _safe_float(row.get("domain_pack_scoring_delta", 0.0), 0.0)
         - row["mainstream_penalty"],
         2,
     )
@@ -1058,44 +1197,7 @@ def _resolved_display_tier(row):
     return "manual_review"
 
 
-def _load_demo_rules(config_path=None):
-    default_rules = {
-        "whitelist_mechanism_cores": ["memory", "planning", "control", "simulation", "retrieval", "compression", "alignment"],
-        "whitelist_constraints": ["robot", "manipulation", "navigation", "video", "multimodal", "causal", "dynamic", "retrieval-based", "embodied", "agent"],
-        "blacklist_generic_names": ["planning", "training", "memory", "control", "simulation"],
-        "display_name_overrides": {},
-    }
-    if not config_path:
-        return default_rules
-    path = Path(config_path)
-    if not path.exists():
-        return default_rules
-    raw = path.read_text(encoding="utf-8").strip()
-    if not raw:
-        return default_rules
-    try:
-        loaded = json.loads(raw)
-    except Exception:
-        try:
-            import yaml  # type: ignore
-        except Exception:
-            return default_rules
-        loaded = yaml.safe_load(raw) or {}
-    if isinstance(loaded, dict):
-        default_rules.update(loaded)
-    return default_rules
-
-
-def _apply_demo_display_override(display_name, canonical_name, aliases, overrides):
-    candidates = [str(display_name or "").strip(), str(canonical_name or "").strip()]
-    candidates.extend(str(item).strip() for item in _safe_list(aliases))
-    for key in candidates:
-        if key and key in overrides:
-            return overrides[key]
-    return str(display_name or "").strip()
-
-
-def _prepare_scored_candidates(candidates_df):
+def _prepare_scored_candidates(candidates_df, domain_context=None):
     if candidates_df.empty:
         return candidates_df.copy()
     scored_df = candidates_df.copy()
@@ -1184,9 +1286,6 @@ def _prepare_scored_candidates(candidates_df):
         "suggested_label": "",
         "human_judgment": "",
         "review_notes": "",
-        "baseline_rank": "",
-        "appears_in_frequency_baseline": False,
-        "comparison_note": "",
         "stage_hypothesis": "",
         "stage_hypothesis_reason": "",
         "is_natural_small_topic": False,
@@ -1194,6 +1293,10 @@ def _prepare_scored_candidates(candidates_df):
         "weak_signal_readiness": "",
         "weak_signal_readiness_reason": "",
         "foresight_significance": "",
+        "domain_pack_scoring_delta": 0.0,
+        "domain_pack_scoring_rule_ids": "",
+        "domain_pack_scoring_reason": "",
+        "domain_pack_marker_hits": {},
         "object_hierarchy_tier": "",
         "object_hierarchy_reason": "",
         "failure_case_type": "",
@@ -1316,6 +1419,23 @@ def _prepare_scored_candidates(candidates_df):
         axis=1,
     )
     scored_df["validation_bonus"] = scored_df.apply(_calculate_validation_bonus, axis=1)
+    domain_scoring_profiles = scored_df.apply(
+        lambda row: _domain_pack_scoring_profile(row, domain_context=domain_context),
+        axis=1,
+    )
+    scored_df["domain_pack_scoring_delta"] = [
+        _safe_float(item.get("delta", 0.0), 0.0) for item in domain_scoring_profiles
+    ]
+    scored_df["domain_pack_scoring_rule_ids"] = [
+        _safe_text(item.get("rule_ids", "")) for item in domain_scoring_profiles
+    ]
+    scored_df["domain_pack_scoring_reason"] = [
+        _safe_text(item.get("reason", "")) for item in domain_scoring_profiles
+    ]
+    scored_df["domain_pack_marker_hits"] = [
+        item.get("marker_hits", {}) if isinstance(item.get("marker_hits", {}), dict) else {}
+        for item in domain_scoring_profiles
+    ]
     scored_df["weak_signal_score"] = scored_df.apply(_weak_signal_score, axis=1)
     scored_df["hotspot_score"] = scored_df.apply(_hotspot_score, axis=1)
     scored_df["quality_adjusted_rank_score"] = scored_df.apply(_quality_adjusted_rank_score, axis=1)
@@ -1485,101 +1605,6 @@ def _research_signal_type(row):
     return "other"
 
 
-def score_demo_signals(candidates_df, demo_config=None):
-    rules = _load_demo_rules(demo_config)
-    scored_df = _prepare_scored_candidates(candidates_df)
-    if scored_df.empty:
-        return scored_df
-    blacklist = {item.lower() for item in rules.get("blacklist_generic_names", [])}
-    whitelist_cores = set(rules.get("whitelist_mechanism_cores", []))
-    whitelist_constraints = set(rules.get("whitelist_constraints", []))
-    overrides = {str(k).strip(): str(v).strip() for k, v in rules.get("display_name_overrides", {}).items()}
-    scores = []
-    for _, row in scored_df.iterrows():
-        display_name = str(row.get("display_candidate_name", row.get("tech_name", ""))).strip()
-        canonical_name = str(row.get("canonical_candidate_name_en", "")).strip()
-        aliases = _safe_list(row.get("display_candidate_aliases", []))
-        mechanism_core = str(row.get("mechanism_core", "")).strip()
-        constraint_tokens = set(
-            _safe_list(row.get("task_constraint_tokens", []))
-            + _safe_list(row.get("object_modifier_tokens", []))
-            + _safe_list(row.get("data_modifier_tokens", []))
-            + _safe_list(row.get("method_modifier_tokens", []))
-        )
-        display_name = _apply_demo_display_override(display_name, canonical_name, aliases, overrides)
-        object_score = 1 if mechanism_core else 0
-        object_score += 2 if bool(row.get("has_non_scope_constraint", False)) else 0
-        object_score += 2 if display_name and display_name.lower() not in blacklist and display_name.lower() != mechanism_core else 0
-        early_score = int(row.get("total_mentions", 0) <= 6) + int(bool(row.get("time_validated", False))) + int(row.get("mainstream_penalty", 0) <= 1.5)
-        multi_source_score = 0 if row["source_count"] <= 1 else 1 if row["source_count"] == 2 else 2
-        explainable_score = 2 if display_name and any(token in whitelist_constraints for token in constraint_tokens) else 0
-        penalty = 0
-        if bool(row.get("is_scope_echo", False)):
-            penalty -= 999
-        if display_name.lower() in blacklist or bool(row.get("generic_core_only", False)):
-            penalty -= 3
-        if any(token in display_name.lower() for token in ["policy", "benchmark", "evaluation"]):
-            penalty -= 4
-        if len(canonical_name.split()) >= 6:
-            penalty -= 2
-        if int(row.get("source_count", 0)) <= 1:
-            penalty -= 1
-        if int(row.get("cluster_evidence_count", 0)) <= 1:
-            penalty -= 1
-        whitelist_bonus = 1 if mechanism_core in whitelist_cores else 0
-        demo_score = object_score + early_score + multi_source_score + explainable_score + whitelist_bonus + penalty
-        scores.append((display_name, demo_score))
-    scored_df["display_candidate_name"] = [
-        _apply_demo_display_override(
-            name,
-            canonical,
-            aliases,
-            overrides,
-        )
-        for name, canonical, aliases in zip(
-            scored_df["display_candidate_name"].tolist(),
-            scored_df.get("canonical_candidate_name_en", pd.Series([""] * len(scored_df))).tolist(),
-            scored_df.get("display_candidate_aliases", pd.Series([[] for _ in range(len(scored_df))])).tolist(),
-        )
-    ]
-    scored_df["demo_score"] = [score for _, score in scores]
-    scored_df["signal_type"] = scored_df.apply(
-        lambda row: "scope_overview"
-        if bool(row.get("is_observation_scope", False))
-        else "demo_signal"
-        if row["demo_score"] >= 4 and not bool(row.get("is_scope_echo", False)) and not bool(row.get("generic_core_only", False))
-        else "other",
-        axis=1,
-    )
-    scored_df["display_tier"] = "demo"
-    scored_df["score"] = scored_df["demo_score"]
-    scored_df["explanation"] = scored_df.apply(build_signal_explanation, axis=1)
-    ranked = scored_df[scored_df["signal_type"] == "demo_signal"].sort_values(
-        by=["demo_score", "cluster_evidence_count", "source_count", "total_mentions"],
-        ascending=[False, False, False, False],
-    ).reset_index(drop=True)
-    if "display_candidate_name" in ranked.columns:
-        ranked = ranked.drop_duplicates(subset=["display_candidate_name"], keep="first").reset_index(drop=True)
-    diversified_rows = []
-    mechanism_limits = {}
-    for _, row in ranked.iterrows():
-        mechanism_core = str(row.get("mechanism_core", "")).strip().lower()
-        if mechanism_core:
-            current = mechanism_limits.get(mechanism_core, 0)
-            if current >= 2:
-                continue
-            mechanism_limits[mechanism_core] = current + 1
-        diversified_rows.append(row.to_dict())
-        if len(diversified_rows) >= 5:
-            break
-    ranked = pd.DataFrame(diversified_rows, columns=ranked.columns) if diversified_rows else ranked.head(0).copy()
-    ranked = ranked[ranked["demo_score"] >= 2].reset_index(drop=True)
-    if len(ranked) > 5:
-        ranked = ranked.head(5).copy()
-    ranked["rank"] = range(1, len(ranked) + 1)
-    return ranked
-
-
 def build_manual_review_table(hotspot_df, weak_signal_df, top_k=10):
     review_columns = [
         "review_rank", "signal_bucket", "display_candidate_name", "scope_name",
@@ -1715,55 +1740,8 @@ def build_manual_review_table(hotspot_df, weak_signal_df, top_k=10):
     return merged[review_columns]
 
 
-def build_llm_small_topic_comparison_table(scored_df, top_k=15):
-    columns = [
-        "comparison_rank",
-        "signal_type",
-        "scope_name",
-        "raw_phrase_example",
-        "rule_display_candidate_name",
-        "llm_refined_topic_name",
-        "final_research_object_name",
-        "llm_small_topic_judgment",
-        "llm_small_topic_type",
-        "llm_small_topic_pattern",
-        "llm_small_topic_reason",
-        "human_judgment",
-        "review_notes",
-    ]
-    if scored_df is None or scored_df.empty:
-        return pd.DataFrame(columns=columns)
-    subset = scored_df[scored_df["is_scope_internal_candidate"] == True].copy()
-    if subset.empty:
-        return pd.DataFrame(columns=columns)
-    subset = subset.sort_values(
-        by=["weak_signal_score", "hotspot_score", "source_count", "cluster_evidence_count", "total_mentions"],
-        ascending=[False, False, False, False, False],
-    ).drop_duplicates(subset=["display_candidate_name"], keep="first").head(top_k).copy()
-    subset["raw_phrase_example"] = subset["evidence_items"].apply(
-        lambda items: _safe_evidence_items(items)[0].get("raw_candidate_text", "") if _safe_evidence_items(items) else ""
-    )
-    subset["rule_display_candidate_name"] = subset.apply(
-        lambda row: str(row.get("rule_display_candidate_name", "")).strip() or str(row.get("display_candidate_name", "")).strip(),
-        axis=1,
-    )
-    subset["llm_refined_topic_name"] = subset.apply(
-        lambda row: str(row.get("llm_refined_topic_name", "")).strip() or str(row.get("display_candidate_name", "")).strip(),
-        axis=1,
-    )
-    subset["final_research_object_name"] = subset.apply(
-        lambda row: str(row.get("topic_summary_name", "")).strip() or str(row.get("display_candidate_name", "")).strip(),
-        axis=1,
-    )
-    subset["human_judgment"] = ""
-    subset["review_notes"] = ""
-    subset["comparison_rank"] = range(1, len(subset) + 1)
-    subset["signal_type"] = subset["signal_type"].fillna("")
-    return subset[columns]
-
-
-def score_signals(candidates_df, data_df=None):
-    scored_df = _prepare_scored_candidates(candidates_df)
+def score_signals(candidates_df, data_df=None, domain_context=None):
+    scored_df = _prepare_scored_candidates(candidates_df, domain_context=domain_context)
     if scored_df.empty:
         empty = scored_df.copy()
         return empty, empty, empty
@@ -1825,8 +1803,8 @@ def refresh_research_layers(scored_df):
     return refreshed
 
 
-def score_all_candidates(candidates_df):
-    scored_df = _prepare_scored_candidates(candidates_df)
+def score_all_candidates(candidates_df, domain_context=None):
+    scored_df = _prepare_scored_candidates(candidates_df, domain_context=domain_context)
     if scored_df.empty:
         return scored_df
     scored_df = refresh_research_layers(scored_df)
@@ -1892,6 +1870,12 @@ def build_signal_explanation(row):
     stage_reason = _safe_text(row.get("stage_hypothesis_reason", ""))
     if stage_reason:
         base += f"，阶段说明={stage_reason}"
+    domain_reason = _safe_text(row.get("domain_pack_scoring_reason", ""))
+    domain_delta = _safe_float(row.get("domain_pack_scoring_delta", 0.0), 0.0)
+    domain_rule_ids = _safe_text(row.get("domain_pack_scoring_rule_ids", ""))
+    if domain_reason or domain_delta:
+        rule_part = f"，规则={domain_rule_ids}" if domain_rule_ids else ""
+        base += f"，领域规则贡献={domain_delta:.1f}{rule_part}，领域规则说明={domain_reason}"
     comparison_note = _safe_text(row.get("comparison_note", ""))
     if comparison_note:
         base += f"，基线对照={comparison_note}"
@@ -1901,24 +1885,3 @@ def build_signal_explanation(row):
     if scope_name:
         return f"观察范围={scope_name}。{base}"
     return base
-
-
-def format_signal_output(signal_df, title, score_column="weak_signal_score"):
-    if signal_df.empty:
-        return f"\n{title}：\n暂无符合条件的信号"
-    output = [f"\n{title}："]
-    for _, row in signal_df.head(10).iterrows():
-        # 优先使用统一的最终研究对象名称
-        label = str(row.get("final_research_object_name", "")).strip()
-        if not label or label in {"", "nan", "None"}:
-            label = str(row.get("display_candidate_name", row.get("tech_name", "未知"))).strip() or "未知"
-        scope_segment = f"，观察范围={row.get('scope_name', '')}" if str(row.get("scope_name", "")).strip() else ""
-        output.append(
-            f"{int(row.get('rank', 0) or 0)}. {label}：得分{row.get(score_column, row.get('score', 0)):.1f}，"
-            f"跨源{row.get('source_count', 0)}，机构{row.get('org_count', 0)}，提及{row.get('total_mentions', 0)}{scope_segment}"
-        )
-        aliases = row.get("display_candidate_aliases", [])
-        if isinstance(aliases, list) and aliases:
-            output.append(f"   别名：{'; '.join(aliases[:5])}")
-        output.append(f"   解释：{row.get('explanation', '')}")
-    return "\n".join(output)

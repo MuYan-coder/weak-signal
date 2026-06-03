@@ -13,7 +13,7 @@ from ..utils.llm_client import chat_text, get_provider_and_client
 
 
 ensure_env_loaded()
-PROMPT_VERSION = "small_topic_v8_multisource_grouping_and_naturalization"
+PROMPT_VERSION = "small_topic_v9_domain_neutral_scope"
 GENERIC_OBJECT_TOKENS = {"robot", "agent", "embodied", "control"}
 SPECIFIC_TASK_TOKENS = {"driving", "navigation", "manipulation", "grasping", "safety", "decision", "planning"}
 SPECIFIC_DATA_TOKENS = {"video", "3d", "visual", "sensor", "multimodal", "temporal", "trajectory", "memory"}
@@ -78,6 +78,49 @@ def _safe_list(value):
     return value if isinstance(value, list) else []
 
 
+def _extract_domain_pack(domain_context):
+    if domain_context is None:
+        return None
+    if hasattr(domain_context, "domain_pack"):
+        return getattr(domain_context, "domain_pack")
+    if hasattr(domain_context, "candidate_formation"):
+        return domain_context
+    return None
+
+
+def _domain_context_prompt_block(domain_context):
+    pack = _extract_domain_pack(domain_context)
+    if pack is None:
+        return (
+            "本轮未传入 Domain Pack。请仅依据候选证据和 observation scope 收口，"
+            "不要套用任何具体领域的默认对象族。"
+        )
+    candidate_formation = getattr(pack, "candidate_formation", {}) or {}
+    identity = getattr(pack, "domain_identity", {}) or {}
+    observation_scopes = getattr(pack, "observation_scopes", {}) or {}
+    payload = {
+        "domain_pack_id": getattr(pack, "pack_id", ""),
+        "domain_name": identity.get("field_name") or getattr(pack, "pack_name", ""),
+        "main_scope": observation_scopes.get("main_scope", ""),
+        "object_types": _safe_list(candidate_formation.get("technical_object_types", []))[:12],
+        "mechanism_types": _safe_list(candidate_formation.get("mechanism_types", []))[:12],
+        "task_or_performance_types": _safe_list(candidate_formation.get("task_or_performance_types", []))[:12],
+        "data_or_method_types": _safe_list(candidate_formation.get("data_or_method_types", []))[:10],
+        "scene_or_application_types": _safe_list(candidate_formation.get("scene_or_application_types", []))[:10],
+        "generic_terms": _safe_list(candidate_formation.get("generic_terms", []))[:10],
+        "shell_terms": _safe_list(candidate_formation.get("shell_terms", []))[:10],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _allow_humanoid_surface_rules(domain_context):
+    pack = _extract_domain_pack(domain_context)
+    if pack is None:
+        return True
+    pack_id = str(getattr(pack, "pack_id", "")).strip()
+    return pack_id == "humanoid_robot"
+
+
 def _candidate_key(row):
     cluster_id = str(row.get("candidate_cluster_id", "")).strip()
     if cluster_id:
@@ -100,7 +143,7 @@ def _evidence_preview(row, limit=3):
     return previews
 
 
-def _build_prompt(batch_rows):
+def _build_prompt(batch_rows, domain_context=None):
     payload = []
     for row in batch_rows:
         payload.append(
@@ -125,8 +168,11 @@ def _build_prompt(batch_rows):
     return f"""
 你在帮助做“弱信号小主题收口”。
 
+本轮 Domain Pack 上下文：
+{_domain_context_prompt_block(domain_context)}
+
 背景要求：
-1. observation scope 是母主题，例如 world model、embodied intelligence。
+1. observation scope 是本轮用户确定的技术领域或母主题，优先以上面的 Domain Pack 字段和候选证据为准。
 2. 真正希望得到的对象，不是“母主题 + 机制核”的系统压缩标签，而是母主题内部更小、更具体、更自然的子技术主题表达。
 3. 参考弱信号经典表达方式，例如：
    - army's solar tents
@@ -161,34 +207,33 @@ def _build_prompt(batch_rows):
 
 命名要求：
 1. 优先表达“小方向 / 小应用 / 小问题 / 小能力”
-2. 尽量避免只输出“世界模型训练 / 具身智能规划”这类过泛表达
-3. 若需要保留 scope，可放在中间作为限定，例如：
-   - 机器人世界模型训练
-   - 视频世界模型训练
-   - 驾驶世界模型仿真
+2. 尽量避免只输出“领域名 + 动作/机制核”这类过泛表达，例如“新型电子材料研发 / 世界模型训练 / 工业软件应用”
+3. 若需要保留 scope，可放在中间或前置作为限定，但必须继续带出更具体对象、材料、工艺、场景、数据或问题，例如：
+   - 钙钛矿界面钝化材料
+   - 碳化硅衬底缺陷控制
+   - 低温银浆互连工艺
 4. method（如 reinforcement）一般不要直接放进主名，除非它真的构成小主题核心
 5. 输出中文，尽量自然，不要像系统标签串
 6. 不要凭空发明证据里没有出现的强修饰词，例如“实时 / 平台 / 构建 / 生成 / 闭环 / 长期”等；只有当原始短语或证据标题明确支持时才能使用
 7. 如果当前对象只有“对象 + 机制核”，但没有更具体的问题、应用、数据、场景或能力限定，优先判为 `upper_topic` 或 `compressed_label`，不要轻易判成 `small_topic`
 8. `small_topic` 更接近类似：
-   - 基于视频的机器人训练
+   - 钙钛矿界面钝化
+   - 碳化硅衬底缺陷控制
+   - 柔性传感器封装可靠性
    - 自动驾驶极端场景仿真
-   - 三维导航中的空间记忆
-   - 基于轨迹的机器人控制
-   - 基于视觉的机器人控制
    而不是：
-   - 机器人训练平台
-   - 世界模型驱动控制
-   - 具身智能规划
+   - 新型电子材料研发
+   - 智能传感器应用
+   - 工业软件系统
 9. 请注意多源性质：如果多个来源都提到该对象，但大多数来源只停留在上层主题表达，只有单条证据出现了更细的说法，优先判为 `upper_topic` 或 `compressed_label`，不要仅因“有一条更具体证据”就判成 `small_topic`
 10. `small_topic` 应优先保留给这种情况：
    - 原始文本里已经出现较自然的小方向/小应用/小问题表达
    - 或多源证据能较一致地指向同一个具体场景/数据/问题
 11. 像下面这类通常仍应留在 `upper_topic / compressed_label`：
-   - 机器人训练
-   - 智能体世界模型训练
-   - 世界模型驱动控制
-   - 具身智能任务规划
+   - 材料研发
+   - 芯片应用
+   - 系统优化
+   - 领域名 + 泛动作
 
 请只输出 JSON 数组，不要加额外解释。格式：
 [
@@ -366,7 +411,7 @@ def _evidence_corpus(row):
     return " ".join(piece for piece in pieces if piece)
 
 
-def _surface_name_from_evidence(row, judgment, pattern, refined_name):
+def _surface_name_from_evidence(row, judgment, pattern, refined_name, domain_context=None):
     scope_name = str(row.get("scope_name", "")).strip().lower()
     mechanism = str(row.get("mechanism_core", "")).strip().lower()
     evidence_text = _evidence_corpus(row)
@@ -374,6 +419,9 @@ def _surface_name_from_evidence(row, judgment, pattern, refined_name):
     task_tokens = {str(token).strip().lower() for token in _safe_list(row.get("task_constraint_tokens", []))}
     object_tokens = {str(token).strip().lower() for token in _safe_list(row.get("object_modifier_tokens", []))}
     data_tokens = {str(token).strip().lower() for token in _safe_list(row.get("data_modifier_tokens", []))}
+
+    if not _allow_humanoid_surface_rules(domain_context):
+        return display_name
 
     if judgment == "small_topic" and scope_name == "world model":
         if mechanism == "planning" and "robot" in (task_tokens | object_tokens):
@@ -415,7 +463,7 @@ def _surface_name_from_evidence(row, judgment, pattern, refined_name):
     return display_name
 
 
-def _post_adjust_refinement(row, item):
+def _post_adjust_refinement(row, item, domain_context=None):
     adjusted = dict(item)
     judgment = str(adjusted.get("small_topic_judgment", "")).strip()
     pattern = str(adjusted.get("small_topic_pattern", "")).strip()
@@ -426,6 +474,7 @@ def _post_adjust_refinement(row, item):
     has_specific_anchor = _has_specific_anchor(row)
     natural_source_support = _has_natural_source_support(row)
     strong_small_topic_support = _has_strong_small_topic_support(row, evidence_text)
+    humanoid_surface_rules = _allow_humanoid_surface_rules(domain_context)
     if judgment == "small_topic":
         if pattern == "object+mechanism" and (non_scope_constraint_count <= 1 or not has_specific_anchor):
             adjusted["small_topic_judgment"] = "upper_topic"
@@ -459,6 +508,7 @@ def _post_adjust_refinement(row, item):
     if (
         final_judgment == "upper_topic"
         and source_count >= 2
+        and humanoid_surface_rules
         and str(row.get("mechanism_core", "")).strip().lower() == "planning"
         and "robot" in evidence_text
         and any(term in evidence_text for term in ["social navigation", "indoor navigation", "collaborative", "coordination"])
@@ -469,13 +519,14 @@ def _post_adjust_refinement(row, item):
         final_judgment = "small_topic"
 
     if final_judgment == "compressed_label":
-        if "robot" in evidence_text and str(row.get("mechanism_core", "")).strip().lower() in {"training", "planning"} and source_count >= 3:
+        if humanoid_surface_rules and "robot" in evidence_text and str(row.get("mechanism_core", "")).strip().lower() in {"training", "planning"} and source_count >= 3:
             adjusted["small_topic_judgment"] = "upper_topic"
             adjusted["reason"] = "当前对象已进入 scope 内细候选层，原始证据能支持更自然的对象表述，但仍不足以直接判为自然小主题。"
             final_judgment = "upper_topic"
     if (
         final_judgment == "upper_topic"
         and source_count >= 2
+        and humanoid_surface_rules
         and str(row.get("mechanism_core", "")).strip().lower() in {"control", "simulation", "training"}
         and str(adjusted.get("small_topic_pattern", "")).strip() in {"data+mechanism", "scene+mechanism", "application+mechanism"}
         and any(token in evidence_text for token in ["video", "visual", "trajectory", "driving", "navigation", "social navigation"])
@@ -489,13 +540,14 @@ def _post_adjust_refinement(row, item):
         final_judgment,
         str(adjusted.get("small_topic_pattern", "")).strip(),
         str(adjusted.get("refined_topic_name", "")).strip(),
+        domain_context=domain_context,
     )
     if refined_name:
         adjusted["refined_topic_name"] = refined_name
     return adjusted
 
 
-def refine_research_scored_candidates(scored_df, cache_path=None, refresh_cache=False, top_k=20, batch_size=5):
+def refine_research_scored_candidates(scored_df, cache_path=None, refresh_cache=False, top_k=20, batch_size=5, domain_context=None):
     if scored_df is None or scored_df.empty:
         print("[topic_refiner] 跳过：输入 scored_df 为空。")
         return scored_df
@@ -558,7 +610,7 @@ def refine_research_scored_candidates(scored_df, cache_path=None, refresh_cache=
         batch = pending[start:start + batch_size]
         if not batch:
             continue
-        prompt = _build_prompt(batch)
+        prompt = _build_prompt(batch, domain_context=domain_context)
         try:
             # 使用配置的Agent模型进行主题细化
             agent_model = os.getenv("AGENT_MODEL", os.getenv("OPENAI_MODEL", "Qwen/Qwen2.5-14B-Instruct"))
@@ -580,7 +632,11 @@ def refine_research_scored_candidates(scored_df, cache_path=None, refresh_cache=
                 candidate_key = str(item.get("candidate_key", "")).strip()
                 if not candidate_key:
                     continue
-                normalized_item = _post_adjust_refinement(next((row for row in batch if _candidate_key(row) == candidate_key), {}), item)
+                normalized_item = _post_adjust_refinement(
+                    next((row for row in batch if _candidate_key(row) == candidate_key), {}),
+                    item,
+                    domain_context=domain_context,
+                )
                 cached_items[candidate_key] = {
                     "refined_topic_name": str(normalized_item.get("refined_topic_name", "")).strip(),
                     "small_topic_judgment": str(normalized_item.get("small_topic_judgment", "")).strip(),

@@ -1,0 +1,487 @@
+schema_version: domain_pack_v1
+pack_id: humanoid_robot
+pack_name: Humanoid Robot Domain Pack
+pack_version: preset.v1
+source:
+  mode: preset
+  model: ""
+  prompt_version: humanoid_robot_preset_v1
+  based_on_user_input:
+    field_id: humanoid_robot
+    field_name: 人形机器人
+    keywords:
+      - 人形机器人
+      - 人型机器人
+      - 仿人机器人
+      - 双足机器人
+      - 仿生机器人
+      - 足式机器人
+      - 通用机器人
+      - 具身机器人
+      - 服务机器人
+    synonyms:
+      - humanoid robot
+      - bipedal robot
+      - anthropomorphic robot
+      - android robot
+      - legged robot
+      - general-purpose robot
+      - embodied robot
+    exclude_terms:
+      - 招聘
+      - 广告
+domain_identity:
+  field_id: humanoid_robot
+  field_name: 人形机器人
+  parent_industries:
+    - robotics
+    - artificial intelligence
+    - advanced manufacturing
+  domain_boundary: "人形机器人及其运动、操控、感知、规划、训练、仿真和具身智能相关技术。"
+  adjacent_domains:
+    - 工业机器人
+    - 服务机器人
+    - 具身智能
+    - 世界模型
+    - 智能制造
+  out_of_scope_domains:
+    - 招聘广告
+    - 儿童床
+    - 建材设备
+    - 挖掘机
+search_strategy:
+  core_keywords:
+    - 人形机器人
+    - 人型机器人
+    - 仿人机器人
+    - 双足机器人
+    - 通用机器人
+    - humanoid robot
+  synonyms:
+    - 双足行走
+    - 步态规划
+    - 步态生成
+    - 运动控制
+    - 动态平衡
+    - 全身控制
+    - 质心动力学
+    - 零力矩点
+    - ZMP
+    - 落脚点规划
+    - 接触规划
+    - 多接触运动
+    - 地形适应
+    - 抗扰控制
+    - 全身运动规划
+    - 逆运动学
+    - 逆动力学
+    - 力矩控制
+    - 阻抗控制
+    - 导纳控制
+    - 接触力控制
+    - 模型预测控制
+    - 最优控制
+    - 机器人操作
+    - 灵巧操作
+    - 灵巧手
+    - 抓取规划
+    - 双臂协作
+    - 手眼协调
+    - 移动操作
+    - 全身操作
+    - 接触丰富操作
+    - 力控抓取
+  english_terms:
+    - humanoid robot
+    - humanoid robotics
+    - bipedal robot
+    - bipedal locomotion
+    - gait planning
+    - gait generation
+    - locomotion control
+    - dynamic balance
+    - whole-body control
+    - centroidal dynamics
+    - zero moment point
+    - capture point
+    - footstep planning
+    - multi-contact locomotion
+    - terrain adaptation
+    - disturbance rejection
+    - dexterous manipulation
+    - robot manipulation
+    - robot planning
+    - robot training
+    - embodied simulation
+    - world model
+  exclude_terms:
+    - 招聘
+    - 广告
+    - 儿童床
+    - 挖掘机
+    - 建材
+  source_type_weights:
+    paper: 1.0
+    patent: 1.0
+    news: 0.8
+    report: 0.8
+    policy: 0.5
+  count_policy:
+    mode: recommend_only
+    default_total_sample_size: 0
+    min_per_source: {}
+    max_per_source: {}
+  query_expansion_rules:
+    - "Expand humanoid robot to bipedal locomotion, whole-body control, dexterous manipulation and embodied robot terms."
+observation_scopes:
+  main_scope: humanoid robot
+  sub_scopes:
+    - embodied intelligence
+    - world model
+  scope_aliases:
+    - humanoid robot
+    - humanoid robots
+    - humanoid
+    - humanoids
+    - bipedal robot
+    - bipedal humanoid
+    - 人形机器人
+    - 人型机器人
+    - 类人机器人
+    - 双足机器人
+    - 仿人机器人
+    - 具身智能
+    - embodied intelligence
+    - embodied ai
+    - world model
+    - robot world model
+    - 世界模型
+  scope_echo_terms:
+    - humanoid robot
+    - embodied intelligence
+    - world model
+    - 人形机器人
+    - 具身智能
+    - 世界模型
+  off_domain_anchor_terms:
+    - 儿童床
+    - 挖掘机
+    - 建材
+    - 家具
+    - 招聘
+candidate_formation:
+  technical_object_types:
+    - robot body
+    - manipulator
+    - dexterous hand
+    - gripper
+    - actuator
+    - sensor
+    - controller
+    - world model
+    - simulator
+    - policy model
+  mechanism_types:
+    - training
+    - planning
+    - simulation
+    - control
+    - calibration
+    - grounding
+    - reasoning
+    - alignment
+    - tactile
+  task_or_performance_types:
+    - locomotion
+    - navigation
+    - manipulation
+    - grasping
+    - assembly
+    - dynamic balance
+    - disturbance rejection
+    - terrain adaptation
+  data_or_method_types:
+    - tactile sensor data
+    - visual data
+    - video
+    - trajectory
+    - multimodal data
+    - reinforcement learning
+    - policy-guided learning
+    - causal learning
+  scene_or_application_types:
+    - indoor navigation
+    - social navigation
+    - mobile manipulation
+    - dexterous manipulation
+    - autonomous driving simulation
+  generic_terms:
+    - robot
+    - robotics
+    - 机器人
+    - humanoid
+    - embodied
+    - agent
+    - world model
+    - 世界模型
+    - 具身智能
+    - technology
+    - system
+    - method
+    - application
+    - 技术
+    - 方法
+    - 系统
+    - 应用
+  shell_terms:
+    - technology
+    - technologies
+    - technique
+    - method
+    - methods
+    - system
+    - systems
+    - application
+    - applications
+    - platform
+    - 技术
+    - 方法
+    - 系统
+    - 平台
+    - 应用
+    - 机制
+    - 范式
+    - 体系
+    - 能力
+  valid_candidate_patterns:
+    - pattern_id: humanoid_object_mechanism_task
+      description: "机器人对象、机制和任务或性能目标同时出现。"
+      required_slots:
+        - technical_object
+        - mechanism
+      optional_slots:
+        - task
+        - performance
+        - data_modality
+        - scene
+        - evidence_span
+      min_required_slot_count: 2
+      evidence_required: true
+      weight: 1.0
+      reason_template: "候选包含机器人对象、机制和任务约束，且有证据片段支撑。"
+    - pattern_id: humanoid_data_mechanism_task
+      description: "数据或方法、机制和机器人任务同时出现。"
+      required_slots:
+        - mechanism
+        - task
+      optional_slots:
+        - data_modality
+        - method
+        - technical_object
+        - evidence_span
+      min_required_slot_count: 2
+      evidence_required: true
+      weight: 0.8
+      reason_template: "候选体现机器人任务中的数据/方法驱动机制。"
+  invalid_candidate_patterns:
+    - pattern_id: humanoid_scope_shell_only
+      description: "仅由 scope 或泛化壳词组成的候选。"
+      reject_if_slots_only:
+        - technical_object
+      reject_terms:
+        - robot
+        - robotics
+        - 机器人
+        - humanoid robot
+        - world model
+        - 世界模型
+        - technology
+        - system
+        - method
+        - 技术
+        - 系统
+        - 方法
+      max_specific_slot_count: 1
+      reason_template: "候选只回声领域名或壳词，缺少具体机制、任务、数据或场景。"
+  minimum_specificity_rule:
+    min_non_shell_slots: 2
+    require_evidence_span: true
+    allow_scope_only_candidate: false
+weak_signal_rules:
+  early_stage_markers:
+    - prototype
+    - novel
+    - early
+    - exploratory
+    - 首次
+    - 原型
+    - 早期
+  low_attention_markers:
+    - university lab
+    - niche team
+    - 小团队
+    - 低关注
+  niche_actor_markers:
+    - university
+    - lab
+    - startup
+    - 高校
+    - 实验室
+    - 初创
+  cross_domain_markers:
+    - world model
+    - embodied intelligence
+    - tactile sensing
+    - video generation
+    - 具身智能
+    - 世界模型
+    - 触觉
+    - 生成式视频
+  engineering_trace_markers:
+    - prototype
+    - controller
+    - actuator
+    - sensor
+    - benchmark
+    - demo
+    - 原型
+    - 控制器
+    - 执行器
+    - 传感器
+  commercialization_noise_markers:
+    - funding
+    - marketing
+    - product launch
+    - 融资
+    - 营销
+    - 发布会
+  policy_or_market_noise_markers:
+    - policy
+    - market size
+    - subsidy
+    - 政策
+    - 市场规模
+  scoring_adjustments:
+    - rule_id: humanoid_cross_domain_engineering_trace
+      applies_to: candidate
+      match_terms:
+        - tactile
+        - world model
+        - prototype
+      required_evidence_fields:
+        - evidence_span
+      score_delta: 0.5
+      max_delta: 1.0
+      reason_template: "候选同时具备跨域迁移和工程化痕迹。"
+canonicalization:
+  object_families:
+    - family_id: of_robot_training
+      canonical_term: robot training
+      aliases:
+        - robot training
+        - robotic training
+        - 机器人训练
+      term_type: method
+      merge_confidence: 0.8
+      evidence_required: true
+    - family_id: of_robot_planning
+      canonical_term: robot planning
+      aliases:
+        - robot planning
+        - robotic planning
+        - 机器人规划
+      term_type: task
+      merge_confidence: 0.8
+      evidence_required: true
+    - family_id: of_embodied_simulation
+      canonical_term: embodied simulation
+      aliases:
+        - embodied simulation
+        - robot simulation
+        - 具身仿真
+        - 机器人仿真
+      term_type: method
+      merge_confidence: 0.8
+      evidence_required: true
+  alias_groups:
+    - canonical: humanoid robot
+      aliases:
+        - 人形机器人
+        - 人型机器人
+        - 仿人机器人
+        - humanoid
+      do_not_merge_with:
+        - industrial robot
+    - canonical: dexterous hand
+      aliases:
+        - 灵巧手
+        - dexterous hand
+        - multi-finger hand
+      do_not_merge_with: []
+  parent_child_terms:
+    - parent: humanoid robot
+      children:
+        - dexterous hand
+        - manipulator
+        - gripper
+        - actuator
+        - sensor
+  do_not_merge_rules:
+    - rule_id: humanoid_vs_generic_ai
+      left_terms:
+        - humanoid robot
+        - 人形机器人
+      right_terms:
+        - generic ai
+        - chatbot
+      reason: "通用 AI 应用不等同于人形机器人对象。"
+  object_family_enabled: true
+evidence_rules:
+  strong_evidence_patterns:
+    - pattern_id: humanoid_cross_source_evidence
+      required_fields:
+        - source_type
+        - title
+        - evidence_span
+      match_terms:
+        - robot
+        - 机器人
+        - humanoid
+        - 人形机器人
+      min_source_types: 2
+      reason_template: "多来源证据均命中机器人对象或任务。"
+  weak_evidence_patterns:
+    - pattern_id: humanoid_scope_echo_only
+      match_terms:
+        - robot
+        - 机器人
+        - world model
+        - 世界模型
+      rejection_if_only_signal: true
+      reason_template: "仅出现领域回声词，缺少具体技术对象或机制。"
+  source_reliability_hints:
+    - paper
+    - patent
+    - report
+    - news
+  traceability_fields:
+    - title
+    - text
+    - evidence_span
+    - source_type
+    - date
+    - url
+  evidence_rejection_patterns:
+    - 招聘
+    - 广告
+reporting:
+  display_labels:
+    domain: 人形机器人
+    main_scope: 人形机器人
+    weak_signal: 弱信号
+    near_strong: 近强信号
+  explanation_templates:
+    - "该候选围绕{technical_object}，通过{mechanism}支撑{task}，证据来自{source_type}。"
+  review_hints:
+    - "注意区分机器人本体、机器人任务、world model 上层叙事和泛化 AI 噪声。"
+    - "对象族归一只在 humanoid_robot preset 下启用。"

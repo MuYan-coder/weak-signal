@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import pandas as pd
 from typing import Dict, List, Optional
-from pathlib import Path
 
 FAMILY_EVALUATION_COLUMNS = [
     "family_id",
@@ -272,35 +271,3 @@ def generate_family_report(family_metrics_df: pd.DataFrame) -> str:
             )
 
     return "\n".join(report_lines)
-
-
-def save_family_evaluation(candidates_df: pd.DataFrame, registry, output_dir: Path) -> dict:
-    """
-    执行对象族评估并保存结果。
-
-    Args:
-        candidates_df: 候选数据框
-        registry: 对象族注册表
-        output_dir: 输出目录
-
-    Returns:
-        包含输出文件路径的字典
-    """
-    # 执行评估
-    family_metrics_df = evaluate_families(candidates_df, registry)
-
-    # 保存 CSV
-    csv_path = output_dir / "family_evaluation.csv"
-    family_metrics_df.to_csv(csv_path, index=False, encoding='utf-8')
-
-    # 生成报告
-    report = generate_family_report(family_metrics_df)
-    report_path = output_dir / "family_evaluation_report.md"
-    with open(report_path, 'w', encoding='utf-8') as f:
-        f.write(report)
-
-    return {
-        "csv_path": str(csv_path),
-        "report_path": str(report_path),
-        "metrics_df": family_metrics_df,
-    }

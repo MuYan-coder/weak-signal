@@ -12,10 +12,6 @@ from .signal_generator import (
 from .topic_refiner import (
     refine_research_scored_candidates,
 )
-from .key_core_scorer import (
-    score_key_core_candidates,
-    build_key_core_candidate_table,
-)
 
 __all__ = [
     "score_signals",
@@ -24,6 +20,4 @@ __all__ = [
     "generate_candidate_outputs",
     "generate_candidates",
     "refine_research_scored_candidates",
-    "score_key_core_candidates",
-    "build_key_core_candidate_table",
 ]

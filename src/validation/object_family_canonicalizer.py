@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import yaml
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -39,14 +39,177 @@ class CanonicalizationResult:
     priority: str               # 优先级
 
 
+def _extract_domain_pack(value: Optional[Any]) -> Optional[Any]:
+    if value is None:
+        return None
+    if hasattr(value, "domain_pack"):
+        return getattr(value, "domain_pack")
+    if hasattr(value, "canonicalization"):
+        return value
+    return None
+
+
+def _object_family_enabled(pack: Optional[Any]) -> bool:
+    if pack is None:
+        return True
+    canonicalization = getattr(pack, "canonicalization", {}) or {}
+    if not isinstance(canonicalization, dict):
+        return False
+    return bool(canonicalization.get("object_family_enabled", False))
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in str(text or ""))
+
+
+def _clean_terms(values: Any) -> List[str]:
+    if isinstance(values, str):
+        raw_values = [values]
+    elif isinstance(values, (list, tuple, set)):
+        raw_values = list(values)
+    else:
+        raw_values = []
+    cleaned = []
+    for value in raw_values:
+        text = str(value or "").strip()
+        if text and text not in cleaned:
+            cleaned.append(text)
+    return cleaned
+
+
+def _family_priority(family: Dict[str, Any]) -> str:
+    raw_priority = str(family.get("priority", "")).strip().lower()
+    if raw_priority in {"high", "medium", "low"}:
+        return raw_priority
+    try:
+        confidence = float(family.get("merge_confidence", 0.0) or 0.0)
+    except Exception:
+        confidence = 0.0
+    if confidence >= 0.8:
+        return "high"
+    if confidence >= 0.5:
+        return "medium"
+    return "low"
+
+
+def _domain_pack_config(pack: Any) -> Dict[str, Any]:
+    canonicalization = getattr(pack, "canonicalization", {}) or {}
+    hierarchy = {}
+    for relation in canonicalization.get("parent_child_terms", []) or []:
+        if not isinstance(relation, dict):
+            continue
+        parent = str(relation.get("parent", "")).strip()
+        children = _clean_terms(relation.get("children", []))
+        if parent and children:
+            hierarchy[parent] = {"children": children}
+    return {
+        "english_variants": {},
+        "chinese_english_alignment": {},
+        "hierarchy": hierarchy,
+        "high_value_families": [],
+        "cross_source_patterns": {},
+    }
+
+
+def _domain_pack_registry(pack: Any) -> Dict[str, List[Dict[str, Any]]]:
+    canonicalization = getattr(pack, "canonicalization", {}) or {}
+    families_by_canonical: Dict[str, Dict[str, Any]] = {}
+    parent_by_child = {}
+    for relation in canonicalization.get("parent_child_terms", []) or []:
+        if not isinstance(relation, dict):
+            continue
+        parent = str(relation.get("parent", "")).strip()
+        for child in _clean_terms(relation.get("children", [])):
+            if parent:
+                parent_by_child[child.lower()] = parent
+
+    for family in canonicalization.get("object_families", []) or []:
+        if not isinstance(family, dict):
+            continue
+        canonical = str(family.get("canonical_term", "")).strip()
+        if not canonical:
+            continue
+        aliases = _clean_terms(family.get("aliases", []))
+        zh_aliases = [term for term in aliases if _contains_cjk(term)]
+        en_aliases = [term for term in aliases if not _contains_cjk(term)]
+        entry = {
+            "family_id": str(family.get("family_id", "")).strip() or f"dp_{len(families_by_canonical) + 1}",
+            "canonical_term": canonical,
+            "alias_terms": aliases,
+            "zh_en_pairs": {
+                "zh": zh_aliases,
+                "en": en_aliases,
+            },
+            "parent_term": str(family.get("parent_term", "")).strip() or parent_by_child.get(canonical.lower(), ""),
+            "term_type": str(family.get("term_type", "unknown")).strip() or "unknown",
+            "cross_source_pattern": str(family.get("cross_source_pattern", "single_source")).strip() or "single_source",
+            "patent_role": str(family.get("patent_role", "optional")).strip() or "optional",
+            "priority": _family_priority(family),
+            "merge_confidence": family.get("merge_confidence", 0.0),
+            "evidence_required": bool(family.get("evidence_required", True)),
+        }
+        families_by_canonical[canonical.lower()] = entry
+
+    for group in canonicalization.get("alias_groups", []) or []:
+        if not isinstance(group, dict):
+            continue
+        canonical = str(group.get("canonical", "")).strip()
+        if not canonical:
+            continue
+        aliases = _clean_terms(group.get("aliases", []))
+        key = canonical.lower()
+        entry = families_by_canonical.get(key)
+        if entry is None:
+            zh_aliases = [term for term in aliases if _contains_cjk(term)]
+            en_aliases = [term for term in aliases if not _contains_cjk(term)]
+            entry = {
+                "family_id": f"alias_{len(families_by_canonical) + 1}",
+                "canonical_term": canonical,
+                "alias_terms": aliases,
+                "zh_en_pairs": {"zh": zh_aliases, "en": en_aliases},
+                "parent_term": parent_by_child.get(canonical.lower(), ""),
+                "term_type": "unknown",
+                "cross_source_pattern": "single_source",
+                "patent_role": "optional",
+                "priority": "medium",
+                "do_not_merge_with": _clean_terms(group.get("do_not_merge_with", [])),
+            }
+            families_by_canonical[key] = entry
+        else:
+            merged_aliases = _clean_terms([*entry.get("alias_terms", []), *aliases])
+            entry["alias_terms"] = merged_aliases
+            entry["zh_en_pairs"] = {
+                "zh": [term for term in merged_aliases if _contains_cjk(term)],
+                "en": [term for term in merged_aliases if not _contains_cjk(term)],
+            }
+            entry["do_not_merge_with"] = _clean_terms(group.get("do_not_merge_with", []))
+
+    return {"families": list(families_by_canonical.values())}
+
+
 class ObjectFamilyCanonicalizer:
     """对象族归一化器"""
 
-    def __init__(self, config_path: Optional[Path] = None, registry_path: Optional[Path] = None):
+    def __init__(
+        self,
+        config_path: Optional[Path] = None,
+        registry_path: Optional[Path] = None,
+        domain_pack: Optional[Any] = None,
+    ):
         self.config_path = config_path or DEFAULT_CONFIG_PATH
         self.registry_path = registry_path or DEFAULT_REGISTRY_PATH
-        self.config = self._load_config()
-        self.registry = self._load_registry()
+        self.domain_pack = _extract_domain_pack(domain_pack)
+        self.object_family_enabled = _object_family_enabled(self.domain_pack)
+        if self.domain_pack is None:
+            self.config = self._load_config()
+            self.registry = self._load_registry()
+            self.object_family_enabled = True
+        elif self.object_family_enabled:
+            self.config = _domain_pack_config(self.domain_pack)
+            self.registry = _domain_pack_registry(self.domain_pack)
+        else:
+            self.config = {}
+            self.registry = {"families": []}
         self._build_lookup_tables()
 
     def _load_config(self) -> dict:
@@ -305,6 +468,54 @@ class ObjectFamilyCanonicalizer:
 
         return None
 
+    def match_candidate_family(self, concept: Dict[str, Any]) -> Optional[dict]:
+        """Match a candidate row against the active object-family registry."""
+        if not self.object_family_enabled:
+            return None
+        raw_phrase = str((concept or {}).get("raw_phrase", "")).strip()
+        display_name = str((concept or {}).get("display_candidate_name", "")).strip()
+        canonical_name_en = str((concept or {}).get("canonical_candidate_name_en", "")).strip()
+        mechanism_core = str((concept or {}).get("mechanism_core", "")).strip().lower()
+
+        family = None
+        for term in [canonical_name_en, raw_phrase, display_name]:
+            if term:
+                family = self.match_family(term)
+                if family:
+                    break
+        if not family:
+            return None
+
+        if self.domain_pack is None and family.get("family_id") == "of_006":
+            legacy_split = {
+                "simulation": {
+                    "family_id": "of_027",
+                    "canonical_term": "embodied simulation",
+                    "term_type": "method",
+                    "cross_source_pattern": "news_paper",
+                    "patent_role": "optional",
+                    "priority": "high",
+                },
+                "training": {
+                    "family_id": "of_028",
+                    "canonical_term": "robot training",
+                    "term_type": "method",
+                    "cross_source_pattern": "news_paper",
+                    "patent_role": "optional",
+                    "priority": "medium",
+                },
+                "planning": {
+                    "family_id": "of_029",
+                    "canonical_term": "robot planning",
+                    "term_type": "task",
+                    "cross_source_pattern": "news_paper",
+                    "patent_role": "optional",
+                    "priority": "medium",
+                },
+            }
+            return legacy_split.get(mechanism_core, family)
+        return family
+
     def extract_canonical_from_phrase(self, phrase: str) -> Tuple[str, str, Optional[str]]:
         """
         从短语中提取并归一化配置中的术语。
@@ -454,9 +665,17 @@ class ObjectFamilyCanonicalizer:
 _canonicalizer: Optional[ObjectFamilyCanonicalizer] = None
 
 
-def get_canonicalizer(config_path: Optional[Path] = None, registry_path: Optional[Path] = None) -> ObjectFamilyCanonicalizer:
+def get_canonicalizer(
+    config_path: Optional[Path] = None,
+    registry_path: Optional[Path] = None,
+    domain_pack: Optional[Any] = None,
+    domain_context: Optional[Any] = None,
+) -> ObjectFamilyCanonicalizer:
     """获取全局归一化器实例"""
     global _canonicalizer
+    active_pack = _extract_domain_pack(domain_context) or _extract_domain_pack(domain_pack)
+    if active_pack is not None:
+        return ObjectFamilyCanonicalizer(config_path, registry_path, domain_pack=active_pack)
     if _canonicalizer is None or config_path is not None or registry_path is not None:
         _canonicalizer = ObjectFamilyCanonicalizer(config_path, registry_path)
     return _canonicalizer

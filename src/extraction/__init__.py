@@ -18,10 +18,6 @@ from .event_extractor import (
 from .candidate_former import (
     build_candidate_forms,
 )
-from .tech_lexicon import (
-    TopicBundle,
-)
-
 __all__ = [
     "process_events",
     "extract_events",
@@ -35,5 +31,4 @@ __all__ = [
     "load_event_cache",
     "save_event_cache",
     "build_candidate_forms",
-    "TopicBundle",
 ]

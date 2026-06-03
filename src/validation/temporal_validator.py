@@ -1,9 +1,9 @@
-"""Temporal validation for v0.02 key-core potential scoring.
+"""Temporal validation for weak-signal continuous observation.
 
 This module keeps the validation deliberately lightweight: it builds candidate
 level time-window features from already extracted evidence, records why a
-candidate did or did not pass, and never drops candidates because dates are
-missing.
+candidate does or does not show sustained momentum, and never drops candidates
+because dates are missing.
 """
 
 from __future__ import annotations
@@ -46,6 +46,10 @@ TEMPORAL_VALIDATION_COLUMNS = [
     "temporal_validation_status",
     "earlyness_years",
     "date_coverage_ratio",
+    "monitoring_priority",
+    "monitoring_action",
+    "next_observation_window_start",
+    "next_observation_window_end",
     "temporal_validation_reason",
 ]
 
@@ -404,6 +408,23 @@ def _tier_score(tier: str, growth_rate: float, source_growth_rate: float, org_gr
     return round(max(0.0, min(base + lift, 100.0)), 2)
 
 
+def _monitoring_profile(tier: str, date_coverage_ratio: float) -> Tuple[str, str]:
+    """Return continuous-observation priority and action text."""
+    if tier in {"rising_validated", "quality_rising"}:
+        return "high", "进入高频跟踪；下一观测期重点核验新增来源、主体扩散和高质量证据。"
+    if tier == "single_source_high_quality_watch":
+        return "medium", "保留为单源高质量观察对象；下一轮优先补充独立来源和可解析日期。"
+    if tier == "stable_no_growth":
+        return "medium", "保持常规跟踪；若下一观测期仍无新增扩散，可降低优先级。"
+    if tier == "mainstream_or_hotspot":
+        return "reference", "作为主流化或热点参照对象保留，用于区分早期弱信号和已扩散主题。"
+    if tier == "declining_or_one_off":
+        return "low", "降为低频观察；除非出现新证据，否则不作为近期重点。"
+    if date_coverage_ratio <= 0:
+        return "needs_dates", "先补齐来源日期；当前无法判断持续性。"
+    return "low", "证据不足，保留低频观察。"
+
+
 def _temporal_row(
     row: pd.Series,
     index: int,
@@ -453,6 +474,10 @@ def _temporal_row(
         "temporal_validation_status": "insufficient_date",
         "earlyness_years": 0.0,
         "date_coverage_ratio": date_coverage_ratio,
+        "monitoring_priority": "needs_dates",
+        "monitoring_action": "先补齐来源日期；当前无法判断持续性。",
+        "next_observation_window_start": "",
+        "next_observation_window_end": "",
         "temporal_validation_reason": "缺少可解析日期，无法划分观察期和验证期。",
     }
 
@@ -462,7 +487,9 @@ def _temporal_row(
                 "temporal_momentum_score": _tier_score("mainstream_or_hotspot", 0.0, 0.0, 0.0),
                 "temporal_validation_tier": "mainstream_or_hotspot",
                 "temporal_validation_status": "mainstream_or_hotspot",
-                "temporal_validation_reason": "候选提及量或来源覆盖已经较高，更像主流热点或观察范围概览，不宜仅凭增长判为早期关键核心候选。",
+                "monitoring_priority": "reference",
+                "monitoring_action": "作为主流化或热点参照对象保留，用于区分早期弱信号和已扩散主题。",
+                "temporal_validation_reason": "候选提及量或来源覆盖已经较高，更像主流热点或观察范围概览，持续观测时应作为参照项而非早期弱信号。",
             }
         )
         if not dated_records:
@@ -477,6 +504,8 @@ def _temporal_row(
                     "temporal_momentum_score": _tier_score("single_source_high_quality_watch", 0.0, 0.0, 0.0),
                     "temporal_validation_tier": "single_source_high_quality_watch",
                     "temporal_validation_status": "insufficient_date",
+                    "monitoring_priority": "medium",
+                    "monitoring_action": "保留为单源高质量观察对象；下一轮优先补充独立来源和可解析日期。",
                     "temporal_validation_reason": "日期证据不足，但核心证据质量较高且来源较少，保留为单源高质量观察对象。",
                 }
             )
@@ -489,6 +518,8 @@ def _temporal_row(
     observation_end = observation_start + pd.DateOffset(months=observation_months)
     validation_start = observation_end
     validation_end = validation_start + pd.DateOffset(months=validation_months)
+    next_observation_start = validation_end
+    next_observation_end = next_observation_start + pd.DateOffset(months=validation_months)
 
     (
         mentions_observation,
@@ -548,11 +579,13 @@ def _temporal_row(
         f"日期覆盖率={date_coverage_ratio:.2f}",
     ]
     if tier == "mainstream_or_hotspot":
-        reasons.append("候选已呈现热点或观察范围概览特征，关键核心潜力需结合早期性降权。")
+        reasons.append("候选已呈现热点或观察范围概览特征，持续观测时作为参照项处理。")
     elif passed:
-        reasons.append("后续窗口存在增长或扩散，时间验证通过。")
+        reasons.append("后续窗口存在增长或扩散，建议进入持续跟踪。")
     else:
         reasons.append("后续窗口增长不足，暂不判为持续成长信号。")
+
+    monitoring_priority, monitoring_action = _monitoring_profile(tier, date_coverage_ratio)
 
     return {
         "candidate_id": candidate_id,
@@ -584,6 +617,10 @@ def _temporal_row(
         "temporal_validation_status": status,
         "earlyness_years": earlyness_years,
         "date_coverage_ratio": date_coverage_ratio,
+        "monitoring_priority": monitoring_priority,
+        "monitoring_action": monitoring_action,
+        "next_observation_window_start": _date_to_text(next_observation_start),
+        "next_observation_window_end": _date_to_text(next_observation_end),
         "temporal_validation_reason": "；".join(reasons),
     }
 

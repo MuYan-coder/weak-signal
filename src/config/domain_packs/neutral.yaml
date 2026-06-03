@@ -1,0 +1,109 @@
+schema_version: domain_pack_v1
+pack_id: neutral
+pack_name: Neutral Domain Pack
+pack_version: preset.v1
+source:
+  mode: preset
+  model: ""
+  prompt_version: ""
+  based_on_user_input:
+    field_id: neutral
+    field_name: Neutral
+    keywords: []
+    synonyms: []
+    exclude_terms: []
+domain_identity:
+  field_id: neutral
+  field_name: Neutral
+  parent_industries: []
+  domain_boundary: "No domain-specific assumptions."
+  adjacent_domains: []
+  out_of_scope_domains: []
+search_strategy:
+  core_keywords: []
+  synonyms: []
+  english_terms: []
+  exclude_terms: []
+  source_type_weights:
+    paper: 1.0
+    patent: 1.0
+    news: 1.0
+    report: 1.0
+    policy: 1.0
+  count_policy:
+    mode: recommend_only
+    default_total_sample_size: 0
+    min_per_source: {}
+    max_per_source: {}
+  query_expansion_rules: []
+observation_scopes:
+  main_scope: ""
+  sub_scopes: []
+  scope_aliases: []
+  scope_echo_terms: []
+  off_domain_anchor_terms: []
+candidate_formation:
+  technical_object_types: []
+  mechanism_types: []
+  task_or_performance_types: []
+  data_or_method_types: []
+  scene_or_application_types: []
+  generic_terms:
+    - 技术
+    - 方法
+    - 系统
+    - 应用
+  shell_terms:
+    - 技术
+    - 方法
+    - 系统
+    - 平台
+    - 应用
+  valid_candidate_patterns: []
+  invalid_candidate_patterns:
+    - pattern_id: neutral_shell_only
+      description: Reject candidates made only of generic shell terms.
+      reject_if_slots_only:
+        - technical_object
+      reject_terms:
+        - 技术
+        - 方法
+        - 系统
+        - 应用
+      max_specific_slot_count: 1
+      reason_template: "候选仅包含泛化壳词，缺少领域内对象、机制或任务证据。"
+  minimum_specificity_rule:
+    min_non_shell_slots: 2
+    require_evidence_span: true
+    allow_scope_only_candidate: false
+weak_signal_rules:
+  early_stage_markers: []
+  low_attention_markers: []
+  niche_actor_markers: []
+  cross_domain_markers: []
+  engineering_trace_markers: []
+  commercialization_noise_markers: []
+  policy_or_market_noise_markers: []
+  scoring_adjustments: []
+canonicalization:
+  object_families: []
+  alias_groups: []
+  parent_child_terms: []
+  do_not_merge_rules: []
+  object_family_enabled: false
+evidence_rules:
+  strong_evidence_patterns: []
+  weak_evidence_patterns: []
+  source_reliability_hints: []
+  traceability_fields:
+    - title
+    - text
+    - evidence_span
+    - source_type
+  evidence_rejection_patterns: []
+reporting:
+  display_labels:
+    domain: Neutral
+  explanation_templates: []
+  review_hints:
+    - "Neutral pack is a fallback only; generated or preset Domain Pack should be reviewed before formal analysis."

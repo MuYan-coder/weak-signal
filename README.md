@@ -1,6 +1,6 @@
 # 产业技术预见智能体
 
-面向产业技术预见场景的弱信号识别系统。项目从专利、文献、研报、资讯等多源文本中抽取事件，形成候选技术对象，完成事件质量评分、弱信号评分、主题细化、反向验证、技术链映射、时间验证、关键核心潜力评分和报告生成。
+面向产业技术预见场景的弱信号识别系统。项目从专利、文献、研报、资讯等多源文本中抽取事件并同步完成事件质量评分，形成候选技术对象，完成弱信号评分、主题细化、反向验证、时间验证、持续观测分层和报告生成。
 
 当前主线是自研 Pipeline 架构，不再保留早期 LangChain/RAG 原型流程。
 
@@ -8,7 +8,7 @@
 
 - 当前发布版本：`0.02`
 - 目标发布标签：`v0.02`
-- v0.02 主线新增事件 schema 契约、多事件抽取、历史事件回填、事件质量细分评分和 Web 复核增强。
+- v0.02 主线聚焦弱信号识别与持续观测，保留时间验证，移除当前项目暂不需要的技术链映射和关键核心技术识别主流程。
 - v2.6 验收参考目录：`result/20260430_100821_v26_final_validation`
 
 ## 项目架构
@@ -33,17 +33,13 @@ tf_agent/
     ├── scoring/
     │   ├── scorer.py
     │   ├── signal_generator.py
-    │   ├── topic_refiner.py
-    │   └── key_core_scorer.py
+    │   └── topic_refiner.py
     ├── validation/
     │   ├── reverse_validator.py
     │   ├── event_quality.py
-    │   ├── tech_chain_mapper.py
     │   ├── temporal_validator.py
     │   ├── object_family_canonicalizer.py
-    │   ├── family_evaluator.py
-    │   ├── final_shortlist.py
-    │   └── baseline_compare.py
+    │   └── family_evaluator.py
     ├── utils/
     │   ├── api_stats.py
     │   ├── config.py
@@ -61,17 +57,14 @@ tf_agent/
 ## 主流程
 
 1. 数据加载与标准化
-2. 事件抽取
-3. 事件质量评分
-4. 候选技术对象成形与候选证据质量聚合
-5. 弱信号评分
-6. 主题细化
-7. 反向验证
-8. 技术链映射
-9. 时间验证
-10. 关键核心潜力评分
-11. 信号生成
-12. 报告生成
+2. 事件抽取、结构化与质量评分
+3. 候选技术对象成形与候选证据质量聚合
+4. 弱信号评分
+5. 主题细化
+6. 反向验证
+7. 时间验证与持续观测分层
+8. 信号生成
+9. 报告生成
 
 ## 运行方式
 
@@ -135,7 +128,7 @@ EVENT_EXTRACTION_TIMEOUT_FALLBACK_TO_LOCAL=1
 - `src/core/` 只负责流程编排和智能体封装。
 - `src/extraction/` 负责从原始文本到候选对象的结构化加工。
 - `src/scoring/` 负责评分、主题细化和最终信号表达。
-- `src/validation/` 负责反向验证、对象族归一化和最终名单整理。
+- `src/validation/` 负责反向验证、对象族归一化、事件质量和时间持续观测验证。
 - `src/utils/` 只放跨模块基础设施，例如配置、LLM 客户端、语义相似度和调用统计。
 - `data/`、`memory/`、`result/` 是运行时数据目录，不放核心业务代码。
 

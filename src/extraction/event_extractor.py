@@ -1,7 +1,11 @@
 import json
 import os
 import re
+import hashlib
+import time
+import random
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
@@ -11,11 +15,13 @@ from ..utils.llm_client import chat_text, get_provider_and_client
 from .event_schema import (
     EVENT_LLM_JSON_FIELDS as _EVENT_JSON_FIELDS,
     WEAK_SIGNAL_EVENT_SCHEMA_VERSION,
+    clean_event_list as _clean_event_list,
+    clean_event_text as _clean_event_text,
     coerce_confidence as _coerce_confidence,
-    coerce_event_list as _coerce_event_list,
     event_cache_columns as _event_cache_columns,
     normalize_event_schema as _normalize_event_schema,
     normalize_events_dataframe as _normalize_events_dataframe,
+    normalize_subject as _normalize_subject,
     safe_event_text as _safe_event_text,
     source_date_text as _source_date_text,
 )
@@ -24,24 +30,13 @@ from .tech_lexicon import (
     DOMINANT_TECH_TERMS,
     OBSERVATION_SCOPE_SET,
     aliases_for,
+    build_domain_lexicon,
     canonicalize_term,
-    diagnose_observation_scope_detection,
-    detect_supported_observation_scopes,
     discover_candidate_terms,
-    extract_data_modifier_tokens,
-    extract_mechanism_core_tokens,
-    extract_method_modifier_tokens,
-    extract_object_modifier_tokens,
-    extract_scene_tokens,
-    extract_task_constraint_tokens,
-    extract_technologies,
-    has_robot_domain_anchor,
     has_non_scope_constraint,
     is_bare_mechanism_candidate,
-    is_scope_echo_candidate,
     normalize_signal_phrase,
     normalize_proxy_token,
-    normalize_technologies,
 )
 
 
@@ -92,17 +87,17 @@ def _dedupe_preserve_order(values):
 def _fix_event_dict(event):
     if not isinstance(event, dict):
         return {}
-    if not _coerce_event_list(event.get("technology")):
-        event["technology"] = ["未知"]
+    event["technology"] = _clean_event_list(event.get("technology")) or ["未知"]
+    event["subject"] = _normalize_subject(event.get("subject"))
     for field in ["subject", "action", "scene", "time"]:
-        if not _safe_event_text(event.get(field)):
+        if not _clean_event_text(event.get(field)):
             event[field] = "未知"
     event["event_schema_version"] = (
-        _safe_event_text(event.get("event_schema_version"))
+        _clean_event_text(event.get("event_schema_version"))
         or WEAK_SIGNAL_EVENT_SCHEMA_VERSION
     )
     for field in ["data_modality", "method"]:
-        event[field] = _coerce_event_list(event.get(field))
+        event[field] = _clean_event_list(event.get(field))
     event["confidence"] = _coerce_confidence(event.get("confidence"), default=0.0)
     return event
 
@@ -146,10 +141,28 @@ def _event_extraction_single_timeout():
 
 def _event_extraction_batch_retries():
     try:
-        value = int(os.getenv("EVENT_EXTRACTION_BATCH_RETRIES", "0"))
+        value = int(os.getenv("EVENT_EXTRACTION_BATCH_RETRIES", "3"))
     except (TypeError, ValueError):
-        value = 0
+        value = 3
     return max(0, value)
+
+
+def _event_extraction_concurrency():
+    try:
+        value = int(os.getenv("EVENT_EXTRACTION_CONCURRENCY", "2"))
+    except (TypeError, ValueError):
+        value = 2
+    return max(1, value)
+
+
+def _event_extraction_batch_size():
+    try:
+        value = int(os.getenv("EVENT_EXTRACTION_BATCH_SIZE", "5"))
+    except (TypeError, ValueError):
+        value = 5
+    return max(1, value)
+
+
 
 
 def _timeout_fallback_to_local_enabled():
@@ -161,9 +174,9 @@ def _event_selection_key(index_event):
     index, event = index_event
     return (
         _coerce_confidence(event.get("confidence"), default=0.0),
-        1 if _safe_event_text(event.get("evidence_span")) else 0,
+        1 if _clean_event_text(event.get("evidence_span")) else 0,
         1 if any(
-            _safe_event_text(event.get(field))
+            _clean_event_text(event.get(field))
             for field in ["technical_object", "mechanism", "task", "weak_signal_reason"]
         ) else 0,
         -index,
@@ -377,6 +390,38 @@ def _normalize_cache_path(cache_path):
         path = Path(__file__).resolve().parents[1] / path
     return path
 
+def _get_doc_level_cache_dir(cache_path):
+    cache_file = _normalize_cache_path(cache_path)
+    if cache_file is None:
+        return None
+    return cache_file.parent / "doc_level" / cache_file.stem
+
+
+def _load_doc_cache(doc_hash, doc_level_dir):
+    if not doc_level_dir or not doc_level_dir.exists():
+        return None
+    cache_file = doc_level_dir / f"{doc_hash}.json"
+    if not cache_file.exists():
+        return None
+    try:
+        events = json.loads(cache_file.read_text(encoding="utf-8"))
+        if isinstance(events, list):
+            return events
+    except Exception:
+        pass
+    return None
+
+
+def _save_doc_cache(doc_hash, events, doc_level_dir):
+    if not doc_level_dir:
+        return
+    try:
+        doc_level_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = doc_level_dir / f"{doc_hash}.json"
+        cache_file.write_text(json.dumps(events, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[warning] 写入文档级缓存失败: {e}")
+
 
 def load_event_cache(cache_path, expected_ids=None):
     cache_file = _normalize_cache_path(cache_path)
@@ -427,12 +472,13 @@ def save_event_cache(cache_path, events_df, metadata=None):
     cache_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _supports_scope_context(snippet: str, scopes):
+def _supports_scope_context(snippet: str, scopes, domain_lexicon=None):
     haystack = normalize_signal_phrase(snippet)
     if not haystack:
         return False
     for scope in scopes:
-        for alias in aliases_for(scope):
+        scope_aliases = domain_lexicon.aliases_for(scope) if domain_lexicon is not None else aliases_for(scope)
+        for alias in scope_aliases:
             if normalize_signal_phrase(alias) in haystack:
                 return True
     return False
@@ -449,6 +495,41 @@ def _strip_html_noise(text: str) -> str:
     return cleaned
 
 
+def _analysis_scope_from_row(row, domain_lexicon=None) -> str:
+    if row is None:
+        return ""
+    for field in ["analysis_tech_field_name", "tech_field_name", "analysis_domain", "selected_domain"]:
+        try:
+            value = row.get(field, "")
+        except AttributeError:
+            value = ""
+        text = _clean_event_text(value)
+        if not text or text == "未知":
+            continue
+        canonical = domain_lexicon.canonicalize_term(text) if domain_lexicon is not None else canonicalize_term(text)
+        return canonical if canonical and canonical != "未知" else text
+    return ""
+
+
+def _freeform_candidate_token(value, *, allow_generic_action=False, max_len=80) -> str:
+    text = _clean_event_text(value)
+    if not text or text == "未知":
+        return ""
+    text = _strip_html_noise(text)
+    text = re.sub(r"[\[\]{}<>]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" ，,。.;；:：")
+    if not text or len(text) > max_len:
+        return ""
+    generic_actions = {
+        "提出", "研发", "研制", "设计", "发布", "开源", "测试", "验证",
+        "propose", "proposed", "develop", "developed", "design", "designed",
+        "release", "released", "test", "tested", "validate", "validated",
+    }
+    if not allow_generic_action and text.lower() in generic_actions:
+        return ""
+    return text
+
+
 def _looks_formable_candidate(
     mechanism_tokens,
     task_tokens,
@@ -457,14 +538,35 @@ def _looks_formable_candidate(
     scene_tokens,
     method_tokens,
     strict_mode=True,
+    domain_lexicon=None,
 ):
     if not mechanism_tokens:
+        if domain_lexicon is not None and not domain_lexicon.use_legacy_robot_rules:
+            return domain_lexicon.valid_candidate_pattern_matches(
+                task_tokens=task_tokens,
+                object_tokens=object_tokens,
+                data_tokens=data_tokens,
+                scene_tokens=scene_tokens,
+                mechanism_tokens=mechanism_tokens,
+                method_tokens=method_tokens,
+                evidence_present=True,
+            )
         return False
-    
+
     # 宽松模式：只要有机制核心词就认为可以成形
     if not strict_mode:
         return True
-    
+
+    if domain_lexicon is not None and not domain_lexicon.use_legacy_robot_rules:
+        return domain_lexicon.has_non_scope_constraint(
+            task_tokens=task_tokens,
+            object_tokens=object_tokens,
+            data_tokens=data_tokens,
+            scene_tokens=scene_tokens,
+            mechanism_tokens=mechanism_tokens,
+            method_tokens=method_tokens,
+        )
+
     if is_bare_mechanism_candidate(
         mechanism_tokens=mechanism_tokens,
         task_tokens=task_tokens,
@@ -621,31 +723,33 @@ def _build_candidate_unit(
     scope_context_supported=False,
     source_extraction_mode="local",
     scope_match_mode="explicit",
+    domain_lexicon=None,
 ):
+    domain_lexicon = domain_lexicon or build_domain_lexicon(None)
     raw_candidate_text = normalize_signal_phrase(raw_text)
     if not raw_candidate_text or not scope_names:
         return None
 
     mechanism_core_tokens = _dedupe_preserve_order(
-        mechanism_tokens or extract_mechanism_core_tokens(action_text, raw_candidate_text)
+        mechanism_tokens or domain_lexicon.extract_mechanism_core_tokens(action_text, raw_candidate_text)
     )
     task_constraint_tokens = _dedupe_preserve_order(
-        task_tokens or extract_task_constraint_tokens(scene_text, raw_candidate_text)
+        task_tokens or domain_lexicon.extract_task_constraint_tokens(scene_text, raw_candidate_text)
     )
     scene_tokens = _dedupe_preserve_order(
-        scene_tokens or extract_scene_tokens(scene_text, raw_candidate_text)
+        scene_tokens or domain_lexicon.extract_scene_tokens(scene_text, raw_candidate_text)
     )
     object_modifier_tokens = _dedupe_preserve_order(
-        object_tokens or extract_object_modifier_tokens(scene_text, action_text, raw_candidate_text)
+        object_tokens or domain_lexicon.extract_object_modifier_tokens(scene_text, action_text, raw_candidate_text)
     )
     data_modifier_tokens = _dedupe_preserve_order(
-        data_tokens or extract_data_modifier_tokens(scene_text, action_text, raw_candidate_text)
+        data_tokens or domain_lexicon.extract_data_modifier_tokens(scene_text, action_text, raw_candidate_text)
     )
     method_modifier_tokens = _dedupe_preserve_order(
-        method_tokens or extract_method_modifier_tokens(scene_text, action_text, raw_candidate_text)
+        method_tokens or domain_lexicon.extract_method_modifier_tokens(scene_text, action_text, raw_candidate_text)
     )
-    action_tokens = _dedupe_preserve_order(extract_mechanism_core_tokens(action_text, raw_candidate_text))
-    is_scope_echo = is_scope_echo_candidate(
+    action_tokens = _dedupe_preserve_order(domain_lexicon.extract_mechanism_core_tokens(action_text, raw_candidate_text))
+    is_scope_echo = domain_lexicon.is_scope_echo_candidate(
         raw_candidate_text,
         scope_names,
         mechanism_tokens=mechanism_core_tokens,
@@ -653,7 +757,7 @@ def _build_candidate_unit(
     )
     has_mechanism_core = bool(mechanism_core_tokens)
     has_task_constraint = bool(task_constraint_tokens)
-    has_non_scope_info = has_non_scope_constraint(
+    has_non_scope_info = domain_lexicon.has_non_scope_constraint(
         task_constraint_tokens,
         object_modifier_tokens,
         data_modifier_tokens,
@@ -717,17 +821,23 @@ def _extract_candidate_units(
     source_type="",
     observation_scopes=None,
     scope_match_mode="explicit",
+    domain_lexicon=None,
 ):
+    domain_lexicon = domain_lexicon or build_domain_lexicon(None)
     title_text = _strip_html_noise(title_text)
     fallback_text = _strip_html_noise(fallback_text)
     combined_text = " ".join(
         part for part in [str(title_text or "").strip(), str(fallback_text or "").strip()] if part
     )
-    observation_scopes = observation_scopes or detect_supported_observation_scopes(combined_text)
+    observation_scopes = observation_scopes or domain_lexicon.detect_supported_observation_scopes(combined_text)
     if not observation_scopes:
         return []
     robot_scopes = {"humanoid robot", "embodied intelligence"}
-    if robot_scopes.intersection(observation_scopes) and not has_robot_domain_anchor(combined_text):
+    if (
+        domain_lexicon.use_legacy_robot_rules
+        and robot_scopes.intersection(observation_scopes)
+        and not domain_lexicon.has_robot_domain_anchor(combined_text)
+    ):
         return []
 
     technologies = event.get("technology", [])
@@ -735,10 +845,14 @@ def _extract_candidate_units(
         technologies = [technologies]
     non_scope_technologies = []
     for technology in technologies:
-        canonical = canonicalize_term(technology)
-        if canonical == "未知":
+        canonical = domain_lexicon.canonicalize_term(technology)
+        if canonical == "未知" or canonical.lower() == "unknown":
             continue
-        if canonical in OBSERVATION_SCOPE_SET or canonical in BROAD_TECH_TERMS:
+        if domain_lexicon.use_legacy_robot_rules and (canonical in OBSERVATION_SCOPE_SET or canonical in BROAD_TECH_TERMS):
+            continue
+        if not domain_lexicon.use_legacy_robot_rules and (
+            domain_lexicon.is_observation_scope(canonical) or domain_lexicon.is_generic_or_shell(canonical)
+        ):
             continue
         non_scope_technologies.append(canonical)
     non_scope_technologies = _dedupe_preserve_order(non_scope_technologies)
@@ -746,44 +860,54 @@ def _extract_candidate_units(
     action_text = str(event.get("action", "")).strip()
     scene_text = str(event.get("scene", "")).strip()
     fallback_mechanisms = _dedupe_preserve_order(
-        extract_mechanism_core_tokens(action_text, title_text, fallback_text)
+        domain_lexicon.extract_mechanism_core_tokens(action_text, title_text, fallback_text)
     )
     fallback_tasks = _dedupe_preserve_order(
-        extract_task_constraint_tokens(scene_text, title_text, fallback_text)
+        domain_lexicon.extract_task_constraint_tokens(scene_text, title_text, fallback_text)
     )
     fallback_scenes = _dedupe_preserve_order(
-        extract_scene_tokens(scene_text, title_text, fallback_text)
+        domain_lexicon.extract_scene_tokens(scene_text, title_text, fallback_text)
     )
     fallback_object_tokens = _dedupe_preserve_order(
-        extract_object_modifier_tokens(scene_text, title_text, fallback_text, *non_scope_technologies)
+        domain_lexicon.extract_object_modifier_tokens(scene_text, title_text, fallback_text, *non_scope_technologies)
     )
     fallback_data_tokens = _dedupe_preserve_order(
-        extract_data_modifier_tokens(scene_text, title_text, fallback_text)
+        domain_lexicon.extract_data_modifier_tokens(scene_text, title_text, fallback_text)
     )
     fallback_method_tokens = _dedupe_preserve_order(
-        extract_method_modifier_tokens(action_text, scene_text, title_text, fallback_text)
+        domain_lexicon.extract_method_modifier_tokens(action_text, scene_text, title_text, fallback_text)
     )
 
     units = []
     seen = set()
     for snippet in _split_candidate_snippets(title_text, fallback_text):
-        snippet_mechanisms = _dedupe_preserve_order(extract_mechanism_core_tokens(action_text, snippet))
-        snippet_tasks = _dedupe_preserve_order(extract_task_constraint_tokens(scene_text, snippet))
-        snippet_scenes = _dedupe_preserve_order(extract_scene_tokens(scene_text, snippet))
+        snippet_mechanisms = _dedupe_preserve_order(domain_lexicon.extract_mechanism_core_tokens(action_text, snippet))
+        snippet_tasks = _dedupe_preserve_order(domain_lexicon.extract_task_constraint_tokens(scene_text, snippet))
+        snippet_scenes = _dedupe_preserve_order(domain_lexicon.extract_scene_tokens(scene_text, snippet))
         snippet_object_tokens = _dedupe_preserve_order(
-            extract_object_modifier_tokens(scene_text, snippet, *non_scope_technologies)
+            domain_lexicon.extract_object_modifier_tokens(scene_text, snippet, *non_scope_technologies)
         )
         snippet_data_tokens = _dedupe_preserve_order(
-            extract_data_modifier_tokens(scene_text, snippet)
+            domain_lexicon.extract_data_modifier_tokens(scene_text, snippet)
         )
         snippet_method_tokens = _dedupe_preserve_order(
-            extract_method_modifier_tokens(action_text, scene_text, snippet)
+            domain_lexicon.extract_method_modifier_tokens(action_text, scene_text, snippet)
         )
-        has_scope_context = _supports_scope_context(snippet, observation_scopes)
+        has_scope_context = _supports_scope_context(snippet, observation_scopes, domain_lexicon=domain_lexicon)
+        if str(scope_match_mode or "").startswith("analysis_field"):
+            has_scope_context = True
         if source_type == "patent" and scope_match_mode == "proxy_patent":
             has_scope_context = True
 
-        if not snippet_mechanisms:
+        if not snippet_mechanisms and not domain_lexicon.valid_candidate_pattern_matches(
+            task_tokens=snippet_tasks,
+            object_tokens=snippet_object_tokens,
+            data_tokens=snippet_data_tokens,
+            scene_tokens=snippet_scenes,
+            mechanism_tokens=snippet_mechanisms,
+            method_tokens=snippet_method_tokens,
+            evidence_present=True,
+        ):
             continue
         if not has_scope_context and not fallback_mechanisms:
             continue
@@ -795,6 +919,7 @@ def _extract_candidate_units(
             snippet_scenes,
             snippet_method_tokens,
             strict_mode=(source_extraction_mode != "local"),
+            domain_lexicon=domain_lexicon,
         ):
             continue
         if _is_broad_world_model_candidate(
@@ -836,6 +961,7 @@ def _extract_candidate_units(
             scope_context_supported=has_scope_context,
             source_extraction_mode=source_extraction_mode,
             scope_match_mode=scope_match_mode,
+            domain_lexicon=domain_lexicon,
         )
         if not unit:
             continue
@@ -863,6 +989,7 @@ def _extract_candidate_units(
             fallback_data_tokens,
             fallback_scenes,
             fallback_method_tokens,
+            domain_lexicon=domain_lexicon,
         ):
             if _is_broad_world_model_candidate(
                 observation_scopes,
@@ -901,6 +1028,7 @@ def _extract_candidate_units(
                 scope_context_supported=True,
                 source_extraction_mode=source_extraction_mode,
                 scope_match_mode=scope_match_mode,
+                domain_lexicon=domain_lexicon,
             )
             if unit:
                 units.append(unit)
@@ -914,18 +1042,19 @@ def _normalize_event_technologies(
     title_text="",
     source_extraction_mode="local",
     source_type="",
+    analysis_scope="",
+    domain_lexicon=None,
 ):
-    technologies = event.get("technology", [])
-    if not isinstance(technologies, list):
-        technologies = [technologies]
+    domain_lexicon = domain_lexicon or build_domain_lexicon(None)
+    technologies = _clean_event_list(event.get("technology"))
 
     title_text = _strip_html_noise(title_text)
     fallback_text = _strip_html_noise(fallback_text)
     combined_text = " ".join(str(part) for part in [title_text, fallback_text] if str(part).strip())
-    normalized = normalize_technologies(technologies, fallback_text=combined_text)
-    discovered_terms = discover_candidate_terms(combined_text, limit=4)
+    normalized = domain_lexicon.normalize_technologies(technologies, fallback_text=combined_text)
+    discovered_terms = discover_candidate_terms(combined_text, limit=4) if domain_lexicon.use_legacy_robot_rules else []
 
-    if normalized and all(item in DOMINANT_TECH_TERMS for item in normalized if item != "未知"):
+    if domain_lexicon.use_legacy_robot_rules and normalized and all(item in DOMINANT_TECH_TERMS for item in normalized if item != "未知"):
         for term in discovered_terms:
             if term not in normalized and term not in DOMINANT_TECH_TERMS:
                 normalized.append(term)
@@ -933,44 +1062,65 @@ def _normalize_event_technologies(
     event["technology"] = normalized
     source_type = str(source_type or "").strip().lower()
     fallback_mechanisms = _dedupe_preserve_order(
-        extract_mechanism_core_tokens(title_text, fallback_text, " ".join(normalized))
+        domain_lexicon.extract_mechanism_core_tokens(title_text, fallback_text, " ".join(normalized))
     )
     fallback_tasks = _dedupe_preserve_order(
-        extract_task_constraint_tokens(title_text, fallback_text)
+        domain_lexicon.extract_task_constraint_tokens(title_text, fallback_text)
     )
     fallback_scenes = _dedupe_preserve_order(
-        extract_scene_tokens(title_text, fallback_text)
+        domain_lexicon.extract_scene_tokens(title_text, fallback_text)
     )
     fallback_object_tokens = _dedupe_preserve_order(
-        extract_object_modifier_tokens(title_text, fallback_text, " ".join(normalized))
+        domain_lexicon.extract_object_modifier_tokens(title_text, fallback_text, " ".join(normalized))
     )
+    if not fallback_object_tokens:
+        object_fallback = _freeform_candidate_token(event.get("technical_object"), max_len=90)
+        if not object_fallback:
+            object_fallback = next(
+                (
+                    _freeform_candidate_token(item, max_len=80)
+                    for item in normalized
+                    if str(item or "").strip() and str(item).strip() != "未知"
+                ),
+                "",
+            )
+        if object_fallback:
+            fallback_object_tokens = [object_fallback]
     fallback_data_tokens = _dedupe_preserve_order(
-        extract_data_modifier_tokens(title_text, fallback_text)
+        domain_lexicon.extract_data_modifier_tokens(title_text, fallback_text)
     )
     fallback_method_tokens = _dedupe_preserve_order(
-        extract_method_modifier_tokens(title_text, fallback_text)
+        domain_lexicon.extract_method_modifier_tokens(title_text, fallback_text)
     )
-    if not _coerce_event_list(event.get("mechanism_core_tokens")):
+    if not fallback_mechanisms:
+        mechanism_fallback = (
+            _freeform_candidate_token(event.get("mechanism"), max_len=80)
+            or _freeform_candidate_token(event.get("capability_change"), max_len=80)
+            or _freeform_candidate_token(event.get("action"), allow_generic_action=True, max_len=24)
+        )
+        if mechanism_fallback:
+            fallback_mechanisms = [mechanism_fallback]
+    if not _clean_event_list(event.get("mechanism_core_tokens")):
         event["mechanism_core_tokens"] = fallback_mechanisms
-    if not _coerce_event_list(event.get("task_constraint_tokens")):
+    if not _clean_event_list(event.get("task_constraint_tokens")):
         event["task_constraint_tokens"] = fallback_tasks
-    if not _coerce_event_list(event.get("object_modifier_tokens")):
+    if not _clean_event_list(event.get("object_modifier_tokens")):
         event["object_modifier_tokens"] = fallback_object_tokens
-    if not _coerce_event_list(event.get("data_modifier_tokens")):
+    if not _clean_event_list(event.get("data_modifier_tokens")):
         event["data_modifier_tokens"] = fallback_data_tokens
-    if not _coerce_event_list(event.get("method_modifier_tokens")):
+    if not _clean_event_list(event.get("method_modifier_tokens")):
         event["method_modifier_tokens"] = fallback_method_tokens
-    if not _safe_event_text(event.get("technical_object")) and fallback_object_tokens:
+    if not _clean_event_text(event.get("technical_object")) and fallback_object_tokens:
         event["technical_object"] = " ".join(fallback_object_tokens[:2])
-    if not _safe_event_text(event.get("mechanism")) and fallback_mechanisms:
+    if not _clean_event_text(event.get("mechanism")) and fallback_mechanisms:
         event["mechanism"] = " ".join(fallback_mechanisms[:2])
-    if not _safe_event_text(event.get("task")) and fallback_tasks:
+    if not _clean_event_text(event.get("task")) and fallback_tasks:
         event["task"] = " ".join(fallback_tasks[:2])
-    if not _coerce_event_list(event.get("data_modality")) and fallback_data_tokens:
+    if not _clean_event_list(event.get("data_modality")) and fallback_data_tokens:
         event["data_modality"] = fallback_data_tokens[:3]
-    if not _coerce_event_list(event.get("method")) and fallback_method_tokens:
+    if not _clean_event_list(event.get("method")) and fallback_method_tokens:
         event["method"] = fallback_method_tokens[:3]
-    scope_diag = diagnose_observation_scope_detection(
+    scope_diag = domain_lexicon.diagnose_observation_scope_detection(
         combined_text,
         source_type=source_type,
         mechanism_tokens=fallback_mechanisms,
@@ -982,6 +1132,10 @@ def _normalize_event_technologies(
     )
     observation_scopes = scope_diag["supported_scopes"]
     scope_match_mode = scope_diag["scope_match_mode"] or ""
+    analysis_scope = _freeform_candidate_token(analysis_scope, max_len=80)
+    if analysis_scope:
+        observation_scopes = [analysis_scope]
+        scope_match_mode = "analysis_field" if not scope_match_mode else f"analysis_field+{scope_match_mode}"
 
     candidate_units = _extract_candidate_units(
         event,
@@ -991,6 +1145,7 @@ def _normalize_event_technologies(
         source_type=source_type,
         observation_scopes=observation_scopes,
         scope_match_mode=scope_match_mode or "explicit",
+        domain_lexicon=domain_lexicon,
     )
     scope_candidates = [unit["raw_candidate_text"] for unit in candidate_units]
     scope_candidate_scopes = {
@@ -1027,9 +1182,16 @@ def _weak_signal_event_prompt(text):
 
 抽取要求：
 - 保留兼容字段：subject、action、technology、scene、time。
+  * subject (主语)：实施该事件的具体主体机构、团队、人员或文献/专利发明人/申请人，例如：“麻省理工团队”、“特斯拉”、“上海海事大学”。必须是原文或来源元数据中可核验的真实主体；如果只有“我们/本文/本发明/该方法/该系统/研究人员/日本科学家”等代词、泛称、国别+角色代称或无法确认主体，请填“未知”。**禁止将具体的技术概念、产品名词、系统/方法/模型/算法/装置名称填入该字段。**
+  * action (动作)：描述该技术事件的研发/学术动作的**核心动词**，通常为：“研发”、“研制”、“提出”、“设计”、“发布”、“开源”、“测试”、“验证”等。**绝对禁止将“全身反应规划控制”、“运动规划”、“控制系统”、“高速跑酷导航”等技术类目、任务短语或技术名词填入 action 字段。**
+  * technology (技术)：事件涉及的核心技术，需为列表。
+  * scene (场景)：应用场景。
+  * time (时间)：事件发生的明确时间。
 - 补充弱信号字段：event_type、technical_object、mechanism、task、data_modality、method、capability_change、problem_solved、maturity_stage、novelty_signal、adoption_signal、cross_domain_signal、weak_signal_reason、uncertainty、evidence_span、confidence。
+- technical_object 必须是原文中的具体技术对象（材料、器件、系统、方法或结构）；mechanism 是作用机制/关键原理；task 是技术任务或性能目标；data_modality 和 method 必须是列表。没有证据的补充字段填空字符串或空数组。
 - evidence_span 必须是原文中连续出现的证据片段，不能编造；找不到证据片段的事件不要输出。
-- subject/action/technology/scene/time 只描述原文明确证据；capability_change、weak_signal_reason、uncertainty 可以是基于证据的审慎推断。
+- subject/action/technology/scene/time 只描述原文明确证据；subject 无明确证据时必须为“未知”；capability_change、weak_signal_reason、uncertainty 可以是基于证据的审慎推断。
+- 所有字段都禁止输出 string、text、value、placeholder、example、sample、null、N/A、待填、示例、占位符等占位值。
 - 一篇文本可拆成多条事件，优先拆分不同技术对象、机制、任务或应用场景。
 - confidence 为 0 到 1 的数字。
 
@@ -1038,25 +1200,25 @@ def _weak_signal_event_prompt(text):
   {{
     "event_schema_version": "{WEAK_SIGNAL_EVENT_SCHEMA_VERSION}",
     "event_id": "",
-    "subject": "string",
-    "action": "string",
-    "technology": ["tech1", "tech2"],
-    "scene": "string",
-    "time": "string",
+    "subject": "上海交通大学团队",
+    "action": "提出",
+    "technology": ["钙钛矿薄膜", "界面钝化材料"],
+    "scene": "柔性电子器件",
+    "time": "2026年",
     "event_type": "research",
-    "technical_object": "string",
-    "mechanism": "string",
-    "task": "string",
-    "data_modality": ["video", "sensor"],
-    "method": ["retrieval-based"],
-    "capability_change": "string",
-    "problem_solved": "string",
+    "technical_object": "钙钛矿薄膜界面钝化材料",
+    "mechanism": "界面缺陷钝化",
+    "task": "提升器件长期稳定性",
+    "data_modality": ["电化学测试数据", "结构表征数据"],
+    "method": ["掺杂改性", "界面工程"],
+    "capability_change": "提高材料导电性与稳定性",
+    "problem_solved": "降低界面缺陷导致的性能衰减",
     "maturity_stage": "lab",
-    "novelty_signal": "string",
-    "adoption_signal": "string",
-    "cross_domain_signal": "string",
-    "weak_signal_reason": "string",
-    "uncertainty": "string",
+    "novelty_signal": "新型掺杂体系出现早期实验验证",
+    "adoption_signal": "论文或专利披露初步样品制备",
+    "cross_domain_signal": "材料改性方法迁移到电子器件",
+    "weak_signal_reason": "具体材料对象、机制和性能任务同时出现",
+    "uncertainty": "仍需更多实验重复与规模化验证",
     "evidence_span": "原文连续片段",
     "confidence": 0.82
   }}
@@ -1076,9 +1238,16 @@ def _weak_signal_batch_prompt(items, batch_size):
 - 每条事件必须包含 doc_index，取值为对应文本编号 1 到 {batch_size}。
 - 每篇文本可以输出 0 到 N 条事件；不要为了凑数量强行输出事件。
 - 保留兼容字段：subject、action、technology、scene、time。
+  * subject (主语)：实施该事件的具体主体机构、团队、人员或文献/专利发明人/申请人，例如：“麻省理工团队”、“特斯拉”、“上海海事大学”。必须是原文或来源元数据中可核验的真实主体；如果只有“我们/本文/本发明/该方法/该系统/研究人员/日本科学家”等代词、泛称、国别+角色代称或无法确认主体，请填“未知”。**禁止将具体的技术概念、产品名词、系统/方法/模型/算法/装置名称填入该字段。**
+  * action (动作)：描述该技术事件的研发/学术动作的**核心动词**，通常为：“研发”、“研制”、“提出”、“设计”、“发布”、“开源”、“测试”、“验证”等。**绝对禁止将“全身反应规划控制”、“运动规划”、“控制系统”、“高速跑酷导航”等技术类目、任务短语或技术名词填入 action 字段。**
+  * technology (技术)：事件涉及的核心技术，需为列表。
+  * scene (场景)：应用场景。
+  * time (时间)：事件发生的明确时间。
 - 补充弱信号字段：event_type、technical_object、mechanism、task、data_modality、method、capability_change、problem_solved、maturity_stage、novelty_signal、adoption_signal、cross_domain_signal、weak_signal_reason、uncertainty、evidence_span、confidence。
+- technical_object 必须是原文中的具体技术对象（材料、器件、系统、方法或结构）；mechanism 是作用机制/关键原理；task 是技术任务或性能目标；data_modality 和 method 必须是列表。没有证据的补充字段填空字符串或空数组。
 - evidence_span 必须是对应原文中连续出现的证据片段，不能编造；找不到证据片段的事件不要输出。
-- subject/action/technology/scene/time 只描述原文明确证据；capability_change、weak_signal_reason、uncertainty 可以是基于证据的审慎推断。
+- subject/action/technology/scene/time 只描述原文明确证据；subject 无明确证据时必须为“未知”；capability_change、weak_signal_reason、uncertainty 可以是基于证据的审慎推断。
+- 所有字段都禁止输出 string、text、value、placeholder、example、sample、null、N/A、待填、示例、占位符等占位值。
 - confidence 为 0 到 1 的数字。
 
 输出格式示例：
@@ -1087,25 +1256,25 @@ def _weak_signal_batch_prompt(items, batch_size):
     "doc_index": 1,
     "event_schema_version": "{WEAK_SIGNAL_EVENT_SCHEMA_VERSION}",
     "event_id": "",
-    "subject": "string",
-    "action": "string",
-    "technology": ["tech1", "tech2"],
-    "scene": "string",
-    "time": "string",
+    "subject": "上海交通大学团队",
+    "action": "提出",
+    "technology": ["钙钛矿薄膜", "界面钝化材料"],
+    "scene": "柔性电子器件",
+    "time": "2026年",
     "event_type": "research",
-    "technical_object": "string",
-    "mechanism": "string",
-    "task": "string",
-    "data_modality": ["video", "sensor"],
-    "method": ["retrieval-based"],
-    "capability_change": "string",
-    "problem_solved": "string",
+    "technical_object": "钙钛矿薄膜界面钝化材料",
+    "mechanism": "界面缺陷钝化",
+    "task": "提升器件长期稳定性",
+    "data_modality": ["电化学测试数据", "结构表征数据"],
+    "method": ["掺杂改性", "界面工程"],
+    "capability_change": "提高材料导电性与稳定性",
+    "problem_solved": "降低界面缺陷导致的性能衰减",
     "maturity_stage": "lab",
-    "novelty_signal": "string",
-    "adoption_signal": "string",
-    "cross_domain_signal": "string",
-    "weak_signal_reason": "string",
-    "uncertainty": "string",
+    "novelty_signal": "新型掺杂体系出现早期实验验证",
+    "adoption_signal": "论文或专利披露初步样品制备",
+    "cross_domain_signal": "材料改性方法迁移到电子器件",
+    "weak_signal_reason": "具体材料对象、机制和性能任务同时出现",
+    "uncertainty": "仍需更多实验重复与规模化验证",
     "evidence_span": "原文连续片段",
     "confidence": 0.82
   }}
@@ -1183,11 +1352,11 @@ def extract_events_with_api(text):
             event["_source_extraction_mode"] = "local"
             return [event]
 
-        extraction_model = os.getenv("EXTRACTION_MODEL", os.getenv("OPENAI_MODEL", "Qwen/Qwen2.5-7B-Instruct"))
         result, usage_info, _ = chat_text(
             prompt,
+            system="你是用于技术预见的弱信号事件抽取器。请严格按照要求抽取技术事件并输出合法的 JSON 数组，必须保证 JSON 键名拼写完全正确，不要输出 Markdown 标记或任何解释性文字。",
             model=extraction_model,
-            temperature=0.1,
+            temperature=0.3,
             max_tokens=4000,
             timeout=_event_extraction_single_timeout(),
         )
@@ -1223,140 +1392,190 @@ def extract_events_with_api(text):
         return [event]
 
 
-def extract_event_with_api(text):
-    events = extract_events_with_api(text)
-    return _normalize_event_schema(events[0], source_extraction_mode="api") if events else _normalize_event_schema({})
+def _extract_batch_worker(batch, start, batch_idx, total_batches, extraction_model):
+    items = "\n\n".join([f"编号{idx + 1}: {t}" for idx, t in enumerate(batch)])
+    prompt = _weak_signal_batch_prompt(items, len(batch))
+
+    provider, client = get_provider_and_client()
+    if client is None or provider is None:
+        batch_results = []
+        for idx, text in enumerate(batch):
+            event = extract_event_simulate(text)
+            event["_source_text_index"] = start + idx
+            event["_source_extraction_mode"] = "local"
+            batch_results.append(event)
+        return batch_results
+
+    print(f"[事件抽取] 调用API，批次: {batch_idx}/{total_batches}，模型: {extraction_model}")
+    last_error = None
+    max_attempts = _event_extraction_batch_retries() + 1
+
+    raw = None
+    usage_info = {"prompt_tokens": 0, "completion_tokens": 0}
+    for attempt in range(1, max_attempts + 1):
+        try:
+            raw, usage_info, _ = chat_text(
+                prompt,
+                system="你是用于技术预见的弱信号事件抽取器。请严格按照要求抽取技术事件并输出合法的 JSON 数组，必须保证 JSON 键名拼写完全正确，不要输出 Markdown 标记或任何解释性文字。",
+                model=extraction_model,
+                temperature=0.3,
+                max_tokens=6000,
+                timeout=_event_extraction_batch_timeout(),
+            )
+            break
+        except Exception as attempt_error:
+            last_error = attempt_error
+            if attempt < max_attempts:
+                sleep_time = (2.0 ** attempt) + random.uniform(0.5, 1.5)
+                print(
+                    f"[事件抽取] 批次 {batch_idx}/{total_batches} 第 {attempt} 次请求失败: "
+                    f"{attempt_error}，将在 {sleep_time:.2f} 秒后重试"
+                )
+                time.sleep(sleep_time)
+            else:
+                raise last_error
+
+    print(f"[事件抽取] API响应接收完成，批次 {batch_idx}/{total_batches}，长度: {len(raw) if raw else 0}")
+
+    if usage_info.get("prompt_tokens") or usage_info.get("completion_tokens"):
+        record_call(
+            call_type="事件抽取-批量",
+            prompt_tokens=usage_info.get("prompt_tokens", 0),
+            completion_tokens=usage_info.get("completion_tokens", 0),
+            success=True,
+        )
+
+    if not raw:
+        raise ValueError("API returned empty raw content")
+
+    extracted = _parse_json_from_response(raw)
+    batch_results = []
+
+    if extracted is None:
+        print(f"[warning] 批量抽取第 {batch_idx} 批次返回内容无法解析，退回逐条抽取")
+        print(f"[debug] 原始响应预览：{raw[:800] if raw else 'None'}")
+        for idx, text in enumerate(batch):
+            for event in extract_events_with_api(text):
+                event["_source_text_index"] = start + idx
+                batch_results.append(event)
+        return batch_results
+
+    if isinstance(extracted, list) and not extracted:
+        print(f"[事件抽取] 批次 {batch_idx}/{total_batches} 返回空数组 []")
+        if _retry_empty_batch_enabled() and any(_safe_event_text(text) for text in batch):
+            print(f"[事件抽取] 批次 {batch_idx} 空批次启用逐条重试，避免批量模式漏抽")
+            for idx, text in enumerate(batch):
+                for event in extract_events_with_api(text):
+                    event["_source_text_index"] = start + idx
+                    batch_results.append(event)
+        return batch_results
+
+    extracted_events = _event_records_from_parsed(extracted)
+    if not extracted_events:
+        print(f"[事件抽取] 批次 {batch_idx}/{total_batches} 解析后事件数: 0")
+        return batch_results
+
+    all_missing_doc_index = all(_batch_local_index(event, len(batch)) is None for event in extracted_events)
+    if all_missing_doc_index and len(extracted_events) == len(batch):
+        for idx, event in enumerate(extracted_events):
+            event = _strip_extraction_mapping_fields(event)
+            event["_source_text_index"] = start + idx
+            batch_results.append(event)
+        return batch_results
+
+    if all_missing_doc_index:
+        print(f"[warning] 批量抽取第 {batch_idx} 批次返回多事件但缺少 doc_index，退回逐条抽取")
+        for idx, text in enumerate(batch):
+            for event in extract_events_with_api(text):
+                event["_source_text_index"] = start + idx
+                batch_results.append(event)
+        return batch_results
+
+    for event in extracted_events:
+        local_index = _batch_local_index(event, len(batch))
+        if local_index is None:
+            continue
+        event = _strip_extraction_mapping_fields(event)
+        event["_source_text_index"] = start + local_index
+        batch_results.append(event)
+
+    return batch_results
+
+
+def _extract_batch_worker_wrapper(batch, start, batch_idx, total_batches, extraction_model):
+    try:
+        return _extract_batch_worker(batch, start, batch_idx, total_batches, extraction_model)
+    except Exception as e:
+        use_local_timeout_fallback = "timed out" in str(e).lower() and _timeout_fallback_to_local_enabled()
+        fallback_label = "本地规则兜底" if use_local_timeout_fallback else "逐条抽取"
+        print(f"[事件抽取] 批次 {batch_idx}/{total_batches} 批量API调用发生异常: {e}，退回 {fallback_label}")
+
+        record_call(
+            call_type="事件抽取-批量",
+            prompt_tokens=0,
+            completion_tokens=0,
+            success=False,
+        )
+
+        batch_results = []
+        for idx, text in enumerate(batch):
+            fallback_events = []
+            single_err = None
+            if use_local_timeout_fallback:
+                fallback_events = [extract_event_simulate(text)]
+            else:
+                try:
+                    fallback_events = extract_events_with_api(text)
+                except Exception as single_err_exc:
+                    single_err = single_err_exc
+                    print(f"[事件抽取] 逐条降级请求也失败: {single_err}，强制使用本地规则兜底")
+                    fallback_events = [extract_event_simulate(text)]
+
+            for event in fallback_events:
+                event["_source_text_index"] = start + idx
+                if use_local_timeout_fallback or single_err:
+                    event["_source_extraction_mode"] = "local"
+                batch_results.append(event)
+        return batch_results
 
 
 def batch_extract_event_with_api(texts, batch_size=5):
     results = []
+    concurrency = _event_extraction_concurrency()
+    extraction_model = os.getenv("EXTRACTION_MODEL", os.getenv("OPENAI_MODEL", "Qwen/Qwen2.5-7B-Instruct"))
+
+    batches = []
     for start in range(0, len(texts), batch_size):
         batch = texts[start:start + batch_size]
-        items = "\n\n".join([f"编号{idx + 1}: {t}" for idx, t in enumerate(batch)])
-        prompt = _weak_signal_batch_prompt(items, len(batch))
-        try:
-            provider, client = get_provider_and_client()
-            if client is None or provider is None:
-                for idx, text in enumerate(batch):
-                    event = extract_event_simulate(text)
-                    event["_source_text_index"] = start + idx
-                    event["_source_extraction_mode"] = "local"
-                    results.append(event)
-                continue
+        batches.append((batch, start))
 
-            extraction_model = os.getenv("EXTRACTION_MODEL", os.getenv("OPENAI_MODEL", "Qwen/Qwen2.5-7B-Instruct"))
-            print(f"[事件抽取] 调用API，批次: {start//batch_size + 1}，模型: {extraction_model}")
-            last_error = None
-            max_attempts = _event_extraction_batch_retries() + 1
-            for attempt in range(1, max_attempts + 1):
+    total_batches = len(batches)
+    print(f"[事件抽取] 开始并行抽取，文本总数: {len(texts)}，分批数: {total_batches}，并发数: {concurrency}")
+
+    if concurrency <= 1 or total_batches <= 1:
+        for idx, (batch, start) in enumerate(batches):
+            batch_idx = idx + 1
+            batch_res = _extract_batch_worker_wrapper(batch, start, batch_idx, total_batches, extraction_model)
+            results.extend(batch_res)
+    else:
+        futures = {}
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            for idx, (batch, start) in enumerate(batches):
+                batch_idx = idx + 1
+                future = executor.submit(
+                    _extract_batch_worker_wrapper,
+                    batch, start, batch_idx, total_batches, extraction_model
+                )
+                futures[future] = batch_idx
+
+            for future in as_completed(futures):
+                batch_idx = futures[future]
                 try:
-                    raw, usage_info, _ = chat_text(
-                        prompt,
-                        model=extraction_model,
-                        temperature=0.1,
-                        max_tokens=6000,
-                        timeout=_event_extraction_batch_timeout(),
-                    )
-                    break
-                except Exception as attempt_error:
-                    last_error = attempt_error
-                    if attempt < max_attempts:
-                        print(
-                            f"[事件抽取] 批次 {start//batch_size + 1} 第 {attempt} 次请求失败: "
-                            f"{attempt_error}，准备重试"
-                        )
-                    else:
-                        raise last_error
-            print(f"[事件抽取] API响应接收完成，长度: {len(raw)}")
+                    batch_res = future.result()
+                    results.extend(batch_res)
+                except Exception as future_err:
+                    print(f"[事件抽取] 线程任务 {batch_idx} 执行发生严重未捕获错误: {future_err}")
 
-            if usage_info["prompt_tokens"] or usage_info["completion_tokens"]:
-                record_call(
-                    call_type="事件抽取-批量",
-                    prompt_tokens=usage_info["prompt_tokens"],
-                    completion_tokens=usage_info["completion_tokens"],
-                    success=True,
-                )
-
-            extracted = _parse_json_from_response(raw)
-            if extracted is None:
-                print("[warning] 批量抽取返回内容无法解析，退回逐条抽取")
-                print("[debug] 原始响应：", raw[:800])
-                for idx, text in enumerate(batch):
-                    for event in extract_events_with_api(text):
-                        event["_source_text_index"] = start + idx
-                        results.append(event)
-                continue
-            if isinstance(extracted, list) and not extracted:
-                print(
-                    f"[事件抽取] 批次 {start//batch_size + 1} 返回空数组 []，解析事件数: 0"
-                )
-                if _retry_empty_batch_enabled() and any(_safe_event_text(text) for text in batch):
-                    print("[事件抽取] 空批次启用逐条重试，避免批量模式漏抽")
-                    retry_count = 0
-                    for idx, text in enumerate(batch):
-                        for event in extract_events_with_api(text):
-                            event["_source_text_index"] = start + idx
-                            results.append(event)
-                            retry_count += 1
-                    print(f"[事件抽取] 空批次逐条重试完成，补回事件数: {retry_count}")
-                continue
-
-            extracted_events = _event_records_from_parsed(extracted)
-            if not extracted_events:
-                print(
-                    f"[事件抽取] 批次 {start//batch_size + 1} 解析后事件数: 0，原始响应预览: {raw[:120]}"
-                )
-                continue
-            print(
-                f"[事件抽取] 批次 {start//batch_size + 1} 解析事件数: {len(extracted_events)}"
-            )
-
-            all_missing_doc_index = all(_batch_local_index(event, len(batch)) is None for event in extracted_events)
-            if all_missing_doc_index and len(extracted_events) == len(batch):
-                for idx, event in enumerate(extracted_events):
-                    event = _strip_extraction_mapping_fields(event)
-                    event["_source_text_index"] = start + idx
-                    results.append(event)
-                continue
-            if all_missing_doc_index:
-                print("[warning] 批量抽取返回多事件但缺少 doc_index，退回逐条抽取")
-                for idx, text in enumerate(batch):
-                    for event in extract_events_with_api(text):
-                        event["_source_text_index"] = start + idx
-                        results.append(event)
-                continue
-
-            unresolved_count = 0
-            for event in extracted_events:
-                local_index = _batch_local_index(event, len(batch))
-                if local_index is None:
-                    unresolved_count += 1
-                    continue
-                event = _strip_extraction_mapping_fields(event)
-                event["_source_text_index"] = start + local_index
-                results.append(event)
-            if unresolved_count:
-                print(f"[warning] 批量抽取忽略 {unresolved_count} 条无法映射到原文编号的事件")
-        except Exception as e:
-            use_local_timeout_fallback = "timed out" in str(e).lower() and _timeout_fallback_to_local_enabled()
-            fallback_label = "本地规则兜底" if use_local_timeout_fallback else "逐条抽取"
-            print(f"[事件抽取] 批量API调用失败: {e}，退回{fallback_label}")
-            record_call(
-                call_type="事件抽取-批量",
-                prompt_tokens=0,
-                completion_tokens=0,
-                success=False,
-            )
-            fallback_count = 0
-            for idx, text in enumerate(batch):
-                fallback_events = [extract_event_simulate(text)] if use_local_timeout_fallback else extract_events_with_api(text)
-                for event in fallback_events:
-                    event["_source_text_index"] = start + idx
-                    if use_local_timeout_fallback:
-                        event["_source_extraction_mode"] = "local"
-                    results.append(event)
-                    fallback_count += 1
-            print(f"[事件抽取] 批次 {start//batch_size + 1} {fallback_label}完成，补回事件数: {fallback_count}")
     return results
 
 
@@ -1430,16 +1649,17 @@ def _local_weak_signal_reason(
     return "；".join(reasons)
 
 
-def extract_event_simulate(text):
+def extract_event_simulate(text, domain_lexicon=None):
     """模拟事件抽取 - 支持中英文"""
+    domain_lexicon = domain_lexicon or build_domain_lexicon(None)
     text_lower = text.lower()
-    technologies = extract_technologies(text)
+    technologies = domain_lexicon.extract_technologies(text)
     subject = "未知"
     action = "未知"
     scene = "未知"
     time = "未知"
 
-    # 主体识别（中英文）
+    # 主体识别（中英文）。这里只做弱提示，最终会按 schema 严格清洗。
     if any(kw in text for kw in ["研究", "实验室", "高校", "大学", "研究院"]):
         subject = "研究机构"
     elif any(kw in text for kw in ["公司", "企业", "集团", "厂商"]):
@@ -1455,6 +1675,7 @@ def extract_event_simulate(text):
     elif "university" in text_lower or "lab" in text_lower:
         subject = "实验室"
         action = "planning"
+    subject = _normalize_subject(subject)
 
     # 行为识别（中英文）- 使用机制核心词
     if any(kw in text for kw in ["训练", "学习", "优化", "微调"]):
@@ -1520,11 +1741,11 @@ def extract_event_simulate(text):
     if year_match:
         time = year_match.group(1)
 
-    mechanism_tokens = _dedupe_preserve_order(extract_mechanism_core_tokens(text, action))
-    task_tokens = _dedupe_preserve_order(extract_task_constraint_tokens(text, scene))
-    object_tokens = _dedupe_preserve_order(extract_object_modifier_tokens(text, scene, " ".join(technologies)))
-    data_tokens = _dedupe_preserve_order(extract_data_modifier_tokens(text))
-    method_tokens = _dedupe_preserve_order(extract_method_modifier_tokens(text, action))
+    mechanism_tokens = _dedupe_preserve_order(domain_lexicon.extract_mechanism_core_tokens(text, action))
+    task_tokens = _dedupe_preserve_order(domain_lexicon.extract_task_constraint_tokens(text, scene))
+    object_tokens = _dedupe_preserve_order(domain_lexicon.extract_object_modifier_tokens(text, scene, " ".join(technologies)))
+    data_tokens = _dedupe_preserve_order(domain_lexicon.extract_data_modifier_tokens(text))
+    method_tokens = _dedupe_preserve_order(domain_lexicon.extract_method_modifier_tokens(text, action))
     event_type = _local_event_type(text_lower)
     maturity_stage = _local_maturity_stage(text_lower, event_type)
     primary_technology = next(
@@ -1578,14 +1799,16 @@ def extract_event_simulate(text):
     }
 
 
-def extract_events(text, use_api=True):
+def extract_events(text, use_api=True, domain_lexicon=None):
+    domain_lexicon = domain_lexicon or build_domain_lexicon(None)
     if use_api and _api_config_available():
         return extract_events_with_api(text)
-    return [extract_event_simulate(text)]
+    return [extract_event_simulate(text, domain_lexicon=domain_lexicon)]
 
 
-def extract_event(text, use_api=True):
-    events = extract_events(text, use_api=use_api)
+def extract_event(text, use_api=True, domain_lexicon=None):
+    domain_lexicon = domain_lexicon or build_domain_lexicon(None)
+    events = extract_events(text, use_api=use_api, domain_lexicon=domain_lexicon)
     mode = "api" if use_api and _api_config_available() else "local"
     return _normalize_event_schema(events[0], source_extraction_mode=mode) if events else _normalize_event_schema({})
 
@@ -1651,15 +1874,19 @@ def assess_weak_signal_event(event, source_row):
     return event
 
 
-def _prepare_event_for_source_row(event, row, doc_event_index=1, source_extraction_mode="local"):
+def _prepare_event_for_source_row(event, row, doc_event_index=1, source_extraction_mode="local", domain_lexicon=None):
+    domain_lexicon = domain_lexicon or build_domain_lexicon(None)
     event = dict(event or {})
     event["id"] = row.get("id", event.get("id", ""))
+    analysis_scope = _analysis_scope_from_row(row, domain_lexicon=domain_lexicon)
     _normalize_event_technologies(
         event,
         row.get("text", ""),
         row.get("title", ""),
         source_extraction_mode=source_extraction_mode,
         source_type=row.get("source_type", ""),
+        analysis_scope=analysis_scope,
+        domain_lexicon=domain_lexicon,
     )
     assess_weak_signal_event(event, row)
     source_date = _source_date_text(row)
@@ -1668,6 +1895,8 @@ def _prepare_event_for_source_row(event, row, doc_event_index=1, source_extracti
         event["event_date"] = source_date
     event["source_type"] = row.get("source_type", "")
     event["title"] = row.get("title", "")
+    if analysis_scope:
+        event["analysis_tech_field_name"] = analysis_scope
     return _normalize_event_schema(
         event,
         source_row=row,
@@ -1676,16 +1905,66 @@ def _prepare_event_for_source_row(event, row, doc_event_index=1, source_extracti
     )
 
 
-def process_events(df, use_api=True, batch_size=5, cache_path=None, refresh_cache=False):
+def _renormalize_cached_events_with_source(cached_df, source_df, domain_lexicon=None):
+    domain_lexicon = domain_lexicon or build_domain_lexicon(None)
+    if cached_df is None or cached_df.empty or source_df is None or source_df.empty:
+        return cached_df
+    source_rows = {
+        str(row.get("id", "")).strip(): row
+        for _, row in source_df.iterrows()
+        if str(row.get("id", "")).strip()
+    }
+    normalized = []
+    per_doc_counts = {}
+    for _, event_row in cached_df.iterrows():
+        event = event_row.to_dict()
+        source_id = str(event.get("id", "")).strip()
+        per_doc_counts[source_id] = per_doc_counts.get(source_id, 0) + 1
+        source_row = source_rows.get(source_id)
+        if source_row is not None:
+            normalized.append(
+                _prepare_event_for_source_row(
+                    event,
+                    source_row,
+                    doc_event_index=per_doc_counts[source_id],
+                    source_extraction_mode=event.get("source_extraction_mode", "cache"),
+                    domain_lexicon=domain_lexicon,
+                )
+            )
+        else:
+            normalized.append(
+                _normalize_event_schema(
+                    event,
+                    doc_event_index=per_doc_counts[source_id],
+                    source_extraction_mode=event.get("source_extraction_mode", "cache"),
+                )
+            )
+    return pd.DataFrame(normalized)
+
+
+def process_events(
+    df,
+    use_api=True,
+    batch_size=None,
+    cache_path=None,
+    refresh_cache=False,
+    domain_context=None,
+    domain_pack=None,
+):
+    domain_lexicon = build_domain_lexicon(domain_context or domain_pack)
     event_columns = _event_cache_columns()
     if df is None or df.empty:
         return pd.DataFrame(columns=event_columns)
+
+    if batch_size is None:
+        batch_size = _event_extraction_batch_size()
+
 
     # 确保数据框有必需的列
     if "text" not in df.columns:
         print(f"[ERROR] 数据框缺少 'text' 列，现有列: {list(df.columns)}")
         # 尝试从其他列创建text列
-        text_cols = ['content', 'abstract', '标题', '摘要', '内容', 
+        text_cols = ['content', 'abstract', '标题', '摘要', '内容',
                     'title', '专利名称', '发明名称', 'name', '专利标题', '名称',
                     'title_cn', 'abstract_first']
         for col in text_cols:
@@ -1710,13 +1989,78 @@ def process_events(df, use_api=True, batch_size=5, cache_path=None, refresh_cach
     if not refresh_cache:
         cached_df = load_event_cache(cache_path, expected_ids=expected_ids)
         if cached_df is not None and not cached_df.empty:
+            cached_df = _renormalize_cached_events_with_source(cached_df, source_df, domain_lexicon=domain_lexicon)
             return cached_df.reindex(columns=event_columns, fill_value=None)
 
     if use_api and _api_config_available():
         texts = source_df["text"].tolist()
-        print(f"[事件抽取] 使用API，文本数量: {len(texts)}，批次大小: {batch_size}")
-        extracted_events = batch_extract_event_with_api(texts, batch_size=batch_size)
-        print(f"[事件抽取] API调用完成，事件数量: {len(extracted_events)}")
+
+        # 1. 查找文档级缓存
+        doc_level_dir = _get_doc_level_cache_dir(cache_path) if (cache_path and not refresh_cache) else None
+
+        cached_events_by_idx = {}
+        miss_indices = []
+        miss_texts = []
+
+        for idx, text in enumerate(texts):
+            doc_hash = hashlib.sha1(str(text).encode("utf-8", errors="ignore")).hexdigest()
+            cached_events = _load_doc_cache(doc_hash, doc_level_dir)
+            if cached_events is not None:
+                cached_events_by_idx[idx] = cached_events
+            else:
+                miss_indices.append(idx)
+                miss_texts.append(text)
+
+        extracted_events = []
+
+        # 2. 如果有未命中的，调用 API 进行批量提取
+        if miss_texts:
+            print(f"[事件抽取] 使用API，总文献数: {len(texts)}，缓存命中: {len(cached_events_by_idx)}，未命中(需调用API): {len(miss_texts)}，批次大小: {batch_size}")
+            api_extracted = batch_extract_event_with_api(miss_texts, batch_size=batch_size)
+
+            # 将提取出的事件归类到对应的 miss_indices 中
+            extracted_by_miss_idx = {}
+            for event in api_extracted:
+                try:
+                    local_index = int(event.get("_source_text_index"))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if 0 <= local_index < len(miss_texts):
+                    orig_idx = miss_indices[local_index]
+                    extracted_by_miss_idx.setdefault(orig_idx, []).append(event)
+
+            # 保存结果到文档级缓存中，并写入 extracted_events
+            for miss_idx, orig_idx in enumerate(miss_indices):
+                events_for_doc = extracted_by_miss_idx.get(orig_idx, [])
+
+                # 剥离 _source_text_index 并深度复制以保存到独立缓存文件
+                cleaned_events = []
+                for ev in events_for_doc:
+                    ev_copy = dict(ev)
+                    ev_copy.pop("_source_text_index", None)
+                    cleaned_events.append(ev_copy)
+
+                if doc_level_dir:
+                    doc_hash = hashlib.sha1(str(miss_texts[miss_idx]).encode("utf-8", errors="ignore")).hexdigest()
+                    _save_doc_cache(doc_hash, cleaned_events, doc_level_dir)
+
+                # 将原始事件（包含临时 _source_text_index）放入当前总提取列表中用于归档
+                for ev in events_for_doc:
+                    # 必须重设 _source_text_index 指向原始 DataFrame 中的行索引
+                    ev_copy = dict(ev)
+                    ev_copy["_source_text_index"] = orig_idx
+                    extracted_events.append(ev_copy)
+        else:
+            print(f"[事件抽取] 使用API，全部命中缓存({len(texts)}/{len(texts)})，跳过API请求")
+
+        # 3. 将缓存中命中的事件也加入总结果，并设置正确的 _source_text_index
+        for orig_idx, events_for_doc in cached_events_by_idx.items():
+            for ev in events_for_doc:
+                ev_copy = dict(ev)
+                ev_copy["_source_text_index"] = orig_idx
+                extracted_events.append(ev_copy)
+
+        print(f"[事件抽取] API及缓存阶段处理完成，待归档事件数: {len(extracted_events)}")
         normalized_events = []
         per_doc_counts = {}
         max_events_per_doc = _event_extraction_max_events_per_doc()
@@ -1760,6 +2104,7 @@ def process_events(df, use_api=True, batch_size=5, cache_path=None, refresh_cach
                         row,
                         doc_event_index=per_doc_counts[source_id],
                         source_extraction_mode=source_mode,
+                        domain_lexicon=domain_lexicon,
                     )
                 )
         if filtered_total or trimmed_total:
@@ -1789,7 +2134,7 @@ def process_events(df, use_api=True, batch_size=5, cache_path=None, refresh_cach
     for _, row in source_df.iterrows():
         source_id = str(row.get("id", ""))
         doc_events, filtered_count, trimmed_count = _filter_events_for_doc(
-            extract_events(row["text"], use_api=False),
+            extract_events(row["text"], use_api=False, domain_lexicon=domain_lexicon),
             max_events_per_doc=max_events_per_doc,
             min_confidence=min_confidence,
         )
@@ -1803,6 +2148,7 @@ def process_events(df, use_api=True, batch_size=5, cache_path=None, refresh_cach
                     row,
                     doc_event_index=per_doc_counts[source_id],
                     source_extraction_mode="local",
+                    domain_lexicon=domain_lexicon,
                 )
             )
     if filtered_total or trimmed_total:
@@ -1822,54 +2168,3 @@ def process_events(df, use_api=True, batch_size=5, cache_path=None, refresh_cach
         },
     )
     return events_df
-
-
-def summarize_events(events_df):
-    """生成展示版可直接使用的事件层摘要。"""
-    if events_df is None or events_df.empty:
-        return {
-            "event_count": 0,
-            "technology_hit_rate": 0.0,
-            "scene_hit_rate": 0.0,
-            "weak_signal_candidate_ratio": 0.0,
-            "low_attention_ratio": 0.0,
-            "niche_actor_ratio": 0.0,
-            "non_dominant_ratio": 0.0,
-            "traceable_ratio": 0.0,
-            "known_subject_ratio": 0.0,
-            "known_action_ratio": 0.0,
-        }
-
-    def _known_ratio(series):
-        cleaned = series.astype(str).str.strip()
-        return round((cleaned != "未知").mean(), 2)
-
-    technology_hit_rate = round(
-        events_df["technology"].apply(
-            lambda items: bool(items and any(str(item).strip() and str(item).strip() != "未知" for item in items))
-            if isinstance(items, list) else str(items).strip() not in {"", "未知"}
-        ).mean(),
-        2,
-    ) if "technology" in events_df.columns else 0.0
-
-    scene_hit_rate = _known_ratio(events_df["scene"]) if "scene" in events_df.columns else 0.0
-    known_subject_ratio = _known_ratio(events_df["subject"]) if "subject" in events_df.columns else 0.0
-    known_action_ratio = _known_ratio(events_df["action"]) if "action" in events_df.columns else 0.0
-    weak_signal_candidate_ratio = round(events_df.get("weak_signal_event_candidate", pd.Series(dtype=bool)).fillna(False).mean(), 2)
-    low_attention_ratio = round(events_df.get("low_attention_hint", pd.Series(dtype=bool)).fillna(False).mean(), 2)
-    niche_actor_ratio = round(events_df.get("niche_actor_hint", pd.Series(dtype=bool)).fillna(False).mean(), 2)
-    non_dominant_ratio = round(events_df.get("non_dominant_hint", pd.Series(dtype=bool)).fillna(False).mean(), 2)
-    traceable_ratio = round(events_df.get("traceable_hint", pd.Series(dtype=bool)).fillna(False).mean(), 2)
-
-    return {
-        "event_count": int(len(events_df)),
-        "technology_hit_rate": technology_hit_rate,
-        "scene_hit_rate": scene_hit_rate,
-        "weak_signal_candidate_ratio": weak_signal_candidate_ratio,
-        "low_attention_ratio": low_attention_ratio,
-        "niche_actor_ratio": niche_actor_ratio,
-        "non_dominant_ratio": non_dominant_ratio,
-        "traceable_ratio": traceable_ratio,
-        "known_subject_ratio": known_subject_ratio,
-        "known_action_ratio": known_action_ratio,
-    }

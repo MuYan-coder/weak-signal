@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Dict, Iterable, List
-from urllib.parse import quote_plus
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List
 
 
 TECH_ALIASES: Dict[str, List[str]] = {
@@ -291,41 +290,6 @@ NON_SHELL_TASK_TOKENS = {
 }
 
 
-@dataclass(frozen=True)
-class TopicBundle:
-    topic: str
-    canonical_topic: str
-    research_mode: str
-    rss_feeds: List[str]
-    rss_keywords: List[str]
-    filter_keywords: List[str]
-    arxiv_query: str
-    patent_query: str
-    note: str
-
-
-TOPIC_PRESETS: Dict[str, Dict[str, List[str] | str]] = {
-    "ai": {
-        "aliases": ["ai", "artificial intelligence", "machine learning", "robotics", "large language model", "multimodal", "foundation model"],
-        "validation_aliases": ["world model", "embodied intelligence"],
-        "rss_queries": ["artificial intelligence", "machine learning robotics"],
-        "note": "AI 主题当前最完整，RSS、论文和专利链路都围绕 AI 领域设计。",
-    },
-    "new_energy": {
-        "aliases": ["new energy", "renewable energy", "energy storage", "battery", "photovoltaic", "wind power", "hydrogen energy"],
-        "validation_aliases": ["solid-state battery", "sodium-ion battery", "perovskite solar", "hydrogen storage", "grid storage"],
-        "rss_queries": ["new energy", "renewable energy battery"],
-        "note": "新能源主题已接入主题化 RSS 检索，但论文与专利侧仍是更稳定的主通道。",
-    },
-}
-
-
-DEFAULT_RSS_FEEDS = [
-    "https://www.technologyreview.com/feed/",
-    "https://www.wired.com/feed/category/science/latest/rss",
-]
-
-
 def aliases_for(term: str) -> List[str]:
     canonical = str(term).strip().lower()
     aliases = TECH_ALIASES.get(canonical, [])
@@ -385,29 +349,6 @@ def extract_data_modifier_tokens(*texts: str) -> List[str]:
 
 def extract_method_modifier_tokens(*texts: str) -> List[str]:
     return _extract_canonical_terms(texts, METHOD_MODIFIER_ALIASES)
-
-
-def _scope_alias_token_set(scopes: Iterable[str]) -> set[str]:
-    tokens: set[str] = set()
-    for scope in scopes:
-        for alias in aliases_for(scope):
-            tokens.update(tokenize_signal_phrase(alias))
-    return tokens
-
-
-def strip_scope_and_shell_tokens(text: str, scopes: Iterable[str]) -> List[str]:
-    scope_tokens = _scope_alias_token_set(scopes)
-    tokens = tokenize_signal_phrase(text)
-    filtered = []
-    for token in tokens:
-        if token in scope_tokens:
-            continue
-        if token in SCOPE_ECHO_SHELL_TOKENS:
-            continue
-        if token in CONNECTOR_TERMS or token in DISCOVERY_STOPWORDS:
-            continue
-        filtered.append(token)
-    return filtered
 
 
 def is_scope_echo_candidate(
@@ -718,109 +659,9 @@ def normalize_technologies(items: Iterable[str], fallback_text: str = "") -> Lis
     return normalized or ["未知"]
 
 
-def is_broad_term(term: str) -> bool:
-    canonical = canonicalize_term(term)
-    return canonical in BROAD_TECH_TERMS
-
-
 def is_observation_scope(term: str) -> bool:
     canonical = canonicalize_term(term)
     return canonical in OBSERVATION_SCOPE_SET
-
-
-def _phrase_tokenize(text: str) -> List[str]:
-    return re.findall(r"[a-zA-Z][a-zA-Z0-9\-]+", str(text or "").lower())
-
-
-def _contains_alias_window(tokens: List[str], alias_tokens: List[str], start: int, end: int) -> bool:
-    window = tokens[start:end]
-    alias_len = len(alias_tokens)
-    if alias_len == 0 or len(window) < alias_len:
-        return False
-    for idx in range(len(window) - alias_len + 1):
-        if window[idx:idx + alias_len] == alias_tokens:
-            return True
-    return False
-
-
-def _is_specific_scope_candidate_phrase(phrase: str, scope: str) -> bool:
-    normalized = _normalize_text_key(phrase)
-    if not normalized or normalized == scope or normalized in BROAD_TECH_TERMS:
-        return False
-
-    tokens = [token for token in normalized.replace("-", " ").split() if token]
-    if len(tokens) < 2:
-        return False
-
-    if tokens[0] in DISCOVERY_STOPWORDS | {"this", "that", "these", "those"}:
-        return False
-    if tokens[-1] in DISCOVERY_STOPWORDS | CONNECTOR_TERMS:
-        return False
-
-    alias_tokens = set(scope.replace("-", " ").split())
-    extra_tokens = [token for token in tokens if token not in alias_tokens]
-    context_terms = SCOPE_CONTEXT_TERMS.get(scope, set())
-    if not any(token in context_terms for token in extra_tokens):
-        return False
-    if any(token not in context_terms and token not in CONNECTOR_TERMS for token in extra_tokens):
-        return False
-
-    if len(tokens) >= 3:
-        return True
-
-    if any(token in context_terms for token in tokens) and any(token in CONNECTOR_TERMS for token in tokens):
-        return True
-
-    if "-" in normalized or len(normalized) >= 24:
-        return True
-
-    return False
-
-
-def discover_scope_candidates(text: str, scopes: Iterable[str], limit: int = 6) -> List[str]:
-    scopes = [scope for scope in scopes if scope in OBSERVATION_SCOPE_SET]
-    if not scopes:
-        return []
-
-    tokens = _phrase_tokenize(text)
-    if not tokens:
-        return []
-
-    discovered = []
-    seen = set()
-
-    for scope in scopes:
-        for alias in aliases_for(scope):
-            alias_tokens = _phrase_tokenize(alias)
-            if not alias_tokens:
-                continue
-
-            alias_len = len(alias_tokens)
-            for idx in range(len(tokens) - alias_len + 1):
-                if tokens[idx:idx + alias_len] != alias_tokens:
-                    continue
-
-                left_bound = max(0, idx - 2)
-                right_bound = min(len(tokens), idx + alias_len + 3)
-                for left in range(left_bound, idx + 1):
-                    for right in range(idx + alias_len, right_bound + 1):
-                        if not _contains_alias_window(tokens, alias_tokens, left, right):
-                            continue
-                        phrase_tokens = tokens[left:right]
-                        if len(phrase_tokens) <= alias_len:
-                            continue
-                        phrase = " ".join(phrase_tokens)
-                        normalized = _normalize_text_key(phrase)
-                        if normalized in seen:
-                            continue
-                        if not _is_specific_scope_candidate_phrase(normalized, scope):
-                            continue
-                        seen.add(normalized)
-                        discovered.append(normalized)
-                        if len(discovered) >= limit:
-                            return discovered
-
-    return discovered
 
 
 def discover_candidate_terms(text: str, limit: int = 6) -> List[str]:
@@ -856,69 +697,533 @@ def discover_candidate_terms(text: str, limit: int = 6) -> List[str]:
     return candidates
 
 
-def keyword_match(*texts: str, keywords: Iterable[str]) -> bool:
-    keywords = [str(keyword).strip().lower() for keyword in keywords if str(keyword).strip()]
-    if not keywords:
-        return True
+def _list_values(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        values: List[str] = []
+        for item in value:
+            values.extend(_list_values(item))
+        return values
+    if isinstance(value, dict):
+        for key in ("term", "name", "value", "canonical", "canonical_term", "pattern_id"):
+            if value.get(key):
+                return [str(value.get(key)).strip()]
+        return []
+    text = str(value).strip()
+    return [text] if text else []
 
-    haystack = " ".join(str(text or "").lower() for text in texts)
-    for keyword in keywords:
-        if keyword in haystack:
-            return True
-        for alias in aliases_for(keyword):
-            if alias in haystack:
+
+def _dedupe_text(values: Iterable[Any]) -> List[str]:
+    seen = set()
+    deduped: List[str] = []
+    for value in values or []:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = normalize_signal_phrase(text)
+        if not key or key in seen:
+            continue
+        deduped.append(text)
+        seen.add(key)
+    return deduped
+
+
+def _alias_map_from_terms(values: Iterable[Any]) -> Dict[str, List[str]]:
+    alias_map: Dict[str, List[str]] = {}
+    for value in _list_values(list(values or [])):
+        text = str(value or "").strip()
+        if not text:
+            continue
+        alias_map[text] = _dedupe_text([text])
+    return alias_map
+
+
+def _pack_section(pack: Any, name: str) -> Dict[str, Any]:
+    if pack is None:
+        return {}
+    if isinstance(pack, dict):
+        value = pack.get(name, {})
+    else:
+        value = getattr(pack, name, {})
+    return value if isinstance(value, dict) else {}
+
+
+def _pack_value(pack: Any, name: str, default: Any = "") -> Any:
+    if pack is None:
+        return default
+    if isinstance(pack, dict):
+        return pack.get(name, default)
+    return getattr(pack, name, default)
+
+
+def _coerce_pack(domain_source: Any) -> Any:
+    if domain_source is None:
+        return None
+    if hasattr(domain_source, "domain_pack"):
+        return getattr(domain_source, "domain_pack")
+    return domain_source
+
+
+def _matches_alias_map(texts: Iterable[Any], alias_map: Dict[str, List[str]]) -> List[str]:
+    haystack = " ".join(normalize_signal_phrase(text) for text in texts or [] if str(text or "").strip())
+    if not haystack:
+        return []
+    matched: List[str] = []
+    for canonical, aliases in alias_map.items():
+        terms = _dedupe_text([canonical, *(aliases or [])])
+        if any((alias_norm := normalize_signal_phrase(alias)) and alias_norm in haystack for alias in terms):
+            matched.append(canonical)
+    return matched
+
+
+@dataclass
+class DomainLexicon:
+    pack_id: str = "neutral"
+    pack_name: str = ""
+    use_legacy_robot_rules: bool = False
+    observation_scope_aliases: Dict[str, List[str]] = field(default_factory=dict)
+    mechanism_aliases: Dict[str, List[str]] = field(default_factory=dict)
+    task_aliases: Dict[str, List[str]] = field(default_factory=dict)
+    object_aliases: Dict[str, List[str]] = field(default_factory=dict)
+    data_aliases: Dict[str, List[str]] = field(default_factory=dict)
+    method_aliases: Dict[str, List[str]] = field(default_factory=dict)
+    scene_aliases: Dict[str, List[str]] = field(default_factory=dict)
+    generic_terms: List[str] = field(default_factory=list)
+    shell_terms: List[str] = field(default_factory=list)
+    off_domain_terms: List[str] = field(default_factory=list)
+    valid_candidate_patterns: List[Dict[str, Any]] = field(default_factory=list)
+    invalid_candidate_patterns: List[Dict[str, Any]] = field(default_factory=list)
+    minimum_specificity_rule: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def observation_scopes(self) -> List[str]:
+        return list(self.observation_scope_aliases.keys())
+
+    @property
+    def domain_specific_terms(self) -> List[str]:
+        values: List[str] = []
+        for alias_map in [
+            self.object_aliases,
+            self.mechanism_aliases,
+            self.task_aliases,
+            self.data_aliases,
+            self.method_aliases,
+            self.scene_aliases,
+        ]:
+            values.extend(alias_map.keys())
+        return _dedupe_text(values)
+
+    def aliases_for(self, term: str) -> List[str]:
+        if self.use_legacy_robot_rules:
+            return aliases_for(term)
+        canonical = str(term or "").strip()
+        if not canonical:
+            return []
+        for alias_map in [
+            self.observation_scope_aliases,
+            self.object_aliases,
+            self.mechanism_aliases,
+            self.task_aliases,
+            self.data_aliases,
+            self.method_aliases,
+            self.scene_aliases,
+        ]:
+            if canonical in alias_map:
+                return _dedupe_text([canonical, *alias_map.get(canonical, [])])
+        return [canonical]
+
+    def canonicalize_term(self, term: str) -> str:
+        if self.use_legacy_robot_rules:
+            return canonicalize_term(term)
+        raw = str(term or "").strip()
+        if not raw:
+            return ""
+        normalized = normalize_signal_phrase(raw)
+        for alias_map in [
+            self.observation_scope_aliases,
+            self.object_aliases,
+            self.mechanism_aliases,
+            self.task_aliases,
+            self.data_aliases,
+            self.method_aliases,
+            self.scene_aliases,
+        ]:
+            for canonical, aliases in alias_map.items():
+                terms = _dedupe_text([canonical, *(aliases or [])])
+                if any(normalize_signal_phrase(alias) == normalized for alias in terms):
+                    return canonical
+        return raw
+
+    def _matches_off_domain(self, text: str) -> bool:
+        if not self.off_domain_terms:
+            return False
+        haystack = normalize_signal_phrase(text)
+        return any((term_norm := normalize_signal_phrase(term)) and term_norm in haystack for term in self.off_domain_terms)
+
+    def is_off_domain_term(self, text: str) -> bool:
+        normalized = normalize_signal_phrase(text)
+        if not normalized:
+            return False
+        return any(normalize_signal_phrase(term) == normalized for term in self.off_domain_terms)
+
+    def detect_supported_observation_scopes(self, text: str) -> List[str]:
+        if self.use_legacy_robot_rules:
+            return detect_supported_observation_scopes(text)
+        if self._matches_off_domain(text):
+            return []
+        return _matches_alias_map([text], self.observation_scope_aliases)
+
+    def diagnose_observation_scope_detection(
+        self,
+        text: str,
+        source_type: str = "",
+        mechanism_tokens: Iterable[str] | None = None,
+        task_tokens: Iterable[str] | None = None,
+        object_tokens: Iterable[str] | None = None,
+        data_tokens: Iterable[str] | None = None,
+        scene_tokens: Iterable[str] | None = None,
+        method_tokens: Iterable[str] | None = None,
+    ) -> Dict[str, object]:
+        if self.use_legacy_robot_rules:
+            return diagnose_observation_scope_detection(
+                text,
+                source_type=source_type,
+                mechanism_tokens=mechanism_tokens,
+                task_tokens=task_tokens,
+                object_tokens=object_tokens,
+                data_tokens=data_tokens,
+                scene_tokens=scene_tokens,
+                method_tokens=method_tokens,
+            )
+
+        haystack = normalize_signal_phrase(text)
+        direct_matches: List[str] = []
+        alias_matches: Dict[str, List[str]] = {}
+        for scope, aliases in self.observation_scope_aliases.items():
+            scope_norm = normalize_signal_phrase(scope)
+            if scope_norm and scope_norm in haystack:
+                direct_matches.append(scope)
+            matched_aliases = [
+                alias
+                for alias in aliases or []
+                if (alias_norm := normalize_signal_phrase(alias))
+                and alias_norm in haystack
+                and alias_norm != scope_norm
+            ]
+            if matched_aliases:
+                alias_matches[scope] = matched_aliases[:3]
+
+        off_domain_hit = self._matches_off_domain(text)
+        supported_scopes = [] if off_domain_hit else self.detect_supported_observation_scopes(text)
+        rejected_scopes = [
+            scope
+            for scope in set(direct_matches) | set(alias_matches.keys())
+            if scope not in supported_scopes
+        ]
+        if supported_scopes:
+            reason = "domain_pack_scope_alias"
+        elif off_domain_hit:
+            reason = "domain_pack_off_domain_term"
+        elif rejected_scopes:
+            reason = "domain_pack_scope_alias_rejected"
+        else:
+            reason = "domain_pack_no_scope_match"
+        return {
+            "supported_scopes": supported_scopes,
+            "scope_match_mode": "domain_pack_explicit" if supported_scopes else "",
+            "direct_matches": direct_matches,
+            "alias_matches": alias_matches,
+            "rejected_scopes": rejected_scopes,
+            "proxy_scopes": [],
+            "reason": reason,
+        }
+
+    def extract_mechanism_core_tokens(self, *texts: str) -> List[str]:
+        if self.use_legacy_robot_rules:
+            return extract_mechanism_core_tokens(*texts)
+        return _matches_alias_map(texts, self.mechanism_aliases)
+
+    def extract_task_constraint_tokens(self, *texts: str) -> List[str]:
+        if self.use_legacy_robot_rules:
+            return extract_task_constraint_tokens(*texts)
+        return _matches_alias_map(texts, self.task_aliases)
+
+    def extract_scene_tokens(self, *texts: str) -> List[str]:
+        if self.use_legacy_robot_rules:
+            return extract_scene_tokens(*texts)
+        return _matches_alias_map(texts, self.scene_aliases)
+
+    def extract_object_modifier_tokens(self, *texts: str) -> List[str]:
+        if self.use_legacy_robot_rules:
+            return extract_object_modifier_tokens(*texts)
+        return _matches_alias_map(texts, self.object_aliases)
+
+    def extract_data_modifier_tokens(self, *texts: str) -> List[str]:
+        if self.use_legacy_robot_rules:
+            return extract_data_modifier_tokens(*texts)
+        return _matches_alias_map(texts, self.data_aliases)
+
+    def extract_method_modifier_tokens(self, *texts: str) -> List[str]:
+        if self.use_legacy_robot_rules:
+            return extract_method_modifier_tokens(*texts)
+        return _matches_alias_map(texts, self.method_aliases)
+
+    def extract_technologies(self, text: str) -> List[str]:
+        if self.use_legacy_robot_rules:
+            return extract_technologies(text)
+        values: List[str] = []
+        for alias_map in [
+            self.object_aliases,
+            self.mechanism_aliases,
+            self.task_aliases,
+            self.scene_aliases,
+            self.observation_scope_aliases,
+        ]:
+            values.extend(_matches_alias_map([text], alias_map))
+        values = [value for value in _dedupe_text(values) if not self.is_generic_or_shell(value)]
+        return values or ["unknown"]
+
+    def normalize_technologies(self, items: Iterable[str], fallback_text: str = "") -> List[str]:
+        if self.use_legacy_robot_rules:
+            return normalize_technologies(items, fallback_text=fallback_text)
+        normalized: List[str] = []
+        seen = set()
+        for item in items or []:
+            canonical = self.canonicalize_term(str(item or "").strip())
+            if not canonical or canonical.lower() in {"unknown", "none", "n/a"}:
+                continue
+            if self.is_off_domain_term(canonical):
+                continue
+            if self.is_generic_or_shell(canonical):
+                continue
+            key = normalize_signal_phrase(canonical)
+            if key not in seen:
+                normalized.append(canonical)
+                seen.add(key)
+        for item in self.extract_technologies(fallback_text):
+            if item.lower() == "unknown" or self.is_off_domain_term(item) or self.is_generic_or_shell(item):
+                continue
+            key = normalize_signal_phrase(item)
+            if key not in seen:
+                normalized.append(item)
+                seen.add(key)
+        return normalized or ["unknown"]
+
+    def is_observation_scope(self, term: str) -> bool:
+        if self.use_legacy_robot_rules:
+            return is_observation_scope(term)
+        canonical = self.canonicalize_term(term)
+        return canonical in self.observation_scope_aliases
+
+    def has_robot_domain_anchor(self, text: str) -> bool:
+        if self.use_legacy_robot_rules:
+            return has_robot_domain_anchor(text)
+        return bool(self.detect_supported_observation_scopes(text) or self.extract_technologies(text) != ["unknown"])
+
+    def has_non_scope_constraint(
+        self,
+        task_tokens: Iterable[str] | None = None,
+        object_tokens: Iterable[str] | None = None,
+        data_tokens: Iterable[str] | None = None,
+        scene_tokens: Iterable[str] | None = None,
+        mechanism_tokens: Iterable[str] | None = None,
+        method_tokens: Iterable[str] | None = None,
+    ) -> bool:
+        if self.use_legacy_robot_rules:
+            return has_non_scope_constraint(task_tokens, object_tokens, data_tokens, scene_tokens, mechanism_tokens, method_tokens)
+        for value in [
+            *(task_tokens or []),
+            *(object_tokens or []),
+            *(data_tokens or []),
+            *(scene_tokens or []),
+            *(mechanism_tokens or []),
+            *(method_tokens or []),
+        ]:
+            text = str(value or "").strip()
+            if text and not self.is_generic_or_shell(text) and not self.is_observation_scope(text):
                 return True
-    return False
+        return False
+
+    def is_scope_echo_candidate(
+        self,
+        text: str,
+        scopes: Iterable[str],
+        mechanism_tokens: Iterable[str] | None = None,
+        task_tokens: Iterable[str] | None = None,
+    ) -> bool:
+        if self.use_legacy_robot_rules:
+            return is_scope_echo_candidate(text, scopes, mechanism_tokens=mechanism_tokens, task_tokens=task_tokens)
+        if mechanism_tokens:
+            return False
+        if any(token and not self.is_generic_or_shell(token) for token in task_tokens or []):
+            return False
+        text_norm = normalize_signal_phrase(text)
+        if not text_norm:
+            return True
+        scope_or_shell = _dedupe_text([*(scopes or []), *self.generic_terms, *self.shell_terms])
+        stripped = text_norm
+        for term in scope_or_shell:
+            term_norm = normalize_signal_phrase(term)
+            if term_norm:
+                stripped = stripped.replace(term_norm, " ")
+        return not stripped.strip()
+
+    def is_generic_or_shell(self, term: str) -> bool:
+        normalized = normalize_signal_phrase(term)
+        if not normalized:
+            return True
+        for value in [*self.generic_terms, *self.shell_terms]:
+            value_norm = normalize_signal_phrase(value)
+            if value_norm and normalized == value_norm:
+                return True
+        return False
+
+    def match_terms(self, alias_map: Dict[str, List[str]], *texts: str) -> List[str]:
+        return _matches_alias_map(texts, alias_map)
+
+    def candidate_slot_hits(
+        self,
+        task_tokens: Iterable[str] | None = None,
+        object_tokens: Iterable[str] | None = None,
+        data_tokens: Iterable[str] | None = None,
+        scene_tokens: Iterable[str] | None = None,
+        mechanism_tokens: Iterable[str] | None = None,
+        method_tokens: Iterable[str] | None = None,
+    ) -> Dict[str, bool]:
+        return {
+            "technical_object": any(not self.is_generic_or_shell(value) for value in object_tokens or []),
+            "mechanism": any(not self.is_generic_or_shell(value) for value in mechanism_tokens or []),
+            "performance": any(not self.is_generic_or_shell(value) for value in task_tokens or []),
+            "task": any(not self.is_generic_or_shell(value) for value in task_tokens or []),
+            "data_modality": any(not self.is_generic_or_shell(value) for value in data_tokens or []),
+            "data": any(not self.is_generic_or_shell(value) for value in data_tokens or []),
+            "method": any(not self.is_generic_or_shell(value) for value in method_tokens or []),
+            "scene": any(not self.is_generic_or_shell(value) for value in scene_tokens or []),
+        }
+
+    def valid_candidate_pattern_matches(
+        self,
+        task_tokens: Iterable[str] | None = None,
+        object_tokens: Iterable[str] | None = None,
+        data_tokens: Iterable[str] | None = None,
+        scene_tokens: Iterable[str] | None = None,
+        mechanism_tokens: Iterable[str] | None = None,
+        method_tokens: Iterable[str] | None = None,
+        *,
+        evidence_present: bool = True,
+    ) -> bool:
+        if self.use_legacy_robot_rules:
+            return False
+        slot_hits = self.candidate_slot_hits(
+            task_tokens=task_tokens,
+            object_tokens=object_tokens,
+            data_tokens=data_tokens,
+            scene_tokens=scene_tokens,
+            mechanism_tokens=mechanism_tokens,
+            method_tokens=method_tokens,
+        )
+        for pattern in self.valid_candidate_patterns:
+            if not isinstance(pattern, dict):
+                continue
+            if pattern.get("evidence_required") and not evidence_present:
+                continue
+            required_slots = [str(slot or "").strip() for slot in pattern.get("required_slots", []) if str(slot or "").strip()]
+            min_required = int(pattern.get("min_required_slot_count", len(required_slots)) or len(required_slots))
+            hit_count = sum(1 for slot in required_slots if slot_hits.get(slot, False))
+            if hit_count >= min_required:
+                return True
+        return False
 
 
-def build_or_query(keywords: Iterable[str]) -> str:
-    items = [str(keyword).strip() for keyword in keywords if str(keyword).strip()]
-    filtered_items = [item for item in items if len(item) > 2 or " " in item]
-    items = filtered_items or items
-    return " OR ".join(f'"{item}"' for item in items)
+def build_domain_lexicon(domain_source: Any = None) -> DomainLexicon:
+    pack = _coerce_pack(domain_source)
+    pack_id = str(_pack_value(pack, "pack_id", "neutral") or "neutral").strip() or "neutral"
+    pack_name = str(_pack_value(pack, "pack_name", pack_id) or pack_id).strip()
+    use_legacy = pack_id == "humanoid_robot"
 
+    if use_legacy:
+        return DomainLexicon(
+            pack_id=pack_id,
+            pack_name=pack_name,
+            use_legacy_robot_rules=True,
+            observation_scope_aliases={scope: aliases_for(scope) for scope in OBSERVATION_SCOPE_TERMS},
+            mechanism_aliases=MECHANISM_CORE_ALIASES,
+            task_aliases=TASK_CONSTRAINT_ALIASES,
+            object_aliases=OBJECT_MODIFIER_ALIASES,
+            data_aliases=DATA_MODIFIER_ALIASES,
+            method_aliases=METHOD_MODIFIER_ALIASES,
+            scene_aliases={term: [term] for term in SCENE_TOKEN_SET},
+        )
 
-def build_google_news_rss(query: str) -> str:
-    encoded = quote_plus(query)
-    return f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
+    search_strategy = _pack_section(pack, "search_strategy")
+    observation_scopes = _pack_section(pack, "observation_scopes")
+    candidate_formation = _pack_section(pack, "candidate_formation")
+    domain_identity = _pack_section(pack, "domain_identity")
+    source = _pack_section(pack, "source")
+    source_query = source.get("based_on_user_input", {}) if isinstance(source.get("based_on_user_input", {}), dict) else {}
+    evidence_rules = _pack_section(pack, "evidence_rules")
 
+    main_scope = str(
+        observation_scopes.get("main_scope")
+        or domain_identity.get("field_name")
+        or source_query.get("field_name")
+        or ""
+    ).strip()
+    scope_alias_values = _dedupe_text(
+        [
+            main_scope,
+            *_list_values(observation_scopes.get("sub_scopes")),
+            *_list_values(observation_scopes.get("scope_aliases")),
+            *_list_values(observation_scopes.get("scope_echo_terms")),
+            *_list_values(search_strategy.get("core_keywords")),
+            *_list_values(search_strategy.get("synonyms")),
+            *_list_values(search_strategy.get("english_terms")),
+            domain_identity.get("field_name", ""),
+            source_query.get("field_name", ""),
+        ]
+    )
+    observation_scope_aliases: Dict[str, List[str]] = {}
+    if main_scope:
+        observation_scope_aliases[main_scope] = scope_alias_values or [main_scope]
+    for sub_scope in _list_values(observation_scopes.get("sub_scopes")):
+        sub_scope = str(sub_scope or "").strip()
+        if sub_scope and sub_scope not in observation_scope_aliases:
+            observation_scope_aliases[sub_scope] = _dedupe_text([sub_scope])
 
-def build_topic_bundle(topic: str, research_mode: str) -> TopicBundle:
-    canonical_topic = canonicalize_topic(topic)
-    preset = TOPIC_PRESETS.get(canonical_topic)
-    clean_topic = str(topic).strip() or "AI"
+    data_method_terms = _list_values(candidate_formation.get("data_or_method_types"))
+    generic_terms = _dedupe_text(candidate_formation.get("generic_terms", []))
+    shell_terms = _dedupe_text(candidate_formation.get("shell_terms", []))
+    off_domain_terms = _dedupe_text(
+        [
+            *_list_values(observation_scopes.get("off_domain_anchor_terms")),
+            *_list_values(search_strategy.get("exclude_terms")),
+            *_list_values(domain_identity.get("out_of_scope_domains")),
+            *_list_values(evidence_rules.get("evidence_rejection_patterns")),
+        ]
+    )
 
-    if preset:
-        discovery_terms = [str(item) for item in preset["aliases"]]
-        validation_terms = [str(item) for item in preset["validation_aliases"]]
-        rss_queries = [str(item) for item in preset.get("rss_queries", [])]
-        note = str(preset["note"])
-    else:
-        discovery_terms = [clean_topic]
-        validation_terms = [clean_topic]
-        rss_queries = [clean_topic]
-        note = "当前主题使用通用构造规则，建议优先从论文与专利侧扩展。"
-
-    if research_mode == "discovery":
-        filter_keywords: List[str] = []
-        rss_keywords: List[str] = []
-        query_terms = discovery_terms
-    else:
-        filter_keywords = validation_terms
-        rss_keywords = validation_terms
-        query_terms = validation_terms
-
-    rss_feeds = [build_google_news_rss(query) for query in rss_queries[:2]]
-    rss_feeds.extend(DEFAULT_RSS_FEEDS)
-
-    return TopicBundle(
-        topic=clean_topic,
-        canonical_topic=canonical_topic,
-        research_mode=research_mode,
-        rss_feeds=rss_feeds,
-        rss_keywords=rss_keywords,
-        filter_keywords=filter_keywords,
-        arxiv_query=build_or_query(query_terms),
-        patent_query=build_or_query(query_terms),
-        note=note,
+    valid_patterns = candidate_formation.get("valid_candidate_patterns", [])
+    invalid_patterns = candidate_formation.get("invalid_candidate_patterns", [])
+    return DomainLexicon(
+        pack_id=pack_id,
+        pack_name=pack_name,
+        use_legacy_robot_rules=False,
+        observation_scope_aliases=observation_scope_aliases,
+        mechanism_aliases=_alias_map_from_terms(candidate_formation.get("mechanism_types", [])),
+        task_aliases=_alias_map_from_terms(candidate_formation.get("task_or_performance_types", [])),
+        object_aliases=_alias_map_from_terms(candidate_formation.get("technical_object_types", [])),
+        data_aliases=_alias_map_from_terms(data_method_terms),
+        method_aliases=_alias_map_from_terms(data_method_terms),
+        scene_aliases=_alias_map_from_terms(candidate_formation.get("scene_or_application_types", [])),
+        generic_terms=generic_terms,
+        shell_terms=shell_terms,
+        off_domain_terms=off_domain_terms,
+        valid_candidate_patterns=valid_patterns if isinstance(valid_patterns, list) else [],
+        invalid_candidate_patterns=invalid_patterns if isinstance(invalid_patterns, list) else [],
+        minimum_specificity_rule=(
+            candidate_formation.get("minimum_specificity_rule", {})
+            if isinstance(candidate_formation.get("minimum_specificity_rule", {}), dict)
+            else {}
+        ),
     )
