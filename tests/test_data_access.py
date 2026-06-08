@@ -243,12 +243,12 @@ class DataAccessTests(unittest.TestCase):
                     if self.s_type == "paper":
                         rows.append({
                             "id": f"paper_{idx}",
-                            "title": f"重复文献标题_{idx}",
-                            "abstract": f"摘要内容 {i}",
+                            "title": f"AI 重复文献标题_{idx}",
+                            "abstract": f"AI 摘要内容 {i}",
                             "event_time": "2025-01-01",
                             "collect_source_name": "MySQL",
                             "authors": "作者",
-                            "keyword": "关键词",
+                            "keyword": "AI",
                             "url": f"http://test.com/paper_{idx}"
                         })
                     else:

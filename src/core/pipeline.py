@@ -1886,13 +1886,25 @@ class AnalysisPipeline:
 
     def _score_event_quality(self, events_df: pd.DataFrame, raw_data: pd.DataFrame) -> pd.DataFrame:
         """为每条事件生成质量分。"""
-        event_quality_df = build_event_quality_table(events_df, raw_data)
+        from src.extraction.tech_lexicon import build_domain_lexicon
+        domain_lexicon = build_domain_lexicon(getattr(self, "domain_context", None) or getattr(self, "domain_pack", None))
+        event_quality_df = build_event_quality_table(events_df, raw_data, domain_lexicon=domain_lexicon)
         self.latest_event_quality_df = event_quality_df.copy()
         return event_quality_df
 
     def _form_candidates(self, events_df: pd.DataFrame, raw_data: pd.DataFrame) -> pd.DataFrame:
         """候选成形"""
-        return build_candidate_forms(events_df, raw_data, domain_context=self.domain_context)
+        events_for_candidates = self._ensure_dataframe(events_df)
+        if (
+            "tech_relevance_score" not in events_for_candidates.columns
+            and isinstance(self.latest_event_quality_df, pd.DataFrame)
+            and not self.latest_event_quality_df.empty
+        ):
+            events_for_candidates = merge_event_quality_into_events(
+                events_for_candidates,
+                self.latest_event_quality_df,
+            )
+        return build_candidate_forms(events_for_candidates, raw_data, domain_context=self.domain_context)
 
     def _apply_candidate_event_quality(
         self,
@@ -4322,6 +4334,11 @@ class AnalysisPipeline:
         """保存所有结果"""
         result_dir = Path(result_dir)
         result_dir.mkdir(parents=True, exist_ok=True)
+        signal_generation_diagnostics = (
+            dict(signals_df.get("diagnostics", {}))
+            if isinstance(signals_df, dict) and isinstance(signals_df.get("diagnostics"), dict)
+            else {}
+        )
         save_domain_pack_snapshot(self.domain_context.domain_pack, result_dir=result_dir)
         self._copy_domain_pack_dry_run_snapshot(result_dir)
 
@@ -4356,6 +4373,16 @@ class AnalysisPipeline:
         signal_evidence_links_df = self._build_signal_evidence_links(signals_df, source_documents_df)
         signal_reliability_df = self._build_signal_reliability_table(signals_df, signal_evidence_links_df)
         signals_df = self._apply_signal_reliability_gate(signals_df, signal_reliability_df)
+        if signal_generation_diagnostics:
+            signal_generation_diagnostics["saved_candidate_count"] = int(len(signals_df))
+            signal_generation_diagnostics["confirmed_weak_signal_count"] = int(
+                (
+                    signals_df.get("confirmed_signal_type", pd.Series(dtype="object")).astype(str)
+                    == "confirmed_weak_signal"
+                ).sum()
+            ) if not signals_df.empty else 0
+            signal_generation_diagnostics["evidence_link_count"] = int(len(signal_evidence_links_df))
+            signal_generation_diagnostics["signal_reliability_count"] = int(len(signal_reliability_df))
         source_documents_df = self._attach_domain_metadata(source_documents_df)
         signal_evidence_links_df = self._attach_domain_metadata(signal_evidence_links_df)
         signal_reliability_df = self._attach_domain_metadata(signal_reliability_df)
@@ -4466,6 +4493,12 @@ class AnalysisPipeline:
                     str(raw_response),
                     encoding="utf-8",
                 )
+
+        if signal_generation_diagnostics:
+            (result_dir / "signal_generation_diagnostics.json").write_text(
+                json.dumps(signal_generation_diagnostics, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
         (result_dir / "report_metadata.json").write_text(
             json.dumps(self._report_metadata_payload(temporal_validation_df), ensure_ascii=False, indent=2),

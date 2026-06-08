@@ -6,9 +6,16 @@
 
 ## 当前版本
 
-- 当前发布版本：`0.02`
-- 目标发布标签：`v0.02`
-- v0.02 主线聚焦弱信号识别与持续观测，保留时间验证，移除当前项目暂不需要的技术链映射和关键核心技术识别主流程。
+- 当前发布版本：`0.04`
+- 目标发布标签：`v0.04`
+- v0.04 主线聚焦 Domain Pack 通用化、生成复核、领域隔离、候选命名质量防护和信号生成诊断，继续保留弱信号识别、时间验证与持续观测主流程。
+- 本版新增功能说明：
+  - Domain Pack 生成流程升级为分阶段缓存、结构化修复、基础校验与运行包复用，生成结果保存到 `memory/domain_packs/`。
+  - Web 入口新增领域运行包生成、preset 选择、历史运行包载入、规则预览、数据源推荐数量和人工确认闸口。
+  - 事件抽取、事件质量、候选成形和信号生成统一读取 Domain Pack 领域锚点、排除词、壳词和候选范式，减少默认人形机器人规则泄漏。
+  - 候选命名增加壳词/泛词防护、离域过滤、技术名回退与诊断字段，避免将应用场景或通用方法误提升为弱信号名称。
+  - 分析结果保存 Domain Pack 快照和 `signal_generation_diagnostics.json`，历史续跑与报告重生成可恢复运行包上下文。
+  - 新增 Phase 8/9 泛化回归、legacy 清理审计、数据源推荐数量和候选质量防护相关测试。
 - v2.6 验收参考目录：`result/20260430_100821_v26_final_validation`
 
 ## 项目架构
@@ -25,6 +32,7 @@ tf_agent/
     ├── core/
     │   ├── agent.py           # 对外智能体封装
     │   └── pipeline.py        # 主分析流水线
+    ├── domain/                # Domain Pack schema、生成、校验、复核与保存
     ├── extraction/
     │   ├── event_schema.py       # 事件 schema 契约、回填与读写工具
     │   ├── event_extractor.py
@@ -48,6 +56,7 @@ tf_agent/
     │   ├── llm_client.py
     │   └── semantic_utils.py
     ├── config/
+    │   ├── domain_packs/      # preset Domain Pack，例如 neutral 与 humanoid_robot
     │   ├── object_family_canonicalization.yaml
     │   └── object_family_registry.yaml
     └── data/
@@ -89,6 +98,18 @@ Web 页面运行：
 ```bash
 streamlit run web_app.py
 ```
+
+## Domain Pack 工作流
+
+系统采用“通用主流程 + 领域运行包 Domain Pack”的运行方式。主流程不默认任何具体技术领域；缺失 Domain Pack 时只使用 `neutral` pack。人形机器人经验已经迁移为 `src/config/domain_packs/humanoid_robot.yaml` preset，只有用户显式选择该 preset 时才启用对应旧规则。
+
+Domain Pack 的推荐使用流程：
+
+1. 生成：在 Web 入口输入任意技术领域、关键词、排除词和数据源后，点击生成 Domain Pack。运行期生成结果保存到 `memory/domain_packs/`，不写入 `src/config/`。
+2. 校验：生成结果必须通过 schema validator；字段缺失、候选壳层词比例过高、dry-run 报告缺失或 hash 不一致时不得进入主流程。
+3. 复核：Web 页面展示 Domain Pack 摘要、推荐数据源数量、dry-run 质量结论和人工确认状态。用户编辑后必须重新 dry-run，或显式标记 `manual_override`。
+4. 复用：可以从 `memory/domain_packs/` 复用已有运行包，或显式选择源码 preset。进入 Pipeline 的是同一份 `DomainContext`，后续抽取、候选、评分、主题细化、对象族归一和报告都读取它。
+5. 版本化：Domain Pack 内容变化后必须重新计算 `domain_pack_hash`，并递增或重新生成 `domain_pack_version`。正式分析结果会在 `result/<run_id>/domain_pack.yaml` 保存快照，并在事件、候选、评分和报告元数据中记录 `domain_pack_id`、`domain_pack_version` 与 `domain_pack_hash`，历史续跑和报告重生成优先恢复该快照。
 
 ## 环境变量
 

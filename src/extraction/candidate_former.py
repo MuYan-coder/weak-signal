@@ -21,6 +21,7 @@ from .tech_lexicon import (
     extract_task_constraint_tokens,
     has_non_scope_constraint,
     normalize_proxy_token,
+    normalize_signal_phrase,
 )
 
 
@@ -103,6 +104,14 @@ DISPLAY_WEAK_SCOPE_TOKENS = {"embodied", "interactive", "agent"}
 WORLD_MODEL_WEAK_LABELS = {"智能体", "机器人", "视觉", "视频", "驾驶", "多模态", "三维", "交互", "导航", "操控", "决策"}
 PATENT_FRIENDLY_CONSTRAINT_KEYS = {"task_constraint_tokens", "object_modifier_tokens", "data_modifier_tokens"}
 DISPLAY_SHELL_WORDS = ("机制", "范式", "体系", "能力")
+DISPLAY_NARRATIVE_MARKERS = (
+    "通过", "利用", "可以", "能够", "实现", "显著", "从而",
+    "取得", "用于", "针对", "提出", "发布", "开发", "形成",
+)
+GENERIC_METHOD_ONLY_DISPLAY_NAMES = {
+    "训练技术", "控制技术", "规划技术", "仿真技术",
+    "训练方法", "控制方法", "规划方法", "仿真方法",
+}
 SCOPE_SHELL_TASK_TOKENS = {"agent", "embodied", "interactive", "control"}
 SCOPE_SHELL_OBJECT_TOKENS = {"agent", "environment", "control", "memory", "policy"}
 SCOPE_SHELL_DATA_TOKENS = {"simulation", "video", "visual"}
@@ -158,6 +167,28 @@ DISPLAY_TASK_SURFACE_PATTERNS = [
 ]
 MANIPULATOR_DISPLAY_SURFACES = {"双臂", "灵巧手", "夹爪", "机械臂", "机械臂机器人"}
 BRIDGED_OBJECT_SURFACES = {"双臂", "灵巧手", "夹爪"}
+
+
+def _clean_shell_dominated_term(term, domain_lexicon):
+    t = str(term or "").strip()
+    if not t:
+        return ""
+    if domain_lexicon.is_generic_or_shell(t):
+        return ""
+    shell_words = ["性能", "应用", "效果", "数据", "方法", "技术", "场景", "系统", "performance", "application", "effect", "data", "method", "technology", "scene", "system"]
+    changed = True
+    while changed:
+        changed = False
+        for sw in shell_words:
+            if t.lower().endswith(sw.lower()) and len(t) > len(sw):
+                t = t[:-len(sw)].strip("-")
+                changed = True
+            if t.lower().startswith(sw.lower()) and len(t) > len(sw):
+                t = t[len(sw):].strip("-")
+                changed = True
+    if not t or domain_lexicon.is_generic_or_shell(t) or len(t) <= 1:
+        return ""
+    return t
 
 
 def _dedupe_preserve_order(values):
@@ -682,9 +713,16 @@ def _fallback_slot_labels(values):
 
 
 def _compose_tech_object_slot(unit):
+    domain_lexicon = unit.get("domain_lexicon")
+    if not domain_lexicon:
+        domain_lexicon = build_domain_lexicon(unit.get("domain_pack") or unit.get("domain_context"))
+
+    def _clean(val):
+        return _clean_shell_dominated_term(val, domain_lexicon)
+
     explicit_surface = str(unit.get("preferred_object_surface", "")).strip()
     if explicit_surface:
-        return explicit_surface
+        return _clean(explicit_surface)
 
     object_labels = _strong_slot_labels(unit.get("object_modifier_tokens", []), "object_modifier_tokens")
     task_labels = _strong_slot_labels(unit.get("task_constraint_tokens", []), "task_constraint_tokens")
@@ -695,21 +733,24 @@ def _compose_tech_object_slot(unit):
     primary_task = task_labels[0] if task_labels else ""
     primary_data = data_labels[0] if data_labels else ""
 
+    res = ""
     if primary_object and primary_task and primary_task not in primary_object:
-        return f"{primary_object}{primary_task}"
-    if primary_object:
-        return primary_object
-    if primary_task:
-        return primary_task
-    if primary_data:
-        return primary_data
+        res = f"{primary_object}{primary_task}"
+    elif primary_object:
+        res = primary_object
+    elif primary_task:
+        res = primary_task
+    elif primary_data:
+        res = primary_data
+    else:
+        fallback_objects = _fallback_slot_labels(unit.get("object_modifier_tokens", []))
+        fallback_tasks = _fallback_slot_labels(unit.get("task_constraint_tokens", []))
+        for label in fallback_objects + fallback_tasks:
+            if label and label not in TECH_OBJECT_GENERIC_LABELS:
+                res = label
+                break
 
-    fallback_objects = _fallback_slot_labels(unit.get("object_modifier_tokens", []))
-    fallback_tasks = _fallback_slot_labels(unit.get("task_constraint_tokens", []))
-    for label in fallback_objects + fallback_tasks:
-        if label and label not in TECH_OBJECT_GENERIC_LABELS:
-            return label
-    return ""
+    return _clean(res)
 
 
 def _refine_tech_object_slot(unit, tech_object_slot, capability_slot="", process_slot="", application_slot=""):
@@ -746,21 +787,36 @@ def _compose_capability_slot(unit, tech_object_slot=""):
 
 
 def _compose_process_slot(unit):
+    domain_lexicon = unit.get("domain_lexicon")
+    if not domain_lexicon:
+        domain_lexicon = build_domain_lexicon(unit.get("domain_pack") or unit.get("domain_context"))
+
     data_labels = _strong_slot_labels(unit.get("data_modifier_tokens", []), "data_modifier_tokens")
     method_labels = _strong_slot_labels(unit.get("method_modifier_tokens", []), "method_modifier_tokens")
     mechanism_label = _label_for_token(unit.get("mechanism_core", ""), prefer_zh=True)
     primary_data = "-".join(data_labels[:2]) if len(data_labels) >= 2 else (data_labels[0] if data_labels else "")
 
+    res = ""
     if primary_data and mechanism_label:
-        return f"{primary_data}驱动"
-    if method_labels:
+        res = f"{primary_data}驱动"
+    elif method_labels:
         method_label = method_labels[0]
         if method_label in PROCESS_METHOD_PREFIXES and mechanism_label:
-            return f"{method_label}{mechanism_label}"
-        return f"{method_label}方法"
-    if primary_data:
-        return primary_data
-    return ""
+            res = f"{method_label}{mechanism_label}"
+        else:
+            res = f"{method_label}方法"
+    elif primary_data:
+        res = primary_data
+
+    if not res:
+        return ""
+    temp = res
+    for suffix in ["驱动", "方法"]:
+        if temp.endswith(suffix):
+            temp = temp[:-len(suffix)]
+    if not temp or domain_lexicon.is_generic_or_shell(temp) or domain_lexicon.is_generic_or_shell(res):
+        return ""
+    return res
 
 
 def _compose_carrier_slot(unit):
@@ -1364,12 +1420,22 @@ def _technical_item_profile(unit):
 
 
 def _technical_object_name_from_slots(unit, include_suffix=True):
+    domain_lexicon = unit.get("domain_lexicon")
+    if not domain_lexicon:
+        domain_lexicon = build_domain_lexicon(unit.get("domain_pack") or unit.get("domain_context"))
+
     slots = _build_technical_object_slots(unit)
     tech_object_slot = slots["tech_object_slot"]
     capability_slot = slots["capability_slot"]
     process_slot = slots["process_slot"]
     carrier_slot = slots["carrier_slot"]
     application_slot = slots["application_slot"]
+
+    non_empty_slots = [str(slots.get(k, "")).strip() for k in ["tech_object_slot", "capability_slot", "process_slot", "carrier_slot", "application_slot"]]
+    non_empty_slots = [s for s in non_empty_slots if s]
+    if non_empty_slots and all(domain_lexicon.is_generic_or_shell(s) for s in non_empty_slots):
+        return ""
+
     item_profile = _technical_item_profile({**unit, **slots})
 
     if not tech_object_slot and not capability_slot:
@@ -1456,7 +1522,7 @@ def _technical_object_name_from_slots(unit, include_suffix=True):
             if any(item_name.endswith(word) for word in ("训练", "规划", "控制", "推理", "仿真", "校准", "压缩", "蒸馏", "对齐", "操控")):
                 item_name = f"{item_name}技术"
         if item_name:
-            return item_name
+            return _compact_display_candidate_label(item_name, {**unit, **slots})
 
     prefix = ""
     if process_slot.endswith("驱动") and carrier_slot:
@@ -1479,15 +1545,20 @@ def _technical_object_name_from_slots(unit, include_suffix=True):
         capability_phrase = capability_phrase[len(object_phrase):]
     object_phrase = _preferred_object_phrase(unit, object_phrase, capability_phrase=capability_phrase)
     if object_phrase and prefix:
-        prefix_anchor = prefix.removeprefix("基于").removesuffix("的")
+        prefix_anchor = prefix.removeprefix("基于").removeprefix("采用").removesuffix("的")
         reduced_object_phrase = _subtract_compound(object_phrase, prefix_anchor)
         if reduced_object_phrase != object_phrase:
             object_phrase = reduced_object_phrase
             if not object_phrase and prefix.startswith("基于"):
                 prefix = prefix_anchor
     if prefix:
-        prefix_anchor = prefix.removeprefix("基于").removesuffix("的")
-        capability_phrase = _strip_prefix_overlap(capability_phrase, prefix_anchor.replace("-", ""))
+        prefix_anchor = prefix.removeprefix("基于").removeprefix("采用").removesuffix("的")
+        compact_prefix_anchor = re.sub(r"[\s_\-]+", "", prefix_anchor)
+        compact_capability = re.sub(r"[\s_\-]+", "", capability_phrase)
+        if compact_prefix_anchor and compact_prefix_anchor == compact_capability:
+            capability_phrase = ""
+        else:
+            capability_phrase = _strip_prefix_overlap(capability_phrase, prefix_anchor.replace("-", "")).strip()
     display_application_slot = str(application_slot or "").strip()
     preferred_task_surface = _display_title_task_surface(unit)
     if preferred_task_surface and preferred_task_surface not in object_phrase and preferred_task_surface not in capability_phrase:
@@ -1502,7 +1573,7 @@ def _technical_object_name_from_slots(unit, include_suffix=True):
     ):
         capability_phrase = f"{display_application_slot}{capability_phrase}"
 
-    prefix_anchor = prefix.removeprefix("基于").removesuffix("的") if prefix else ""
+    prefix_anchor = prefix.removeprefix("基于").removeprefix("采用").removesuffix("的") if prefix else ""
     if (
         prefix.startswith("基于")
         and object_phrase in PRIMARY_GENERIC_OBJECT_LABELS
@@ -1533,7 +1604,9 @@ def _technical_object_name_from_slots(unit, include_suffix=True):
     if include_suffix and name and not name.endswith(("技术", "方法", "系统", "模块")):
         if any(name.endswith(word) for word in ("训练", "规划", "控制", "推理", "仿真", "校准", "压缩", "蒸馏", "对齐")):
             name = f"{name}技术"
-    return name
+    if name and domain_lexicon.is_generic_or_shell(name):
+        return ""
+    return _compact_display_candidate_label(name, {**unit, **slots})
 
 
 def _stable_object_key_basis(unit):
@@ -1568,6 +1641,65 @@ def _stable_object_id_from_basis(basis):
     return f"obj::{hashlib.md5(text.encode('utf-8')).hexdigest()[:10]}"
 
 
+def _strip_narrative_display_tail(text, max_chars=32):
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"[，。；;:：]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    for marker in DISPLAY_NARRATIVE_MARKERS:
+        idx = value.find(marker)
+        if idx >= 4:
+            value = value[:idx].strip()
+            break
+    value = value.replace("过程中", "过程").replace("过程中的", "过程")
+    value = value.strip(" ，,。.;；:：")
+    if len(value) > max_chars:
+        value = value[:max_chars].strip(" ，,。.;；:：")
+    return value
+
+
+def _compact_display_candidate_label(text, unit=None, max_chars=32):
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    needs_compaction = len(value) > max_chars or any(marker in value for marker in DISPLAY_NARRATIVE_MARKERS)
+    if not needs_compaction:
+        return value
+
+    unit = unit or {}
+    components = []
+    for key in ["tech_object_slot", "process_slot", "capability_slot"]:
+        component = _strip_narrative_display_tail(unit.get(key, ""), max_chars=18)
+        if component and component not in "".join(components):
+            components.append(component)
+    if components:
+        compact = "".join(_dedupe_preserve_order(components)).strip()
+        compact = _strip_narrative_display_tail(compact, max_chars=max_chars)
+        if compact:
+            return compact
+    return _strip_narrative_display_tail(value, max_chars=max_chars)
+
+
+def _is_generic_method_only_display_name(name, unit, domain_lexicon=None):
+    text = str(name or "").strip()
+    if not text:
+        return False
+    normalized = normalize_signal_phrase(text)
+    generic_names = {normalize_signal_phrase(item) for item in GENERIC_METHOD_ONLY_DISPLAY_NAMES}
+    mechanism = str((unit or {}).get("mechanism_core", "")).strip()
+    mechanism_label = MECHANISM_LABELS.get(mechanism, _label_for_token(mechanism, prefer_zh=True))
+    mechanism_only = mechanism_label and text in {mechanism_label, f"{mechanism_label}技术", f"{mechanism_label}方法"}
+    if normalized not in generic_names and not mechanism_only:
+        return False
+    if domain_lexicon is None:
+        domain_lexicon = build_domain_lexicon((unit or {}).get("domain_pack") or (unit or {}).get("domain_context"))
+    if domain_lexicon is None or domain_lexicon.use_legacy_robot_rules:
+        return False
+    context = _surface_hint_context(unit or {}, extra_text=text)
+    return not domain_lexicon.has_domain_anchor(context)
+
+
 def _stable_object_label(unit):
     slots = _build_technical_object_slots(unit)
     subject = str(slots.get("tech_object_slot", "")).strip() or str(slots.get("application_slot", "")).strip()
@@ -1590,13 +1722,14 @@ def _stable_object_label(unit):
             label = f"{label}技术"
 
     if label:
-        return label
+        return _compact_display_candidate_label(label, {**unit, **slots})
 
-    return (
+    return _compact_display_candidate_label(
         str(unit.get("display_candidate_name", "")).strip()
         or str(unit.get("topic_summary_name", "")).strip()
         or str(unit.get("canonical_candidate_name_en", "")).strip()
-        or str(unit.get("normalized_candidate_text", "")).strip()
+        or str(unit.get("normalized_candidate_text", "")).strip(),
+        {**unit, **slots},
     )
 
 
@@ -1607,6 +1740,7 @@ def _sanitize_display_candidate_name(name, unit):
     # 这里不激进删词；壳词问题通过 display_candidate_name_issue 暴露给诊断表。
     for shell_word in DISPLAY_SHELL_WORDS:
         text = text.replace(f"{shell_word}{shell_word}", shell_word)
+    text = _compact_display_candidate_label(text, unit)
     source_type = str(unit.get("source_type", "")).strip().lower()
     if source_type != "patent":
         return text
@@ -1641,6 +1775,17 @@ def _display_candidate_name_issue(name, unit):
         issues.append("scope_shell_heavy")
     if not bool(profile.get("survives_without_scope", False)):
         issues.append("scope_dependent")
+    # 使用 domain lexicon 检测名称是否被 shell/generic 词主导（Layer 4 防护）
+    domain_lexicon = unit.get("domain_lexicon")
+    if domain_lexicon is None:
+        domain_lexicon = build_domain_lexicon(unit.get("domain_pack") or unit.get("domain_context"))
+    if domain_lexicon and not domain_lexicon.use_legacy_robot_rules:
+        if domain_lexicon.is_generic_or_shell(text):
+            issues.append("shell_term_dominated")
+        elif mechanism_label and text.endswith(mechanism_label):
+            core = text[: -len(mechanism_label)].strip()
+            if core and domain_lexicon.is_generic_or_shell(core):
+                issues.append("core_is_shell")
     return "；".join(_dedupe_preserve_order(issues))
 
 
@@ -3140,6 +3285,22 @@ def _domain_pack_candidate_trace(unit, domain_lexicon=None):
     ]
     text = " ".join(str(part or "") for part in text_parts if str(part or "").strip())
 
+    if domain_lexicon._matches_off_domain(text):
+        has_in_domain = False
+        text_norm = normalize_signal_phrase(text)
+        for term in domain_lexicon.domain_specific_terms:
+            term_norm = normalize_signal_phrase(term)
+            if term_norm and term_norm in text_norm:
+                has_in_domain = True
+                break
+        if not has_in_domain:
+            return {
+                "domain_pack_candidate_rule_ids": "off_domain_rejection",
+                "domain_pack_candidate_reason": "off_domain_leakage",
+                "domain_pack_candidate_status": "rejected",
+                "domain_pack_candidate_slot_hits": {},
+            }
+
     slot_hits = {
         "technical_object": _dedupe_preserve_order(
             list(unit.get("object_modifier_tokens", []) or [])
@@ -3191,7 +3352,14 @@ def _domain_pack_candidate_trace(unit, domain_lexicon=None):
         if not isinstance(pattern, dict):
             continue
         reject_terms = pattern.get("reject_terms", [])
-        max_specific = int(pattern.get("max_specific_slot_count", 999) or 999)
+        raw_max_specific = pattern.get("max_specific_slot_count")
+        if raw_max_specific is None or str(raw_max_specific).strip() == "":
+            max_specific = 0 if reject_terms else 999
+        else:
+            try:
+                max_specific = int(raw_max_specific)
+            except (TypeError, ValueError):
+                max_specific = 0 if reject_terms else 999
         if any(_term_in_text(term, text) for term in reject_terms or []) and specific_slot_count <= max_specific:
             pattern_id = str(pattern.get("pattern_id", "")).strip()
             if pattern_id:
@@ -3462,6 +3630,11 @@ def _unit_row(event_id, scope_names, unit, source_type="", domain_lexicon=None):
         domain_lexicon=domain_lexicon,
     )
 
+    if domain_pack_trace.get("domain_pack_candidate_status") == "rejected":
+        if stage == "formed_candidate":
+            stage = "filtered_scope_echo"
+            granularity_input["candidate_stage"] = stage
+
     return {
         "id": event_id,
         "raw_phrase": raw_phrase,
@@ -3577,6 +3750,72 @@ def _unit_row(event_id, scope_names, unit, source_type="", domain_lexicon=None):
     }
 
 
+def _safe_event_float(value, default=None):
+    try:
+        if value is None or pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _event_relevance_text(event_record, context):
+    parts = []
+    for field in [
+        "title", "subject", "action", "technical_object", "mechanism", "task",
+        "problem_solved", "capability_change", "evidence_span", "scene",
+    ]:
+        value = (event_record or {}).get(field, "")
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value if str(item).strip())
+        elif str(value or "").strip():
+            parts.append(str(value).strip())
+    for field in [
+        "technology", "candidate_units", "observation_scopes", "method",
+        "data_modality", "weak_signal_reasons",
+    ]:
+        value = (event_record or {}).get(field, [])
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value if str(item).strip())
+        elif str(value or "").strip():
+            parts.append(str(value).strip())
+    for field in ["source_title", "source_text"]:
+        value = (context or {}).get(field, "")
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value if str(item).strip())
+        elif str(value or "").strip():
+            parts.append(str(value).strip())
+    return " ".join(parts)
+
+
+def _event_passes_domain_relevance_gate(event_record, context, domain_lexicon=None):
+    if domain_lexicon is None or domain_lexicon.use_legacy_robot_rules:
+        return True
+    if "tech_relevance_score" not in (event_record or {}):
+        return True
+    score = _safe_event_float((event_record or {}).get("tech_relevance_score"), default=None)
+    if score is None:
+        return True
+
+    relevance_text = _event_relevance_text(event_record, context)
+    has_domain_anchor = domain_lexicon.has_domain_anchor(relevance_text)
+    has_off_domain_anchor = (
+        bool(domain_lexicon._matches_off_domain(relevance_text))
+        if hasattr(domain_lexicon, "_matches_off_domain")
+        else False
+    )
+    if has_off_domain_anchor and not has_domain_anchor:
+        return False
+    if score >= 5.0:
+        return True
+    if has_domain_anchor and score >= 4.0:
+        return True
+    return False
+
+
 def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain_context=None, domain_pack=None) -> pd.DataFrame:
     domain_lexicon = build_domain_lexicon(domain_context or domain_pack)
     columns = [
@@ -3646,6 +3885,14 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
     event_meta_map = {}
     for _, event in events_df.iterrows():
         event_meta_map[event.get("id")] = event.to_dict()
+
+    candidate_event_records = []
+    for _, event in events_df.iterrows():
+        event_record = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
+        event_id = event_record.get("id")
+        context = source_context_map.get(event_id, {})
+        if _event_passes_domain_relevance_gate(event_record, context, domain_lexicon=domain_lexicon):
+            candidate_event_records.append(event_record)
 
     def _metric_source_type(value):
         text = str(value or "").strip()
@@ -3758,7 +4005,7 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
         }
 
     scope_items_map = {}
-    for _, event in events_df.iterrows():
+    for event in candidate_event_records:
         event_id = event.get("id")
         source_type = source_type_map.get(event_id, str(event.get("source_type", "")))
         context = source_context_map.get(event_id, {})
@@ -3775,11 +4022,11 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
                 }
             )
 
-    for _, event in events_df.iterrows():
+    for event in candidate_event_records:
         event_id = event.get("id")
         source_type = source_type_map.get(event_id, str(event.get("source_type", "")))
         context = source_context_map.get(event_id, {})
-        event_record = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
+        event_record = dict(event or {})
         observation_scopes = _normalize_scope_names(event_record.get("observation_scopes", []))
         if not observation_scopes:
             analysis_scope = _analysis_scope_from_context(context)
@@ -3921,6 +4168,20 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
             if row["candidate_stage"] == "formed_candidate":
                 formed_rows.append(row)
             else:
+                display_name = (
+                    str(row.get("display_candidate_name", "")).strip()
+                    or str(row.get("topic_summary_name", "")).strip()
+                    or str(row.get("stable_object_label", "")).strip()
+                    or str(row.get("normalized_candidate_text", "")).strip()
+                    or str(row.get("raw_candidate_text", "")).strip()
+                )
+                row.update(
+                    _build_metric_payload(
+                        [row],
+                        display_name=display_name,
+                        raw_candidate_text=str(row.get("raw_candidate_text", "")).strip(),
+                    )
+                )
                 rows.append(row)
 
     cluster_groups = {}
@@ -3981,6 +4242,7 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
         if cluster_profile["generic_cluster_risk"] == "high":
             topic_granularity = "scope_internal_candidate"
             topic_granularity_reason = "generic_cluster_high_risk"
+        display_tier = "manual_review" if cluster_profile["generic_cluster_risk"] == "high" else _infer_display_tier(topic_granularity)
         cluster_scope_shell_profile = _scope_shell_profile(representative)
         item_profile = _technical_item_profile(
             {
@@ -3988,7 +4250,7 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
                 **cluster_profile,
             }
         )
-        display_tier = "manual_review" if cluster_profile["generic_cluster_risk"] == "high" else _infer_display_tier(topic_granularity)
+        is_shell_heavy = bool(cluster_scope_shell_profile.get("scope_shell_heavy") or not cluster_scope_shell_profile.get("survives_without_scope"))
         is_strong = bool(
             cluster_evidence_count >= 2
             and display_candidate_name
@@ -3998,6 +4260,7 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
             and topic_granularity == "fine_grained_topic"
             and bool(cluster_scope_shell_profile["survives_without_scope"])
             and cluster_profile["generic_cluster_risk"] != "high"
+            and not is_shell_heavy
         )
         stage = "formed_candidate_strong" if is_strong else "formed_candidate"
         strong_reason = "stable_constraint_signature" if is_strong else "need_more_evidence"
@@ -4008,7 +4271,24 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
         )
         for item in items:
             resolved_display_name = topic_summary_name or display_candidate_name or canonical_name_en
+            generic_method_only_name = _is_generic_method_only_display_name(
+                resolved_display_name,
+                {**representative, **item},
+                domain_lexicon=domain_lexicon,
+            )
             display_candidate_name_issue = _display_candidate_name_issue(resolved_display_name, {**item, **cluster_scope_shell_profile})
+            if generic_method_only_name:
+                display_candidate_name_issue = "；".join(
+                    _dedupe_preserve_order(
+                        [display_candidate_name_issue, "generic_method_only_without_domain_anchor"]
+                    )
+                )
+            output_stage = "filtered_scope_echo" if generic_method_only_name else stage
+            output_topic_granularity = "generic_or_failed" if generic_method_only_name else topic_granularity
+            output_display_tier = "manual_review" if generic_method_only_name else (
+                "hotspot" if is_shell_heavy and display_tier == "weak_signal"
+                else display_tier
+            )
             rows.append(
                 {
                     **item,
@@ -4065,13 +4345,10 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
                     "template_variant_count": max(len(raw_variants) - len(alias_values or [canonical_name_en]), 0),
                     "cluster_evidence_count": cluster_evidence_count,
                     "cluster_item_count": len(items),
-                    "candidate_stage": stage,
-                    "topic_granularity": topic_granularity,
+                    "candidate_stage": output_stage,
+                    "topic_granularity": output_topic_granularity,
                     "topic_granularity_reason": topic_granularity_reason,
-                    "display_tier": (
-                        "weak_signal" if is_strong and topic_granularity == "fine_grained_topic"
-                        else display_tier
-                    ),
+                    "display_tier": output_display_tier,
                     "non_scope_constraint_count": int(cluster_scope_shell_profile["non_scope_constraint_count"]),
                     "survives_without_scope": bool(cluster_scope_shell_profile["survives_without_scope"]),
                     "scope_shell_heavy": bool(cluster_scope_shell_profile["scope_shell_heavy"]),

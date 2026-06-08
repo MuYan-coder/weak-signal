@@ -163,6 +163,10 @@ def _event_extraction_batch_size():
     return max(1, value)
 
 
+def _event_extraction_model():
+    return os.getenv("EXTRACTION_MODEL", os.getenv("OPENAI_MODEL", "Qwen/Qwen2.5-7B-Instruct"))
+
+
 
 
 def _timeout_fallback_to_local_enabled():
@@ -733,6 +737,8 @@ def _build_candidate_unit(
     mechanism_core_tokens = _dedupe_preserve_order(
         mechanism_tokens or domain_lexicon.extract_mechanism_core_tokens(action_text, raw_candidate_text)
     )
+    if not domain_lexicon.use_legacy_robot_rules:
+        mechanism_core_tokens = [tok for tok in mechanism_core_tokens if domain_lexicon.is_valid_mechanism_core(tok)]
     task_constraint_tokens = _dedupe_preserve_order(
         task_tokens or domain_lexicon.extract_task_constraint_tokens(scene_text, raw_candidate_text)
     )
@@ -829,6 +835,21 @@ def _extract_candidate_units(
     combined_text = " ".join(
         part for part in [str(title_text or "").strip(), str(fallback_text or "").strip()] if part
     )
+    if not domain_lexicon.use_legacy_robot_rules and domain_lexicon._matches_off_domain(combined_text):
+        has_in_domain = False
+        text_norm = normalize_signal_phrase(combined_text)
+        for term in domain_lexicon.domain_specific_terms:
+            term_norm = normalize_signal_phrase(term)
+            if term_norm and term_norm in text_norm:
+                has_in_domain = True
+                break
+        if not has_in_domain:
+            return []
+
+    # P0-F1: domain anchor check -- document must hit at least one domain anchor
+    if not domain_lexicon.use_legacy_robot_rules and not domain_lexicon.has_domain_anchor(combined_text):
+        return []
+
     observation_scopes = observation_scopes or domain_lexicon.detect_supported_observation_scopes(combined_text)
     if not observation_scopes:
         return []
@@ -894,8 +915,9 @@ def _extract_candidate_units(
             domain_lexicon.extract_method_modifier_tokens(action_text, scene_text, snippet)
         )
         has_scope_context = _supports_scope_context(snippet, observation_scopes, domain_lexicon=domain_lexicon)
+        # P0-C1: analysis_field mode requires domain anchor match, not unconditional pass
         if str(scope_match_mode or "").startswith("analysis_field"):
-            has_scope_context = True
+            has_scope_context = domain_lexicon.has_domain_anchor(snippet)
         if source_type == "patent" and scope_match_mode == "proxy_patent":
             has_scope_context = True
 
@@ -1098,6 +1120,10 @@ def _normalize_event_technologies(
             or _freeform_candidate_token(event.get("capability_change"), max_len=80)
             or _freeform_candidate_token(event.get("action"), allow_generic_action=True, max_len=24)
         )
+        # P0-F2: reject sentence-like mechanism_core
+        if mechanism_fallback and not domain_lexicon.use_legacy_robot_rules:
+            if not domain_lexicon.is_valid_mechanism_core(mechanism_fallback):
+                mechanism_fallback = ""
         if mechanism_fallback:
             fallback_mechanisms = [mechanism_fallback]
     if not _clean_event_list(event.get("mechanism_core_tokens")):
@@ -1120,6 +1146,22 @@ def _normalize_event_technologies(
         event["data_modality"] = fallback_data_tokens[:3]
     if not _clean_event_list(event.get("method")) and fallback_method_tokens:
         event["method"] = fallback_method_tokens[:3]
+
+    # B2: domain relevance check after LLM extraction
+    if not domain_lexicon.use_legacy_robot_rules:
+        extracted_tech = " ".join(event.get("technology") or [])
+        extracted_obj = str(event.get("technical_object") or "")
+        extracted_mech = str(event.get("mechanism") or "")
+        extracted_task = str(event.get("task") or "")
+        combined_fields = f"{extracted_tech} {extracted_obj} {extracted_mech} {extracted_task}"
+
+        if not domain_lexicon.has_domain_anchor(combined_fields):
+            try:
+                curr_conf = float(event.get("confidence") or 0.8)
+            except (ValueError, TypeError):
+                curr_conf = 0.8
+            event["confidence"] = min(curr_conf * 0.3, 0.3)
+
     scope_diag = domain_lexicon.diagnose_observation_scope_detection(
         combined_text,
         source_type=source_type,
@@ -1172,10 +1214,21 @@ def _normalize_event_technologies(
     return event
 
 
-def _weak_signal_event_prompt(text):
+def _weak_signal_event_prompt(text, domain_lexicon=None):
+    domain_context = ""
+    if domain_lexicon is not None and not domain_lexicon.use_legacy_robot_rules:
+        domain_context = f"""
+[领域边界约束]
+当前分析领域：{domain_lexicon.pack_name}
+领域核心关键词：{", ".join(domain_lexicon.domain_anchor_terms[:20])}
+必须排除的无关领域：{", ".join(domain_lexicon.off_domain_terms[:15])}
+
+请仅抽取与上述技术领域直接相关的技术事件。如果文本内容完全属于无关领域（如电子商务、网络购物、社会新闻、消费纠纷、金融行情等），或者与上述分析领域无关，请返回空数组 []。
+"""
     return f"""
 你是用于技术预见的弱信号事件抽取器。请从文本中抽取 0 到 N 条有明确原文证据的技术事件。
 只输出纯 JSON 数组，不要添加解释、Markdown、编号或多余文字。没有有效技术事件时输出 []。
+{domain_context}
 
 文本：
 {text}
@@ -1226,10 +1279,21 @@ def _weak_signal_event_prompt(text):
 """
 
 
-def _weak_signal_batch_prompt(items, batch_size):
+def _weak_signal_batch_prompt(items, batch_size, domain_lexicon=None):
+    domain_context = ""
+    if domain_lexicon is not None and not domain_lexicon.use_legacy_robot_rules:
+        domain_context = f"""
+[领域边界约束]
+当前分析领域：{domain_lexicon.pack_name}
+领域核心关键词：{", ".join(domain_lexicon.domain_anchor_terms[:20])}
+必须排除的无关领域：{", ".join(domain_lexicon.off_domain_terms[:15])}
+
+请仅抽取与上述技术领域直接相关的技术事件。对于不包含任何相关核心技术、或者属于无关领域（如电子商务、网络购物、社会新闻、消费纠纷、金融行情等）的文本，请将其对应的事件输出为空，即不输出该文本的任何事件。
+"""
     return f"""
 你是用于技术预见的弱信号事件抽取器。请从下面多个文本中抽取 0 到 N 条有明确原文证据的技术事件。
 只输出纯 JSON 数组，不要添加解释、Markdown、编号或多余文字。
+{domain_context}
 
 文本列表：
 {items}
@@ -1342,13 +1406,14 @@ def _strip_extraction_mapping_fields(event):
     return event
 
 
-def extract_events_with_api(text):
-    prompt = _weak_signal_event_prompt(text)
+def extract_events_with_api(text, domain_lexicon=None, extraction_model=None):
+    extraction_model = extraction_model or _event_extraction_model()
+    prompt = _weak_signal_event_prompt(text, domain_lexicon=domain_lexicon)
 
     try:
         provider, client = get_provider_and_client()
         if client is None or provider is None:
-            event = extract_event_simulate(text)
+            event = extract_event_simulate(text, domain_lexicon=domain_lexicon)
             event["_source_extraction_mode"] = "local"
             return [event]
 
@@ -1372,7 +1437,7 @@ def extract_events_with_api(text):
         parsed = _parse_json_from_response(result)
         if parsed is None:
             print(f"[事件抽取] 无法解析JSON响应: {result[:200]}")
-            event = extract_event_simulate(text)
+            event = extract_event_simulate(text, domain_lexicon=domain_lexicon)
             event["_source_extraction_mode"] = "local"
             return [event]
         records = _event_records_from_parsed(parsed)
@@ -1382,19 +1447,19 @@ def extract_events_with_api(text):
                 continue
             event = _strip_extraction_mapping_fields(record)
             _fix_event_dict(event)
-            _normalize_event_technologies(event, text, text, source_extraction_mode="api")
+            _normalize_event_technologies(event, text, text, source_extraction_mode="api", domain_lexicon=domain_lexicon)
             normalized_records.append(event)
         return normalized_records
     except Exception as e:
         print(f"API调用失败: {e}")
-        event = extract_event_simulate(text)
+        event = extract_event_simulate(text, domain_lexicon=domain_lexicon)
         event["_source_extraction_mode"] = "local"
         return [event]
 
 
-def _extract_batch_worker(batch, start, batch_idx, total_batches, extraction_model):
+def _extract_batch_worker(batch, start, batch_idx, total_batches, extraction_model, domain_lexicon=None):
     items = "\n\n".join([f"编号{idx + 1}: {t}" for idx, t in enumerate(batch)])
-    prompt = _weak_signal_batch_prompt(items, len(batch))
+    prompt = _weak_signal_batch_prompt(items, len(batch), domain_lexicon=domain_lexicon)
 
     provider, client = get_provider_and_client()
     if client is None or provider is None:
@@ -1455,7 +1520,7 @@ def _extract_batch_worker(batch, start, batch_idx, total_batches, extraction_mod
         print(f"[warning] 批量抽取第 {batch_idx} 批次返回内容无法解析，退回逐条抽取")
         print(f"[debug] 原始响应预览：{raw[:800] if raw else 'None'}")
         for idx, text in enumerate(batch):
-            for event in extract_events_with_api(text):
+            for event in extract_events_with_api(text, extraction_model=extraction_model):
                 event["_source_text_index"] = start + idx
                 batch_results.append(event)
         return batch_results
@@ -1465,7 +1530,7 @@ def _extract_batch_worker(batch, start, batch_idx, total_batches, extraction_mod
         if _retry_empty_batch_enabled() and any(_safe_event_text(text) for text in batch):
             print(f"[事件抽取] 批次 {batch_idx} 空批次启用逐条重试，避免批量模式漏抽")
             for idx, text in enumerate(batch):
-                for event in extract_events_with_api(text):
+                for event in extract_events_with_api(text, extraction_model=extraction_model):
                     event["_source_text_index"] = start + idx
                     batch_results.append(event)
         return batch_results
@@ -1486,7 +1551,7 @@ def _extract_batch_worker(batch, start, batch_idx, total_batches, extraction_mod
     if all_missing_doc_index:
         print(f"[warning] 批量抽取第 {batch_idx} 批次返回多事件但缺少 doc_index，退回逐条抽取")
         for idx, text in enumerate(batch):
-            for event in extract_events_with_api(text):
+            for event in extract_events_with_api(text, extraction_model=extraction_model):
                 event["_source_text_index"] = start + idx
                 batch_results.append(event)
         return batch_results
@@ -1502,9 +1567,9 @@ def _extract_batch_worker(batch, start, batch_idx, total_batches, extraction_mod
     return batch_results
 
 
-def _extract_batch_worker_wrapper(batch, start, batch_idx, total_batches, extraction_model):
+def _extract_batch_worker_wrapper(batch, start, batch_idx, total_batches, extraction_model, domain_lexicon=None):
     try:
-        return _extract_batch_worker(batch, start, batch_idx, total_batches, extraction_model)
+        return _extract_batch_worker(batch, start, batch_idx, total_batches, extraction_model, domain_lexicon=domain_lexicon)
     except Exception as e:
         use_local_timeout_fallback = "timed out" in str(e).lower() and _timeout_fallback_to_local_enabled()
         fallback_label = "本地规则兜底" if use_local_timeout_fallback else "逐条抽取"
@@ -1522,14 +1587,18 @@ def _extract_batch_worker_wrapper(batch, start, batch_idx, total_batches, extrac
             fallback_events = []
             single_err = None
             if use_local_timeout_fallback:
-                fallback_events = [extract_event_simulate(text)]
+                fallback_events = [extract_event_simulate(text, domain_lexicon=domain_lexicon)]
             else:
                 try:
-                    fallback_events = extract_events_with_api(text)
+                    fallback_events = extract_events_with_api(
+                        text,
+                        domain_lexicon=domain_lexicon,
+                        extraction_model=extraction_model,
+                    )
                 except Exception as single_err_exc:
                     single_err = single_err_exc
                     print(f"[事件抽取] 逐条降级请求也失败: {single_err}，强制使用本地规则兜底")
-                    fallback_events = [extract_event_simulate(text)]
+                    fallback_events = [extract_event_simulate(text, domain_lexicon=domain_lexicon)]
 
             for event in fallback_events:
                 event["_source_text_index"] = start + idx
@@ -1539,10 +1608,10 @@ def _extract_batch_worker_wrapper(batch, start, batch_idx, total_batches, extrac
         return batch_results
 
 
-def batch_extract_event_with_api(texts, batch_size=5):
+def batch_extract_event_with_api(texts, batch_size=5, domain_lexicon=None):
     results = []
     concurrency = _event_extraction_concurrency()
-    extraction_model = os.getenv("EXTRACTION_MODEL", os.getenv("OPENAI_MODEL", "Qwen/Qwen2.5-7B-Instruct"))
+    extraction_model = _event_extraction_model()
 
     batches = []
     for start in range(0, len(texts), batch_size):
@@ -1555,7 +1624,7 @@ def batch_extract_event_with_api(texts, batch_size=5):
     if concurrency <= 1 or total_batches <= 1:
         for idx, (batch, start) in enumerate(batches):
             batch_idx = idx + 1
-            batch_res = _extract_batch_worker_wrapper(batch, start, batch_idx, total_batches, extraction_model)
+            batch_res = _extract_batch_worker_wrapper(batch, start, batch_idx, total_batches, extraction_model, domain_lexicon=domain_lexicon)
             results.extend(batch_res)
     else:
         futures = {}
@@ -1564,7 +1633,7 @@ def batch_extract_event_with_api(texts, batch_size=5):
                 batch_idx = idx + 1
                 future = executor.submit(
                     _extract_batch_worker_wrapper,
-                    batch, start, batch_idx, total_batches, extraction_model
+                    batch, start, batch_idx, total_batches, extraction_model, domain_lexicon
                 )
                 futures[future] = batch_idx
 
@@ -1802,7 +1871,7 @@ def extract_event_simulate(text, domain_lexicon=None):
 def extract_events(text, use_api=True, domain_lexicon=None):
     domain_lexicon = domain_lexicon or build_domain_lexicon(None)
     if use_api and _api_config_available():
-        return extract_events_with_api(text)
+        return extract_events_with_api(text, domain_lexicon=domain_lexicon)
     return [extract_event_simulate(text, domain_lexicon=domain_lexicon)]
 
 
@@ -2016,7 +2085,7 @@ def process_events(
         # 2. 如果有未命中的，调用 API 进行批量提取
         if miss_texts:
             print(f"[事件抽取] 使用API，总文献数: {len(texts)}，缓存命中: {len(cached_events_by_idx)}，未命中(需调用API): {len(miss_texts)}，批次大小: {batch_size}")
-            api_extracted = batch_extract_event_with_api(miss_texts, batch_size=batch_size)
+            api_extracted = batch_extract_event_with_api(miss_texts, batch_size=batch_size, domain_lexicon=domain_lexicon)
 
             # 将提取出的事件归类到对应的 miss_indices 中
             extracted_by_miss_idx = {}

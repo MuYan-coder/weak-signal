@@ -3,10 +3,13 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
 from src.core.pipeline import AnalysisPipeline
+from src.domain.models import DomainContext, DomainPack
+import src.extraction.event_extractor as event_extractor
 from src.extraction.candidate_former import (
     _naturalized_topic_name,
     _topic_naturalness_reason,
@@ -25,6 +28,7 @@ from src.extraction.event_schema import (
     normalize_event_schema,
 )
 from src.scoring.signal_generator import generate_candidate_outputs
+from src.scoring.topic_refiner import refine_research_scored_candidates
 from src.validation.event_quality import (
     build_event_quality_table,
     merge_event_quality_into_candidates,
@@ -33,6 +37,93 @@ from src.validation.event_quality import (
 
 
 class EventExtractionRefactorTest(unittest.TestCase):
+    def _signal_form_row(self, **overrides):
+        row = {
+            "id": "doc-1",
+            "candidate_stage": "formed_candidate",
+            "signal_type": "weak_signal",
+            "display_candidate_name": "robot planning control",
+            "canonical_candidate_name_en": "robot planning control",
+            "raw_phrase": "robot planning control",
+            "normalized_candidate_text": "robot planning control",
+            "primary_scope": "humanoid robot",
+            "scope_name": "humanoid robot",
+            "scope_names": ["humanoid robot"],
+            "mechanism_core": "planning",
+            "mechanism_core_tokens": ["planning"],
+            "task_constraint_tokens": ["navigation"],
+            "object_modifier_tokens": ["robot"],
+            "data_modifier_tokens": [],
+            "method_modifier_tokens": [],
+            "source_types": ["paper"],
+            "source_count": 1,
+            "cluster_evidence_count": 1,
+            "total_mentions": 1,
+            "org_count": 1,
+            "is_scope_internal_candidate": True,
+            "is_scope_echo": False,
+            "has_mechanism_core": True,
+            "has_non_scope_constraint": True,
+            "topic_granularity": "fine_grained_topic",
+            "display_tier": "weak_signal",
+            "weak_signal_score": 9.0,
+            "hotspot_score": 6.0,
+            "score": 9.0,
+        }
+        row.update(overrides)
+        return row
+
+    def _domain_context(
+        self,
+        *,
+        pack_id,
+        field_name,
+        aliases=None,
+        technical_terms=None,
+        mechanism_terms=None,
+        exclude_terms=None,
+    ):
+        payload = {
+            "schema_version": "domain_pack_v1",
+            "pack_id": pack_id,
+            "pack_name": field_name,
+            "domain_identity": {
+                "field_id": pack_id,
+                "field_name": field_name,
+                "out_of_scope_domains": exclude_terms or [],
+            },
+            "search_strategy": {
+                "core_keywords": technical_terms or [],
+                "synonyms": aliases or [],
+                "exclude_terms": exclude_terms or [],
+            },
+            "observation_scopes": {
+                "main_scope": field_name,
+                "scope_aliases": aliases or [],
+                "off_domain_anchor_terms": exclude_terms or [],
+            },
+            "candidate_formation": {
+                "technical_object_types": technical_terms or [],
+                "mechanism_types": mechanism_terms or [],
+                "generic_terms": ["technology", "method", "system"],
+                "shell_terms": ["technology", "method", "system"],
+                "valid_candidate_patterns": [
+                    {
+                        "pattern_id": "object_mechanism",
+                        "required_slots": ["technical_object", "mechanism"],
+                    }
+                ],
+                "invalid_candidate_patterns": [
+                    {
+                        "pattern_id": "shell_only",
+                        "reject_terms": ["technology"],
+                        "max_specific_slot_count": 0,
+                    }
+                ],
+            },
+        }
+        return DomainContext.from_pack(DomainPack.from_dict(payload))
+
     def test_backfill_marks_legacy_and_native_schema(self):
         events = pd.DataFrame(
             [
@@ -394,6 +485,235 @@ class EventExtractionRefactorTest(unittest.TestCase):
         self.assertNotIn("待收口", name)
         self.assertIn("收口", reason)
 
+    def test_signal_generation_accepts_source_id_only_raw_data_and_preserves_upstream_signal_type(self):
+        forms = pd.DataFrame([self._signal_form_row(id="paper:source-1")])
+        raw = pd.DataFrame(
+            [
+                {
+                    "source_id": "paper:source-1",
+                    "source_type": "paper",
+                    "title": "Robot planning control",
+                    "text": "Robot planning control for humanoid navigation.",
+                }
+            ]
+        )
+
+        output = generate_candidate_outputs(forms, raw)
+        signals = output["candidates_df"]
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals.loc[0, "signal_type"], "weak_signal")
+        self.assertEqual(output["diagnostics"]["id_filled_from_source_id_count"], 1)
+
+    def test_topic_refiner_keeps_rule_technical_name_when_llm_returns_application_surface(self):
+        scored = pd.DataFrame(
+            [
+                self._signal_form_row(
+                    id="robot-app-doc",
+                    display_candidate_name="机器人视觉控制技术",
+                    rule_display_candidate_name="机器人视觉控制技术",
+                    topic_summary_name="机器人视觉控制技术",
+                    candidate_cluster_id="cluster-robot-visual-control",
+                    source_count=2,
+                    cluster_evidence_count=3,
+                    total_mentions=3,
+                    mechanism_core="control",
+                    mechanism_core_tokens=["control"],
+                    task_constraint_tokens=["inspection"],
+                    object_modifier_tokens=["robot"],
+                    data_modifier_tokens=["visual"],
+                    raw_phrase="robot visual control",
+                    raw_phrase_example="robot visual control for inspection",
+                )
+            ]
+        )
+        llm_payload = [
+            {
+                "candidate_key": "cluster-robot-visual-control",
+                "refined_topic_name": "机器人巡检应用",
+                "small_topic_judgment": "small_topic",
+                "small_topic_type": "small_application",
+                "small_topic_pattern": "application+mechanism",
+                "reason": "应用场景更自然",
+            }
+        ]
+
+        with patch("src.scoring.topic_refiner.get_provider_and_client", return_value=("mock", object())), patch(
+            "src.scoring.topic_refiner.chat_text",
+            return_value=(json.dumps(llm_payload, ensure_ascii=False), {"prompt_tokens": 1, "completion_tokens": 1}, None),
+        ), patch("src.scoring.topic_refiner.record_call"):
+            refined = refine_research_scored_candidates(scored, top_k=5, batch_size=5)
+
+        self.assertEqual(refined.loc[0, "display_candidate_name"], "机器人视觉控制技术")
+        self.assertEqual(refined.loc[0, "rule_display_candidate_name"], "机器人视觉控制技术")
+        self.assertEqual(refined.loc[0, "llm_refined_topic_name"], "机器人巡检应用")
+        self.assertEqual(refined.loc[0, "topic_summary_name"], "机器人巡检应用")
+
+    def test_signal_generation_uses_rule_technical_name_over_application_surface(self):
+        forms = pd.DataFrame(
+            [
+                self._signal_form_row(
+                    id="robot-app-doc",
+                    display_candidate_name="机器人巡检应用",
+                    rule_display_candidate_name="机器人视觉控制技术",
+                    topic_summary_name="机器人巡检应用",
+                    llm_refined_topic_name="机器人巡检应用",
+                    llm_small_topic_type="small_application",
+                    llm_small_topic_pattern="application+mechanism",
+                    mechanism_core="control",
+                    mechanism_core_tokens=["control"],
+                    task_constraint_tokens=["inspection"],
+                    object_modifier_tokens=["robot"],
+                    data_modifier_tokens=["visual"],
+                    source_count=2,
+                    cluster_evidence_count=3,
+                    total_mentions=3,
+                    candidate_cluster_id="cluster-robot-visual-control",
+                )
+            ]
+        )
+        raw = pd.DataFrame(
+            [
+                {
+                    "id": "robot-app-doc",
+                    "source_type": "paper",
+                    "title": "Robot visual control for inspection",
+                    "text": "Robot visual control technology supports inspection scenarios.",
+                    "analysis_tech_field_name": "humanoid robot",
+                }
+            ]
+        )
+
+        output = generate_candidate_outputs(forms, raw)
+        signals = output["candidates_df"]
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals.loc[0, "display_candidate_name"], "机器人视觉控制技术")
+        self.assertEqual(signals.loc[0, "tech_name"], "机器人视觉控制技术")
+        self.assertEqual(signals.loc[0, "final_research_object_name"], "机器人视觉控制技术")
+        self.assertEqual(signals.loc[0, "topic_summary_name"], "机器人巡检应用")
+        self.assertEqual(signals.loc[0, "signal_type"], "weak_signal")
+        self.assertEqual(output["diagnostics"]["application_surface_rewritten_count"], 1)
+
+    def test_application_only_surface_does_not_pass_as_technical_weak_signal(self):
+        forms = pd.DataFrame(
+            [
+                self._signal_form_row(
+                    id="robot-only-app-doc",
+                    display_candidate_name="机器人巡检应用",
+                    canonical_candidate_name_en="robot inspection application",
+                    raw_phrase="robot inspection application",
+                    normalized_candidate_text="robot inspection application",
+                    rule_display_candidate_name="",
+                    topic_summary_name="机器人巡检应用",
+                    mechanism_core="",
+                    mechanism_core_tokens=[],
+                    has_mechanism_core=False,
+                    has_non_scope_constraint=True,
+                    task_constraint_tokens=["inspection"],
+                    object_modifier_tokens=["robot"],
+                    data_modifier_tokens=[],
+                    source_count=2,
+                    cluster_evidence_count=3,
+                    total_mentions=3,
+                )
+            ]
+        )
+        raw = pd.DataFrame(
+            [
+                {
+                    "id": "robot-only-app-doc",
+                    "source_type": "news",
+                    "title": "Robot inspection application",
+                    "text": "Robot inspection application appears in deployment reports.",
+                    "analysis_tech_field_name": "humanoid robot",
+                }
+            ]
+        )
+
+        output = generate_candidate_outputs(forms, raw)
+        signals = output["candidates_df"]
+
+        self.assertEqual(len(signals), 1)
+        self.assertNotEqual(signals.loc[0, "signal_type"], "weak_signal")
+        self.assertEqual(signals.loc[0, "technical_name_issue"], "application_only_surface")
+        self.assertEqual(output["diagnostics"]["application_only_rejected_count"], 1)
+
+    def test_domain_pack_terms_prevent_robot_domain_from_being_treated_as_off_domain(self):
+        forms = pd.DataFrame([self._signal_form_row(id="robot-doc")])
+        raw = pd.DataFrame(
+            [
+                {
+                    "id": "robot-doc",
+                    "source_type": "paper",
+                    "title": "Robot planning control",
+                    "text": "Robot planning control for humanoid navigation.",
+                    "analysis_tech_field_name": "humanoid robot",
+                }
+            ]
+        )
+        domain_context = self._domain_context(
+            pack_id="humanoid_robot",
+            field_name="humanoid robot",
+            aliases=["humanoid robot", "bipedal robot"],
+            technical_terms=["humanoid robot", "robot"],
+            mechanism_terms=["planning", "control", "navigation"],
+        )
+
+        signals = generate_candidate_outputs(forms, raw, domain_context=domain_context)["candidates_df"]
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals.loc[0, "display_candidate_name"], "robot planning control")
+        self.assertEqual(signals.loc[0, "signal_type"], "weak_signal")
+
+    def test_domain_pack_scope_aliases_match_space_manufacturing_variants(self):
+        forms = pd.DataFrame(
+            [
+                self._signal_form_row(
+                    id="space-doc",
+                    display_candidate_name="orbital additive manufacturing",
+                    canonical_candidate_name_en="orbital additive manufacturing",
+                    raw_phrase="orbital additive manufacturing",
+                    normalized_candidate_text="orbital additive manufacturing",
+                    primary_scope="orbital manufacturing",
+                    scope_name="orbital manufacturing",
+                    scope_names=["orbital manufacturing"],
+                    mechanism_core="additive manufacturing",
+                    mechanism_core_tokens=["additive manufacturing"],
+                    task_constraint_tokens=["on-orbit assembly"],
+                    object_modifier_tokens=["space station"],
+                )
+            ]
+        )
+        raw = pd.DataFrame(
+            [
+                {
+                    "id": "space-doc",
+                    "source_type": "paper",
+                    "title": "Orbital additive manufacturing",
+                    "text": "A microgravity additive manufacturing route supports on-orbit assembly.",
+                    "analysis_tech_field_name": "space manufacturing",
+                }
+            ]
+        )
+        domain_context = self._domain_context(
+            pack_id="space_manufacturing",
+            field_name="space manufacturing",
+            aliases=["orbital manufacturing", "in-space manufacturing", "microgravity manufacturing"],
+            technical_terms=[
+                "space manufacturing",
+                "orbital manufacturing",
+                "microgravity manufacturing",
+                "space station",
+            ],
+            mechanism_terms=["additive manufacturing", "on-orbit assembly"],
+        )
+
+        signals = generate_candidate_outputs(forms, raw, domain_context=domain_context)["candidates_df"]
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals.loc[0, "analysis_tech_field_name"], "space manufacturing")
+
     def test_signal_generation_filters_to_selected_analysis_domain(self):
         forms = pd.DataFrame(
             [
@@ -622,6 +942,52 @@ class EventExtractionRefactorTest(unittest.TestCase):
         for prompt in prompts:
             for bad_value in forbidden:
                 self.assertNotIn(bad_value, prompt)
+
+    def test_empty_batch_retry_uses_batch_extraction_model_for_single_calls(self):
+        model_name = "Qwen/Qwen2.5-14B-Instruct"
+        responses = iter(
+            [
+                "[]",
+                json.dumps(
+                    [
+                        {
+                            "event_id": "evt_1",
+                            "subject": "上海交通大学团队",
+                            "action": "提出",
+                            "technology": ["钙钛矿薄膜"],
+                            "technical_object": "钙钛矿薄膜界面钝化材料",
+                            "mechanism": "界面钝化",
+                            "task": "提升薄膜稳定性",
+                            "capability_change": "增强器件稳定性",
+                            "weak_signal_reason": "早期材料路线出现",
+                            "uncertainty": "仍需验证",
+                            "evidence_span": "提出钙钛矿薄膜界面钝化材料",
+                            "confidence": 0.82,
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        called_models = []
+
+        def fake_chat_text(*args, **kwargs):
+            called_models.append(kwargs["model"])
+            return next(responses), {"prompt_tokens": 0, "completion_tokens": 0}, {}
+
+        with patch.object(event_extractor, "get_provider_and_client", return_value=("api", object())):
+            with patch.object(event_extractor, "chat_text", side_effect=fake_chat_text):
+                events = event_extractor._extract_batch_worker(
+                    ["上海交通大学团队提出钙钛矿薄膜界面钝化材料。"],
+                    10,
+                    1,
+                    1,
+                    model_name,
+                )
+
+        self.assertEqual(called_models, [model_name, model_name])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["_source_text_index"], 10)
 
     def test_event_filter_applies_confidence_and_max_limit(self):
         previous_max = os.environ.get("EVENT_EXTRACTION_MAX_EVENTS_PER_DOC")

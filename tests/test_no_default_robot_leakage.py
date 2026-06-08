@@ -3,12 +3,17 @@ import unittest
 import pandas as pd
 
 from src.domain import DomainContext, DomainPack, load_domain_context
-from src.extraction.candidate_former import build_candidate_forms
+from src.extraction.candidate_former import _technical_object_name_from_slots, build_candidate_forms
 from src.extraction.event_extractor import process_events
 from src.extraction.tech_lexicon import build_domain_lexicon
 from src.scoring.scorer import score_all_candidates
 from src.scoring.signal_generator import generate_candidate_outputs
 from src.scoring.topic_refiner import _build_prompt, _surface_name_from_evidence
+from src.validation.event_quality import (
+    build_event_quality_table,
+    merge_event_quality_into_candidates,
+    merge_event_quality_into_events,
+)
 
 
 def _battery_pack() -> DomainPack:
@@ -85,6 +90,74 @@ def _battery_pack() -> DomainPack:
 
 def _battery_context() -> DomainContext:
     return DomainContext.from_pack(_battery_pack())
+
+
+def _electronic_materials_pack() -> DomainPack:
+    return DomainPack.from_dict(
+        {
+            "schema_version": "domain_pack_v1",
+            "pack_id": "new_electronic_materials",
+            "pack_name": "新型电子材料 Domain Pack",
+            "pack_version": "generated.v1",
+            "source": {
+                "mode": "llm_generated",
+                "model": "fake-model",
+                "prompt_version": "domain_pack_generator_v3",
+                "based_on_user_input": {
+                    "field_id": "new_electronic_materials",
+                    "field_name": "新型电子材料",
+                    "keywords": ["新型电子材料", "碳化硅", "氮化镓", "二维材料", "钙钛矿"],
+                    "synonyms": ["new electronic materials", "SiC", "GaN", "2D materials", "perovskite"],
+                    "exclude_terms": ["机器人", "具身智能", "训练技术", "控制技术", "规划技术", "仿真技术"],
+                },
+            },
+            "domain_identity": {
+                "field_id": "new_electronic_materials",
+                "field_name": "新型电子材料",
+                "domain_boundary": "宽禁带半导体、二维材料、钙钛矿、拓扑绝缘体等电子材料及其制备、掺杂、外延和器件性能。",
+                "out_of_scope_domains": ["机器人", "具身智能", "通用人工智能训练", "自动驾驶控制"],
+            },
+            "search_strategy": {
+                "core_keywords": ["新型电子材料", "碳化硅", "氮化镓", "二维材料", "钙钛矿", "拓扑绝缘体"],
+                "synonyms": ["new electronic materials", "SiC", "GaN", "2D materials", "perovskite"],
+                "english_terms": ["wide bandgap semiconductor", "2D material", "perovskite"],
+                "exclude_terms": ["机器人", "具身智能", "训练技术", "控制技术", "规划技术", "仿真技术"],
+            },
+            "observation_scopes": {
+                "main_scope": "新型电子材料",
+                "sub_scopes": ["宽禁带半导体", "二维材料", "钙钛矿", "拓扑绝缘体"],
+                "scope_aliases": ["新型电子材料", "电子材料", "SiC", "GaN", "perovskite", "2D materials"],
+                "scope_echo_terms": ["材料", "电子材料", "新材料"],
+                "off_domain_anchor_terms": ["机器人", "具身智能", "训练技术", "控制技术", "规划技术", "仿真技术"],
+            },
+            "candidate_formation": {
+                "technical_object_types": ["碳化硅", "氮化镓", "二维材料", "钙钛矿", "拓扑绝缘体", "SiC", "GaN"],
+                "mechanism_types": ["化学气相沉积", "外延生长", "掺杂", "界面钝化", "缺陷调控"],
+                "task_or_performance_types": ["载流子迁移率", "击穿电压", "缺陷密度", "稳定性"],
+                "data_or_method_types": ["化学气相沉积", "原子层沉积", "分子束外延", "光致发光"],
+                "scene_or_application_types": ["功率器件", "光电器件", "射频器件"],
+                "generic_terms": ["材料", "技术", "方法", "系统", "方案"],
+                "shell_terms": ["材料", "技术", "方法", "系统", "应用", "方案"],
+                "valid_candidate_patterns": [],
+                "invalid_candidate_patterns": [
+                    {
+                        "pattern_id": "electronic_materials_shell_only",
+                        "reject_terms": ["材料", "技术", "方法", "系统", "方案"],
+                        "max_specific_slot_count": 0,
+                    }
+                ],
+                "minimum_specificity_rule": {
+                    "min_non_shell_slots": 1,
+                    "require_evidence_span": True,
+                    "allow_scope_only_candidate": False,
+                },
+            },
+        }
+    )
+
+
+def _electronic_materials_context() -> DomainContext:
+    return DomainContext.from_pack(_electronic_materials_pack())
 
 
 class NoDefaultRobotLeakageTest(unittest.TestCase):
@@ -198,6 +271,131 @@ class NoDefaultRobotLeakageTest(unittest.TestCase):
         self.assertIn("technical_object", reasons)
         self.assertNotIn("机器人", names)
 
+    def test_fine_grained_candidate_display_tier_remains_weak_signal_even_before_strong_stage(self):
+        events = pd.DataFrame(
+            [
+                {
+                    "id": "paper-battery-tier",
+                    "subject": "研究团队",
+                    "action": "提出",
+                    "technology": ["电解质"],
+                    "technical_object": "电解质",
+                    "mechanism": "界面钝化",
+                    "task": "提升循环稳定性",
+                    "evidence_span": "研究团队提出固态电池电解质界面钝化方法，降低阻抗并提升循环稳定性。",
+                    "observation_scopes": ["电池材料"],
+                    "candidate_units": [
+                        {
+                            "raw_phrase": "电解质界面钝化",
+                            "raw_candidate_text": "电解质界面钝化",
+                            "mechanism_core": "界面钝化",
+                            "mechanism_core_tokens": ["界面钝化"],
+                            "object_modifier_tokens": ["电解质"],
+                            "task_constraint_tokens": ["循环稳定性"],
+                            "scope_names": ["电池材料"],
+                            "source_extraction_mode": "domain_pack_test",
+                        }
+                    ],
+                }
+            ]
+        )
+        raw = pd.DataFrame(
+            [
+                {
+                    "id": "paper-battery-tier",
+                    "source_type": "paper",
+                    "title": "固态电池电解质界面钝化",
+                    "text": "研究团队提出固态电池电解质界面钝化方法，降低阻抗并提升循环稳定性。",
+                    "analysis_tech_field_name": "电池材料",
+                }
+            ]
+        )
+
+        candidates = build_candidate_forms(events, raw, domain_context=_battery_context())
+        rows = candidates[candidates["candidate_stage"].astype(str) == "formed_candidate"]
+
+        self.assertFalse(rows.empty)
+        self.assertTrue((rows["topic_granularity"].astype(str) == "fine_grained_topic").any())
+        self.assertEqual(set(rows["display_tier"].astype(str)), {"weak_signal"})
+
+    def test_candidate_display_name_does_not_repeat_same_process_and_mechanism(self):
+        name = _technical_object_name_from_slots(
+            {
+                "primary_scope": "太空制造",
+                "scope_names": ["太空制造"],
+                "mechanism_core": "冷焊工艺",
+                "mechanism_core_tokens": ["冷焊工艺"],
+                "object_modifier_tokens": ["轨道转移飞行器"],
+                "task_constraint_tokens": [],
+                "data_modifier_tokens": [],
+                "method_modifier_tokens": ["冷焊工艺"],
+                "scene_tokens": [],
+                "domain_lexicon": build_domain_lexicon(_battery_context()),
+            }
+        )
+
+        self.assertEqual(name, "采用冷焊工艺的轨道转移飞行器")
+
+    def test_shell_invalid_pattern_without_specificity_limit_does_not_reject_specific_candidate(self):
+        payload = _battery_pack().to_dict()
+        payload["candidate_formation"]["invalid_candidate_patterns"] = [
+            {
+                "pattern_id": "shell_term_only",
+                "reject_terms": ["技术", "方法", "系统", "应用"],
+            }
+        ]
+        context = DomainContext.from_pack(DomainPack.from_dict(payload))
+        events = pd.DataFrame(
+            [
+                {
+                    "id": "paper-specific-shell-word",
+                    "subject": "研究团队",
+                    "action": "提出",
+                    "technology": ["电解质"],
+                    "technical_object": "电解质",
+                    "mechanism": "界面钝化",
+                    "task": "提升循环稳定性",
+                    "evidence_span": "研究团队提出固态电池电解质界面钝化方法，降低阻抗并提升循环稳定性。",
+                    "observation_scopes": ["电池材料"],
+                    "candidate_units": [
+                        {
+                            "raw_phrase": "电解质界面钝化方法",
+                            "raw_candidate_text": "电解质界面钝化方法",
+                            "mechanism_core": "界面钝化",
+                            "mechanism_core_tokens": ["界面钝化"],
+                            "object_modifier_tokens": ["电解质"],
+                            "task_constraint_tokens": ["循环稳定性"],
+                            "scope_names": ["电池材料"],
+                            "source_extraction_mode": "domain_pack_test",
+                        }
+                    ],
+                }
+            ]
+        )
+        raw = pd.DataFrame(
+            [
+                {
+                    "id": "paper-specific-shell-word",
+                    "source_type": "paper",
+                    "title": "固态电池电解质界面钝化方法",
+                    "text": "研究团队提出固态电池电解质界面钝化方法，降低阻抗并提升循环稳定性。",
+                    "analysis_tech_field_name": "电池材料",
+                }
+            ]
+        )
+
+        candidates = build_candidate_forms(events, raw, domain_context=context)
+        rows = candidates[
+            candidates["domain_pack_candidate_rule_ids"].fillna("").astype(str).str.contains(
+                "battery_object_mechanism", na=False
+            )
+        ]
+
+        self.assertFalse(rows.empty)
+        self.assertIn("accepted", set(rows["domain_pack_candidate_status"].astype(str)))
+        self.assertTrue(any(str(stage).startswith("formed_candidate") for stage in rows["candidate_stage"]))
+        self.assertNotIn("rejected", set(rows["domain_pack_candidate_status"].astype(str)))
+
     def test_candidate_forms_reject_domain_pack_shell_only_candidate(self):
         events = pd.DataFrame(
             [
@@ -244,6 +442,194 @@ class NoDefaultRobotLeakageTest(unittest.TestCase):
         self.assertFalse(shell_rows.empty)
         self.assertTrue(set(shell_rows["domain_pack_candidate_status"].astype(str)) <= {"rejected"})
         self.assertIn("battery_shell_only", " ".join(shell_rows["domain_pack_candidate_rule_ids"].astype(str)))
+
+    def test_domain_relevance_gate_blocks_off_domain_generic_method_candidates(self):
+        events = pd.DataFrame(
+            [
+                {
+                    "id": "paper-off-domain-training",
+                    "subject": "研究团队",
+                    "action": "提出",
+                    "technology": ["训练技术"],
+                    "technical_object": "训练技术",
+                    "mechanism": "训练",
+                    "task": "控制规划",
+                    "evidence_span": "机器人控制中的训练技术和规划技术可以提升仿真控制效果。",
+                    "observation_scopes": ["新型电子材料"],
+                    "candidate_units": [
+                        {
+                            "raw_phrase": "训练技术",
+                            "raw_candidate_text": "训练技术",
+                            "mechanism_core": "训练",
+                            "mechanism_core_tokens": ["训练"],
+                            "object_modifier_tokens": ["控制"],
+                            "task_constraint_tokens": ["规划"],
+                            "method_modifier_tokens": ["训练技术"],
+                            "scope_names": ["新型电子材料"],
+                            "source_extraction_mode": "domain_pack_test",
+                        }
+                    ],
+                },
+                {
+                    "id": "paper-sic-cvd",
+                    "subject": "研究团队",
+                    "action": "提出",
+                    "technology": ["碳化硅"],
+                    "technical_object": "碳化硅",
+                    "mechanism": "化学气相沉积",
+                    "task": "降低缺陷密度",
+                    "evidence_span": "研究团队提出碳化硅外延层化学气相沉积工艺，降低缺陷密度并提升击穿电压。",
+                    "observation_scopes": ["新型电子材料"],
+                    "candidate_units": [
+                        {
+                            "raw_phrase": "碳化硅化学气相沉积",
+                            "raw_candidate_text": "碳化硅化学气相沉积",
+                            "mechanism_core": "化学气相沉积",
+                            "mechanism_core_tokens": ["化学气相沉积"],
+                            "object_modifier_tokens": ["碳化硅"],
+                            "task_constraint_tokens": ["缺陷密度"],
+                            "method_modifier_tokens": ["化学气相沉积"],
+                            "scope_names": ["新型电子材料"],
+                            "source_extraction_mode": "domain_pack_test",
+                        }
+                    ],
+                },
+            ]
+        )
+        raw = pd.DataFrame(
+            [
+                {
+                    "id": "paper-off-domain-training",
+                    "source_type": "paper",
+                    "title": "机器人控制训练技术",
+                    "text": "机器人控制中的训练技术和规划技术可以提升仿真控制效果。",
+                    "analysis_tech_field_name": "新型电子材料",
+                },
+                {
+                    "id": "paper-sic-cvd",
+                    "source_type": "paper",
+                    "title": "碳化硅外延层化学气相沉积",
+                    "text": "研究团队提出碳化硅外延层化学气相沉积工艺，降低缺陷密度并提升击穿电压。",
+                    "analysis_tech_field_name": "新型电子材料",
+                },
+            ]
+        )
+        context = _electronic_materials_context()
+        quality = build_event_quality_table(events, raw, domain_lexicon=build_domain_lexicon(context))
+        enriched_events = merge_event_quality_into_events(events, quality)
+
+        candidates = build_candidate_forms(enriched_events, raw, domain_context=context)
+        formed = candidates[candidates["candidate_stage"].astype(str).str.startswith("formed_candidate", na=False)]
+        names = " ".join(formed["display_candidate_name"].fillna("").astype(str).tolist())
+
+        for bad_name in ["训练技术", "控制技术", "规划技术", "仿真技术"]:
+            self.assertNotIn(bad_name, names)
+        self.assertIn("碳化硅", names)
+        self.assertIn("化学气相沉积", names)
+
+    def test_long_narrative_candidate_name_is_compressed_or_filtered(self):
+        raw_narrative = "钙钛矿薄膜在低温湿法制备过程中通过引入离子液体添加剂实现高稳定性"
+        events = pd.DataFrame(
+            [
+                {
+                    "id": "paper-long-name",
+                    "subject": "研究团队",
+                    "action": "提出",
+                    "technology": ["钙钛矿薄膜"],
+                    "technical_object": "钙钛矿薄膜",
+                    "mechanism": "界面钝化",
+                    "task": "提升稳定性",
+                    "evidence_span": f"研究团队提出{raw_narrative}，显著提升器件稳定性。",
+                    "observation_scopes": ["新型电子材料"],
+                    "candidate_units": [
+                        {
+                            "raw_phrase": raw_narrative,
+                            "raw_candidate_text": raw_narrative,
+                            "mechanism_core": "界面钝化",
+                            "mechanism_core_tokens": ["界面钝化"],
+                            "object_modifier_tokens": [raw_narrative],
+                            "task_constraint_tokens": ["稳定性"],
+                            "method_modifier_tokens": ["低温湿法制备"],
+                            "scope_names": ["新型电子材料"],
+                            "source_extraction_mode": "domain_pack_test",
+                        }
+                    ],
+                }
+            ]
+        )
+        raw = pd.DataFrame(
+            [
+                {
+                    "id": "paper-long-name",
+                    "source_type": "paper",
+                    "title": "钙钛矿薄膜界面钝化",
+                    "text": f"研究团队提出{raw_narrative}，显著提升器件稳定性。",
+                    "analysis_tech_field_name": "新型电子材料",
+                }
+            ]
+        )
+
+        candidates = build_candidate_forms(events, raw, domain_context=_electronic_materials_context())
+        formed = candidates[candidates["candidate_stage"].astype(str).str.startswith("formed_candidate", na=False)]
+
+        self.assertFalse(formed.empty)
+        for name in formed["display_candidate_name"].fillna("").astype(str):
+            self.assertLessEqual(len(name), 32)
+            self.assertNotIn("通过", name)
+            self.assertNotIn("实现", name)
+
+    def test_filtered_candidate_keeps_single_event_evidence_for_quality_join(self):
+        events = pd.DataFrame(
+            [
+                {
+                    "id": "paper-shell",
+                    "subject": "研究团队",
+                    "action": "提出",
+                    "technology": ["电池材料"],
+                    "technical_object": "材料",
+                    "mechanism": "",
+                    "task": "",
+                    "evidence_span": "研究团队提出一种材料技术。",
+                    "confidence": 0.8,
+                    "observation_scopes": ["电池材料"],
+                    "candidate_units": [
+                        {
+                            "raw_phrase": "材料技术",
+                            "raw_candidate_text": "材料技术",
+                            "mechanism_core": "",
+                            "mechanism_core_tokens": [],
+                            "object_modifier_tokens": ["材料"],
+                            "task_constraint_tokens": [],
+                            "scope_names": ["电池材料"],
+                            "source_extraction_mode": "domain_pack_test",
+                        }
+                    ],
+                }
+            ]
+        )
+        raw = pd.DataFrame(
+            [
+                {
+                    "id": "paper-shell",
+                    "source_type": "paper",
+                    "title": "材料技术",
+                    "text": "研究团队提出一种材料技术。",
+                    "analysis_tech_field_name": "电池材料",
+                    "date": "2026-06-01",
+                }
+            ]
+        )
+
+        candidates = build_candidate_forms(events, raw, domain_context=_battery_context())
+        quality = build_event_quality_table(events, raw, domain_lexicon=build_domain_lexicon(_battery_context()))
+        enriched = merge_event_quality_into_candidates(candidates, quality)
+        shell_rows = enriched[enriched["raw_phrase"].astype(str) == "材料技术"]
+
+        self.assertFalse(shell_rows.empty)
+        row = shell_rows.iloc[0]
+        self.assertEqual(row["mention_ids"], ["paper-shell"])
+        self.assertEqual(row["evidence_items"][0]["id"], "paper-shell")
+        self.assertGreater(float(row["candidate_evidence_quality"]), 0)
 
     def test_candidate_trace_requires_real_evidence_for_domain_pack_patterns(self):
         events = pd.DataFrame(
@@ -566,6 +952,74 @@ class NoDefaultRobotLeakageTest(unittest.TestCase):
 
         self.assertEqual(battery_name, "world model planning")
         self.assertEqual(humanoid_name, "机器人社交导航规划")
+
+    def test_signal_generation_preserves_formed_candidate_aggregate_counts_for_weak_signals(self):
+        forms = pd.DataFrame(
+            [
+                {
+                    "id": "paper-sic-cvd",
+                    "candidate_stage": "formed_candidate",
+                    "display_candidate_name": "碳化硅化学气相沉积",
+                    "canonical_candidate_name_en": "碳化硅 化学气相沉积",
+                    "normalized_candidate_text": "碳化硅 化学气相沉积",
+                    "raw_phrase": "碳化硅化学气相沉积",
+                    "raw_candidate_text": "碳化硅化学气相沉积",
+                    "candidate_cluster_id": "cand::sic-cvd",
+                    "mechanism_core": "化学气相沉积",
+                    "has_mechanism_core": True,
+                    "has_non_scope_constraint": True,
+                    "is_scope_internal_candidate": True,
+                    "is_scope_echo": False,
+                    "topic_granularity": "fine_grained_topic",
+                    "display_tier": "weak_signal",
+                    "cluster_evidence_count": 2,
+                    "cluster_item_count": 2,
+                    "source_count": 2,
+                    "total_mentions": 2,
+                    "source_types": ["paper", "patent"],
+                    "mention_ids": ["paper-sic-cvd", "patent-sic-cvd"],
+                    "mention_dates": ["2026-05-01", "2026-05-18"],
+                    "evidence_titles": ["碳化硅外延层化学气相沉积", "碳化硅沉积工艺专利"],
+                    "evidence_items": [
+                        {"id": "paper-sic-cvd", "source_type": "paper", "title": "碳化硅外延层化学气相沉积"},
+                        {"id": "patent-sic-cvd", "source_type": "patent", "title": "碳化硅沉积工艺专利"},
+                    ],
+                    "object_modifier_tokens": ["碳化硅"],
+                    "task_constraint_tokens": ["缺陷密度"],
+                    "method_modifier_tokens": ["化学气相沉积"],
+                    "scope_names": ["新型电子材料"],
+                    "primary_scope": "新型电子材料",
+                    "source_type": "paper",
+                }
+            ]
+        )
+        raw = pd.DataFrame(
+            [
+                {
+                    "id": "paper-sic-cvd",
+                    "source_type": "paper",
+                    "title": "碳化硅外延层化学气相沉积",
+                    "text": "研究团队提出碳化硅外延层化学气相沉积工艺，降低缺陷密度。",
+                    "analysis_tech_field_name": "新型电子材料",
+                },
+                {
+                    "id": "patent-sic-cvd",
+                    "source_type": "patent",
+                    "title": "碳化硅沉积工艺专利",
+                    "text": "专利公开碳化硅化学气相沉积设备和工艺参数。",
+                    "analysis_tech_field_name": "新型电子材料",
+                },
+            ]
+        )
+
+        output = generate_candidate_outputs(forms, raw, domain_context=_electronic_materials_context())
+        row = output["candidates_df"].iloc[0]
+
+        self.assertEqual(row["signal_type"], "weak_signal")
+        self.assertEqual(row["cluster_evidence_count"], 2)
+        self.assertEqual(row["source_count"], 2)
+        self.assertEqual(row["total_mentions"], 2)
+        self.assertEqual(set(row["mention_ids"]), {"paper-sic-cvd", "patent-sic-cvd"})
 
 
 if __name__ == "__main__":

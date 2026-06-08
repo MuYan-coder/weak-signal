@@ -13,7 +13,7 @@ from ..utils.llm_client import chat_text, get_provider_and_client
 
 
 ensure_env_loaded()
-PROMPT_VERSION = "small_topic_v9_domain_neutral_scope"
+PROMPT_VERSION = "small_topic_v10_shell_aware"
 GENERIC_OBJECT_TOKENS = {"robot", "agent", "embodied", "control"}
 SPECIFIC_TASK_TOKENS = {"driving", "navigation", "manipulation", "grasping", "safety", "decision", "planning"}
 SPECIFIC_DATA_TOKENS = {"video", "3d", "visual", "sensor", "multimodal", "temporal", "trajectory", "memory"}
@@ -174,7 +174,8 @@ def _build_prompt(batch_rows, domain_context=None):
 背景要求：
 1. observation scope 是本轮用户确定的技术领域或母主题，优先以上面的 Domain Pack 字段和候选证据为准。
 2. 真正希望得到的对象，不是“母主题 + 机制核”的系统压缩标签，而是母主题内部更小、更具体、更自然的子技术主题表达。
-3. 参考弱信号经典表达方式，例如：
+3. 本系统最终输出的是“技术弱信号”。如果你识别到的是应用、场景或问题，请把它作为自然研究表层表达，但不要把纯“XXX应用/场景/方向”当成最终技术对象名。
+4. 参考弱信号经典表达方式，例如：
    - army's solar tents
    - portable solar chargers for military applications
    - health and safety concerns of photovoltaic solar panels
@@ -208,15 +209,16 @@ def _build_prompt(batch_rows, domain_context=None):
 命名要求：
 1. 优先表达“小方向 / 小应用 / 小问题 / 小能力”
 2. 尽量避免只输出“领域名 + 动作/机制核”这类过泛表达，例如“新型电子材料研发 / 世界模型训练 / 工业软件应用”
-3. 若需要保留 scope，可放在中间或前置作为限定，但必须继续带出更具体对象、材料、工艺、场景、数据或问题，例如：
+3. 若对象是应用场景，请尽量表达为“用于某场景的某技术/方法/模型/工艺”，不要只输出“某应用”。
+4. 若需要保留 scope，可放在中间或前置作为限定，但必须继续带出更具体对象、材料、工艺、场景、数据或问题，例如：
    - 钙钛矿界面钝化材料
    - 碳化硅衬底缺陷控制
    - 低温银浆互连工艺
-4. method（如 reinforcement）一般不要直接放进主名，除非它真的构成小主题核心
-5. 输出中文，尽量自然，不要像系统标签串
-6. 不要凭空发明证据里没有出现的强修饰词，例如“实时 / 平台 / 构建 / 生成 / 闭环 / 长期”等；只有当原始短语或证据标题明确支持时才能使用
-7. 如果当前对象只有“对象 + 机制核”，但没有更具体的问题、应用、数据、场景或能力限定，优先判为 `upper_topic` 或 `compressed_label`，不要轻易判成 `small_topic`
-8. `small_topic` 更接近类似：
+5. method（如 reinforcement）一般不要直接放进主名，除非它真的构成小主题核心
+6. 输出中文，尽量自然，不要像系统标签串
+7. 不要凭空发明证据里没有出现的强修饰词，例如“实时 / 平台 / 构建 / 生成 / 闭环 / 长期”等；只有当原始短语或证据标题明确支持时才能使用
+8. 如果当前对象只有“对象 + 机制核”，但没有更具体的问题、应用、数据、场景或能力限定，优先判为 `upper_topic` 或 `compressed_label`，不要轻易判成 `small_topic`
+9. `small_topic` 更接近类似：
    - 钙钛矿界面钝化
    - 碳化硅衬底缺陷控制
    - 柔性传感器封装可靠性
@@ -225,11 +227,11 @@ def _build_prompt(batch_rows, domain_context=None):
    - 新型电子材料研发
    - 智能传感器应用
    - 工业软件系统
-9. 请注意多源性质：如果多个来源都提到该对象，但大多数来源只停留在上层主题表达，只有单条证据出现了更细的说法，优先判为 `upper_topic` 或 `compressed_label`，不要仅因“有一条更具体证据”就判成 `small_topic`
-10. `small_topic` 应优先保留给这种情况：
+10. 请注意多源性质：如果多个来源都提到该对象，但大多数来源只停留在上层主题表达，只有单条证据出现了更细的说法，优先判为 `upper_topic` 或 `compressed_label`，不要仅因“有一条更具体证据”就判成 `small_topic`
+11. `small_topic` 应优先保留给这种情况：
    - 原始文本里已经出现较自然的小方向/小应用/小问题表达
    - 或多源证据能较一致地指向同一个具体场景/数据/问题
-11. 像下面这类通常仍应留在 `upper_topic / compressed_label`：
+12. 像下面这类通常仍应留在 `upper_topic / compressed_label`：
    - 材料研发
    - 芯片应用
    - 系统优化
@@ -561,6 +563,7 @@ def refine_research_scored_candidates(scored_df, cache_path=None, refresh_cache=
         "llm_small_topic_pattern": "",
         "llm_small_topic_reason": "",
         "llm_refined": False,
+        "refined_from_shell_heavy": False,
     }
     refined_df = scored_df.copy()
     for column, default in defaults.items():
@@ -673,8 +676,8 @@ def refine_research_scored_candidates(scored_df, cache_path=None, refresh_cache=
         reason = str(item.get("reason", "")).strip()
         if refined_name:
             refined_df.at[idx, "llm_refined_topic_name"] = refined_name
-            refined_df.at[idx, "display_candidate_name"] = refined_name
-            refined_df.at[idx, "topic_summary_name"] = refined_name
+            if judgment == "small_topic":
+                refined_df.at[idx, "topic_summary_name"] = refined_name
         if judgment:
             refined_df.at[idx, "llm_small_topic_judgment"] = judgment
         if topic_type:
@@ -685,6 +688,8 @@ def refine_research_scored_candidates(scored_df, cache_path=None, refresh_cache=
             refined_df.at[idx, "llm_small_topic_reason"] = reason
             refined_df.at[idx, "topic_naturalness_reason"] = reason
         refined_df.at[idx, "llm_refined"] = True
+        is_shell_heavy = bool(row.get("scope_shell_heavy", False) or not row.get("survives_without_scope", True))
+        refined_df.at[idx, "refined_from_shell_heavy"] = is_shell_heavy
         applied_count += 1
 
     print(

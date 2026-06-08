@@ -241,6 +241,19 @@ class DataRepository:
                                 elif s_type == "patent":
                                     current_batch.append(normalize_es_patent(source_data))
 
+                    # A2: domain relevance pre-filtering on retrieved documents
+                    if search_terms:
+                        filtered_batch = []
+                        match_terms = [t.lower().strip() for t in search_terms if t.strip()]
+                        for record in current_batch:
+                            if record.source_type == "patent":
+                                filtered_batch.append(record)
+                                continue
+                            haystack = f"{record.title or ''} {record.text or ''}".lower()
+                            if any(term in haystack for term in match_terms):
+                                filtered_batch.append(record)
+                        current_batch = filtered_batch
+
                     # 针对当前单源与已加载的所有数据整体进行清洗去重
                     combined_temp = all_records + current_batch
                     deduped_temp = DocumentNormalizer.deduplicate(combined_temp)

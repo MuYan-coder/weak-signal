@@ -1,4 +1,5 @@
 from collections import defaultdict
+import hashlib
 import re
 
 import pandas as pd
@@ -58,6 +59,21 @@ def _safe_raw_text(value):
     return "" if text.lower() in _EMPTY_TEXT_VALUES else text
 
 
+def _dedupe_preserve(values):
+    deduped = []
+    seen = set()
+    for value in values:
+        text = _safe_raw_text(value)
+        if not text:
+            continue
+        marker = text.lower()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        deduped.append(text)
+    return deduped
+
+
 def _normalize_scope_key(value):
     return "".join(ch.lower() for ch in _safe_raw_text(value) if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
 
@@ -81,6 +97,59 @@ def _coerce_text_list(value):
     return values
 
 
+def _stable_document_id(record, index):
+    source_type = _safe_raw_text((record or {}).get("source_type"))
+    title = _safe_raw_text((record or {}).get("title"))
+    text = _safe_raw_text((record or {}).get("text")) or _safe_raw_text((record or {}).get("full_text"))
+    seed = "|".join([source_type, title, text[:240], str(index)])
+    digest = hashlib.sha256(seed.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"source_{digest}"
+
+
+def _normalize_document_identity(data_df):
+    stats = {
+        "id_filled_from_source_id_count": 0,
+        "id_filled_from_doc_id_count": 0,
+        "id_generated_count": 0,
+        "source_id_filled_from_id_count": 0,
+    }
+    if data_df is None or data_df.empty:
+        return data_df.copy() if isinstance(data_df, pd.DataFrame) else pd.DataFrame(), stats
+
+    normalized = data_df.copy()
+    if "id" not in normalized.columns:
+        normalized["id"] = ""
+    if "source_id" not in normalized.columns:
+        normalized["source_id"] = ""
+
+    for index, row in normalized.reset_index(drop=True).iterrows():
+        row_index = normalized.index[index]
+        current_id = _safe_raw_text(row.get("id"))
+        source_id = _safe_raw_text(row.get("source_id"))
+        doc_id = _safe_raw_text(row.get("doc_id"))
+        if not current_id and source_id:
+            normalized.at[row_index, "id"] = source_id
+            current_id = source_id
+            stats["id_filled_from_source_id_count"] += 1
+        elif not current_id and doc_id:
+            normalized.at[row_index, "id"] = doc_id
+            current_id = doc_id
+            stats["id_filled_from_doc_id_count"] += 1
+        elif not current_id:
+            generated_id = _stable_document_id(row.to_dict(), index)
+            normalized.at[row_index, "id"] = generated_id
+            current_id = generated_id
+            stats["id_generated_count"] += 1
+
+        if not source_id and current_id:
+            normalized.at[row_index, "source_id"] = current_id
+            stats["source_id_filled_from_id_count"] += 1
+
+    normalized["id"] = normalized["id"].fillna("").astype(str)
+    normalized["source_id"] = normalized["source_id"].fillna("").astype(str)
+    return normalized, stats
+
+
 def _analysis_scope_from_record(record):
     for field in _ANALYSIS_SCOPE_FIELDS:
         text = _safe_raw_text((record or {}).get(field, ""))
@@ -102,6 +171,33 @@ def _analysis_scope_from_data(data_df):
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
 
 
+def _pack_list_terms(pack, section_name, field_names):
+    if pack is None:
+        return []
+    section = getattr(pack, section_name, {}) or {}
+    if not isinstance(section, dict):
+        return []
+    terms = []
+    for field_name in field_names:
+        terms.extend(_coerce_text_list(section.get(field_name, [])))
+    return terms
+
+
+def _domain_pack_scope_terms(domain_context, analysis_scope=""):
+    pack = _extract_domain_pack(domain_context)
+    terms = [analysis_scope]
+    if pack is None:
+        return _dedupe_preserve(terms)
+    terms.extend(_pack_list_terms(pack, "domain_identity", ["field_name"]))
+    terms.extend(_pack_list_terms(pack, "observation_scopes", ["main_scope", "sub_scopes", "scope_aliases"]))
+    source = getattr(pack, "source", {}) or {}
+    if isinstance(source, dict):
+        user_input = source.get("based_on_user_input", {})
+        if isinstance(user_input, dict):
+            terms.extend(_coerce_text_list(user_input.get("field_name", "")))
+    return _dedupe_preserve(terms)
+
+
 def _concept_scope_values(concept):
     values = []
     for field in ["analysis_tech_field_name", "primary_scope", "scope_name"]:
@@ -112,7 +208,7 @@ def _concept_scope_values(concept):
     return [value for value in values if value]
 
 
-def _scope_matches_analysis(concept, analysis_scope):
+def _scope_matches_analysis(concept, analysis_scope, domain_context=None):
     if not analysis_scope:
         return True
     target_key = _normalize_scope_key(analysis_scope)
@@ -125,6 +221,16 @@ def _scope_matches_analysis(concept, analysis_scope):
         key = _normalize_scope_key(value)
         if key and (key == target_key or key in target_key or target_key in key):
             return True
+    alias_keys = {
+        _normalize_scope_key(term)
+        for term in _domain_pack_scope_terms(domain_context, analysis_scope)
+        if _normalize_scope_key(term)
+    }
+    if target_key in alias_keys:
+        for value in scope_values:
+            key = _normalize_scope_key(value)
+            if key in alias_keys:
+                return True
     return False
 
 
@@ -209,24 +315,109 @@ def _analysis_relevance_terms(record, analysis_scope):
     return cleaned
 
 
-def _concept_relevant_to_analysis(concept, record, analysis_scope, domain_context=None, canonicalizer=None):
+def _domain_pack_relevance_terms(domain_context):
+    terms = []
+    pack = _extract_domain_pack(domain_context)
+    terms.extend(_domain_pack_scope_terms(domain_context))
+    if pack is not None:
+        terms.extend(_pack_list_terms(pack, "search_strategy", ["core_keywords", "synonyms", "english_terms"]))
+        terms.extend(
+            _pack_list_terms(
+                pack,
+                "candidate_formation",
+                [
+                    "technical_object_types",
+                    "mechanism_types",
+                    "task_or_performance_types",
+                    "data_or_method_types",
+                    "scene_or_application_types",
+                ],
+            )
+        )
+    try:
+        from src.extraction.tech_lexicon import build_domain_lexicon
+        lexicon = build_domain_lexicon(domain_context)
+    except Exception:
+        lexicon = None
+    if lexicon is not None:
+        terms.extend(_coerce_text_list(getattr(lexicon, "domain_anchor_terms", [])))
+        terms.extend(_coerce_text_list(getattr(lexicon, "domain_specific_terms", [])))
+    return _dedupe_preserve(terms)
+
+
+def _domain_pack_exclusion_terms(domain_context):
+    pack = _extract_domain_pack(domain_context)
+    if pack is None:
+        return []
+    terms = []
+    terms.extend(_pack_list_terms(pack, "domain_identity", ["out_of_scope_domains"]))
+    terms.extend(_pack_list_terms(pack, "search_strategy", ["exclude_terms"]))
+    terms.extend(_pack_list_terms(pack, "observation_scopes", ["off_domain_anchor_terms"]))
+    terms.extend(_pack_list_terms(pack, "evidence_rules", ["evidence_rejection_patterns"]))
+    source = getattr(pack, "source", {}) or {}
+    if isinstance(source, dict):
+        user_input = source.get("based_on_user_input", {})
+        if isinstance(user_input, dict):
+            terms.extend(_coerce_text_list(user_input.get("exclude_terms", [])))
+    return _dedupe_preserve(terms)
+
+
+def _matching_terms(text, terms):
+    lowered = _safe_raw_text(text).lower()
+    if not lowered:
+        return []
+    matches = []
+    normalized_text = _normalize_scope_key(lowered)
+    for term in terms:
+        term_text = _safe_raw_text(term)
+        if not term_text:
+            continue
+        term_lower = term_text.lower()
+        term_key = _normalize_scope_key(term_text)
+        if term_lower in lowered or (term_key and term_key in normalized_text):
+            matches.append(term_text)
+    return _dedupe_preserve(matches)
+
+
+def _concept_relevance_decision(concept, record, analysis_scope, domain_context=None, canonicalizer=None):
     if not analysis_scope or _domain_allows_object_family(concept, domain_context, canonicalizer):
-        return True
+        return True, "not_applicable"
     candidate_text = _candidate_surface_text(concept)
     evidence_text = " ".join(
         _safe_raw_text((record or {}).get(field, ""))
         for field in ["title", "text", "abstract", "summary", "keywords", "keyword"]
     )
     relevance_terms = _analysis_relevance_terms(record, analysis_scope)
-    has_candidate_domain_anchor = _contains_any_term(candidate_text, relevance_terms)
-    has_evidence_domain_anchor = _contains_any_term(evidence_text, relevance_terms)
+    relevance_terms.extend(_domain_pack_relevance_terms(domain_context))
+    relevance_terms = _dedupe_preserve(relevance_terms)
+    exclusion_terms = _domain_pack_exclusion_terms(domain_context)
+    positive_term_keys = {_normalize_scope_key(term) for term in relevance_terms if _normalize_scope_key(term)}
+    exclusion_hits = _matching_terms(" ".join([candidate_text, evidence_text]), exclusion_terms)
+    blocking_exclusion_hits = [
+        term for term in exclusion_hits if _normalize_scope_key(term) not in positive_term_keys
+    ]
+    if blocking_exclusion_hits:
+        return False, "explicit_off_domain"
+
+    has_candidate_domain_anchor = bool(_matching_terms(candidate_text, relevance_terms))
+    has_evidence_domain_anchor = bool(_matching_terms(evidence_text, relevance_terms))
     has_off_domain_candidate_anchor = _contains_any_term(candidate_text, _OFF_DOMAIN_AI_ROBOT_TOKENS)
 
-    if has_off_domain_candidate_anchor and not has_candidate_domain_anchor:
-        return False
+    if has_off_domain_candidate_anchor and not (has_candidate_domain_anchor or has_evidence_domain_anchor):
+        return False, "generic_off_domain_without_domain_anchor"
     if _is_material_analysis_scope(analysis_scope) and not (has_candidate_domain_anchor or has_evidence_domain_anchor):
-        return False
-    return True
+        return False, "material_scope_without_domain_anchor"
+    return True, "passed"
+
+
+def _concept_relevant_to_analysis(concept, record, analysis_scope, domain_context=None, canonicalizer=None):
+    return _concept_relevance_decision(
+        concept,
+        record,
+        analysis_scope,
+        domain_context=domain_context,
+        canonicalizer=canonicalizer,
+    )[0]
 
 
 def _neutral_canonicalization(term):
@@ -446,6 +637,198 @@ def _safe_text(value):
     return "" if text.lower() in {"", "nan", "nat", "none"} else text
 
 
+_APPLICATION_SURFACE_SUFFIXES = (
+    "应用",
+    "场景",
+    "方向",
+    "落地",
+    "部署",
+    "示范",
+    "试点",
+    " application",
+    " applications",
+    " scenario",
+    " scenarios",
+    " use case",
+    " use cases",
+    " deployment",
+    " deployments",
+)
+
+_TECHNICAL_NAME_ANCHORS = (
+    "技术",
+    "方法",
+    "模型",
+    "算法",
+    "工艺",
+    "材料",
+    "器件",
+    "芯片",
+    "电路",
+    "装置",
+    "模块",
+    "控制",
+    "规划",
+    "训练",
+    "仿真",
+    "推理",
+    "制造",
+    "制备",
+    "钝化",
+    "掺杂",
+    "沉积",
+    "刻蚀",
+    "封装",
+    "互连",
+    "集成",
+    "导航",
+    "操控",
+    "抓取",
+    "technology",
+    "method",
+    "model",
+    "algorithm",
+    "process",
+    "material",
+    "device",
+    "circuit",
+    "integrated circuit",
+    "control",
+    "planning",
+    "training",
+    "simulation",
+    "reasoning",
+    "manufacturing",
+    "fabrication",
+    "passivation",
+    "doping",
+    "deposition",
+    "etching",
+    "packaging",
+    "interconnect",
+    "integration",
+    "navigation",
+    "manipulation",
+)
+
+
+def _contains_technical_anchor(text):
+    raw = _safe_text(text)
+    if not raw:
+        return False
+    lowered = raw.lower()
+    return any(term in (lowered if term.isascii() else raw) for term in _TECHNICAL_NAME_ANCHORS)
+
+
+def _is_application_surface_name(text):
+    raw = _safe_text(text)
+    if not raw:
+        return False
+    lowered = raw.lower()
+    return any(raw.endswith(term) if not term.isascii() else lowered.endswith(term) for term in _APPLICATION_SURFACE_SUFFIXES)
+
+
+def _technical_name_profile(text):
+    raw = _safe_text(text)
+    if not raw:
+        return {"quality": "missing", "issue": "missing_name", "is_technical": False}
+    has_technical_anchor = _contains_technical_anchor(raw)
+    application_surface = _is_application_surface_name(raw)
+    if application_surface and not has_technical_anchor:
+        return {
+            "quality": "application_surface",
+            "issue": "application_only_surface",
+            "is_technical": False,
+        }
+    if has_technical_anchor:
+        return {"quality": "technical", "issue": "", "is_technical": True}
+    return {
+        "quality": "unclear_surface",
+        "issue": "missing_technical_anchor",
+        "is_technical": False,
+    }
+
+
+def _first_nonempty_token(values):
+    for value in _normalize_aliases(values):
+        text = _safe_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _compose_slot_technical_name(row):
+    mechanism = _safe_text((row or {}).get("mechanism_core", ""))
+    if not mechanism:
+        mechanism = _first_nonempty_token((row or {}).get("mechanism_core_tokens", []))
+    if not mechanism:
+        return ""
+    subject = _first_nonempty_token((row or {}).get("object_modifier_tokens", []))
+    if not subject:
+        subject = _first_nonempty_token((row or {}).get("task_constraint_tokens", []))
+    if not subject:
+        subject = _safe_text((row or {}).get("scope_name", ""))
+    if not subject:
+        return ""
+    if re.search(r"[A-Za-z]", subject + mechanism):
+        parts = [subject, mechanism]
+        name = " ".join(part for part in parts if part).strip()
+        if name and "technology" not in name.lower() and not _contains_technical_anchor(name):
+            name = f"{name} technology"
+        return name
+    name = f"{subject}{mechanism}".strip()
+    if name and not _contains_technical_anchor(name):
+        name = f"{name}技术"
+    return name
+
+
+def _resolve_final_technical_name(row):
+    candidates = [
+        ("rule_display_candidate_name", _safe_text((row or {}).get("rule_display_candidate_name", ""))),
+        ("display_candidate_name", _safe_text((row or {}).get("display_candidate_name", ""))),
+        ("llm_refined_topic_name", _safe_text((row or {}).get("llm_refined_topic_name", ""))),
+        ("topic_summary_name", _safe_text((row or {}).get("topic_summary_name", ""))),
+        ("canonical_candidate_name_en", _safe_text((row or {}).get("canonical_candidate_name_en", ""))),
+        ("normalized_candidate_text", _safe_text((row or {}).get("normalized_candidate_text", ""))),
+        ("raw_phrase", _safe_text((row or {}).get("raw_phrase", ""))),
+        ("raw_candidate_text", _safe_text((row or {}).get("raw_candidate_text", ""))),
+    ]
+    first_surface = ""
+    first_profile = None
+    for source, name in candidates:
+        if not name:
+            continue
+        profile = _technical_name_profile(name)
+        if first_surface == "":
+            first_surface = name
+            first_profile = profile
+        if profile["is_technical"]:
+            return {
+                "name": name,
+                "source": source,
+                "quality": profile["quality"],
+                "issue": profile["issue"],
+            }
+
+    slot_name = _compose_slot_technical_name(row)
+    slot_profile = _technical_name_profile(slot_name)
+    if slot_profile["is_technical"]:
+        return {
+            "name": slot_name,
+            "source": "slot_technical_name",
+            "quality": slot_profile["quality"],
+            "issue": slot_profile["issue"],
+        }
+
+    profile = first_profile or _technical_name_profile(first_surface)
+    return {
+        "name": first_surface,
+        "source": "application_surface" if profile["issue"] == "application_only_surface" else "fallback_surface",
+        "quality": profile["quality"],
+        "issue": profile["issue"],
+    }
+
+
 def _safe_float(value, default=0.0):
     try:
         if value is None or pd.isna(value):
@@ -454,6 +837,18 @@ def _safe_float(value, default=0.0):
         pass
     try:
         return float(value)
+    except Exception:
+        return default
+
+
+def _safe_int(value, default=0):
+    try:
+        if value is None or pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        return int(float(value))
     except Exception:
         return default
 
@@ -760,8 +1155,10 @@ def _empty_candidate_columns():
         "topic_granularity", "display_tier", "non_scope_constraint_count",
         "survives_without_scope", "scope_shell_heavy", "scope_shell_reason",
         "weak_signal_score", "hotspot_score", "score", "explanation",
+        "upstream_signal_type",
         # 新增：内部标签与最终表述分离
         "raw_phrase_cluster", "final_research_object_name",
+        "final_name_source", "technical_name_quality", "technical_name_issue",
         # 新增：对象族归一化信息
         "canonical_term", "normalization_type", "parent_term", "cross_source_pattern", "patent_role",
         # 新增：对象族感知聚合信息
@@ -778,18 +1175,40 @@ def _empty_candidate_columns():
 
 def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None):
     empty_columns = _empty_candidate_columns()
+    diagnostics = {
+        "input_candidate_count": int(len(candidate_forms_df)) if isinstance(candidate_forms_df, pd.DataFrame) else 0,
+        "input_document_count": int(len(data_df)) if isinstance(data_df, pd.DataFrame) else 0,
+        "active_candidate_count": 0,
+        "upstream_weak_signal_count": 0,
+        "scope_mismatch_filtered_count": 0,
+        "domain_relevance_filtered_count": 0,
+        "explicit_off_domain_filtered_count": 0,
+        "output_candidate_count": 0,
+        "final_weak_signal_count": 0,
+        "near_strong_count": 0,
+        "application_surface_rewritten_count": 0,
+        "application_only_rejected_count": 0,
+        "scope_mismatch_examples": [],
+        "domain_relevance_filtered_examples": [],
+    }
     if candidate_forms_df is None or candidate_forms_df.empty or data_df is None or data_df.empty:
         empty_df = pd.DataFrame(columns=empty_columns)
-        return {"candidates_df": empty_df, "near_strong_candidates_df": empty_df.copy()}
+        return {"candidates_df": empty_df, "near_strong_candidates_df": empty_df.copy(), "diagnostics": diagnostics}
+
+    data_df, identity_stats = _normalize_document_identity(data_df)
+    diagnostics.update(identity_stats)
 
     canonicalizer = get_canonicalizer(domain_context=domain_context)
 
     active_forms = candidate_forms_df[
         candidate_forms_df["candidate_stage"].isin(["scope_overview", "formed_candidate", "formed_candidate_strong"])
     ].copy()
+    diagnostics["active_candidate_count"] = int(len(active_forms))
+    if "signal_type" in active_forms.columns:
+        diagnostics["upstream_weak_signal_count"] = int((active_forms["signal_type"].astype(str) == "weak_signal").sum())
     if active_forms.empty or "id" not in active_forms.columns or "id" not in data_df.columns:
         empty_df = pd.DataFrame(columns=empty_columns)
-        return {"candidates_df": empty_df, "near_strong_candidates_df": empty_df.copy()}
+        return {"candidates_df": empty_df, "near_strong_candidates_df": empty_df.copy(), "diagnostics": diagnostics}
 
     metadata_by_id = data_df.drop_duplicates(subset="id", keep="last").set_index("id").to_dict("index")
     default_analysis_scope = _analysis_scope_from_data(data_df)
@@ -802,16 +1221,39 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
         source_record = metadata_by_id.get(concept.get("id"), {})
         record_scope = _analysis_scope_from_record(source_record)
         analysis_scope = record_scope or default_analysis_scope
-        if analysis_scope and not _scope_matches_analysis(concept, analysis_scope):
+        if analysis_scope and not _scope_matches_analysis(concept, analysis_scope, domain_context=domain_context):
+            diagnostics["scope_mismatch_filtered_count"] += 1
+            if len(diagnostics["scope_mismatch_examples"]) < 10:
+                diagnostics["scope_mismatch_examples"].append(
+                    {
+                        "id": str(concept.get("id", "")).strip(),
+                        "display_candidate_name": str(concept.get("display_candidate_name", "")).strip(),
+                        "analysis_scope": analysis_scope,
+                        "candidate_scope": str(concept.get("scope_name", concept.get("primary_scope", ""))).strip(),
+                    }
+                )
             continue
         concept = _attach_analysis_scope(concept, analysis_scope)
-        if analysis_scope and not _concept_relevant_to_analysis(
+        relevance_passed, relevance_reason = _concept_relevance_decision(
             concept,
             source_record,
             analysis_scope,
             domain_context=domain_context,
             canonicalizer=canonicalizer,
-        ):
+        )
+        if analysis_scope and not relevance_passed:
+            diagnostics["domain_relevance_filtered_count"] += 1
+            if relevance_reason == "explicit_off_domain":
+                diagnostics["explicit_off_domain_filtered_count"] += 1
+            if len(diagnostics["domain_relevance_filtered_examples"]) < 10:
+                diagnostics["domain_relevance_filtered_examples"].append(
+                    {
+                        "id": str(concept.get("id", "")).strip(),
+                        "display_candidate_name": str(concept.get("display_candidate_name", "")).strip(),
+                        "analysis_scope": analysis_scope,
+                        "reason": relevance_reason,
+                    }
+                )
             continue
 
         primary_scope = str(concept.get("primary_scope", "")).strip()
@@ -857,34 +1299,86 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
     candidates = []
     for cluster_key, items in group_maps.items():
         first = items[0]
-        mention_records = []
-        for item in items:
-            record = metadata_by_id.get(item["id"])
-            if record:
-                mention_records.append(record)
-
         counts = defaultdict(int)
         orgs = set()
         mention_ids = set()
         mention_dates = []
         evidence_titles = []
         evidence_items = []
-        for item, record in zip(items, mention_records):
-            source_type = _normalize_source_type(record.get("source_type", item.get("source_type", "unknown")))
+        mention_records_by_id = {}
+        preserved_cluster_evidence_count = 0
+        preserved_total_mentions = 0
+        preserved_source_count = 0
+        preserved_source_types = set()
+        for item in items:
+            preserved_cluster_evidence_count = max(
+                preserved_cluster_evidence_count,
+                _safe_int(item.get("cluster_evidence_count"), 0),
+            )
+            preserved_total_mentions = max(
+                preserved_total_mentions,
+                _safe_int(item.get("total_mentions"), 0),
+            )
+            preserved_source_count = max(
+                preserved_source_count,
+                _safe_int(item.get("source_count"), 0),
+            )
+            for source_type in _coerce_text_list(item.get("source_types", [])):
+                normalized_source_type = _normalize_source_type(source_type)
+                preserved_source_types.add(normalized_source_type)
+            item_mention_ids = _coerce_text_list(item.get("mention_ids", []))
+            if not item_mention_ids and item.get("id") is not None:
+                item_mention_ids = [item.get("id")]
+            for mention_id in item_mention_ids:
+                mention_ids.add(mention_id)
+                record = metadata_by_id.get(mention_id) or metadata_by_id.get(item.get("id"))
+                if record:
+                    mention_records_by_id.setdefault(mention_id, record)
+            for date_text in _coerce_text_list(item.get("mention_dates", [])):
+                if date_text:
+                    mention_dates.append(date_text)
+            for title in _coerce_text_list(item.get("evidence_titles", [])):
+                if title and title not in evidence_titles:
+                    evidence_titles.append(title)
+            for evidence_item in item.get("evidence_items", []) or []:
+                if isinstance(evidence_item, dict):
+                    title = _safe_text(evidence_item.get("title", ""))
+                    if title and title not in evidence_titles:
+                        evidence_titles.append(title)
+                    evidence_items.append(evidence_item)
+
+        for mention_id in sorted(mention_ids):
+            record = mention_records_by_id.get(mention_id)
+            if not record:
+                continue
+            source_type = _normalize_source_type(record.get("source_type", "unknown"))
             counts[source_type] += 1
             org = _safe_text(record.get("org", "Unknown")) or "Unknown"
             orgs.add(org)
-            mention_ids.add(item["id"])
             date_text = _safe_text(record.get("date"))
             if date_text:
                 mention_dates.append(date_text)
             title = _safe_text(record.get("title", ""))
             if title and title not in evidence_titles:
                 evidence_titles.append(title)
-                evidence_items.append(_build_evidence_item(record, item))
+                evidence_items.append(_build_evidence_item(record, first))
 
-        source_types = sorted([k for k, v in counts.items() if v > 0])
-        total_mentions = sum(counts.values())
+        for source_type in preserved_source_types:
+            counts[source_type] = max(counts[source_type], 1)
+        source_types = sorted({k for k, v in counts.items() if v > 0} | preserved_source_types)
+        cluster_evidence_count = max(
+            len(mention_ids),
+            preserved_cluster_evidence_count,
+            len(items),
+        )
+        observed_total_mentions = len(mention_ids) or sum(counts.values())
+        total_mentions = max(
+            preserved_total_mentions,
+            cluster_evidence_count,
+            observed_total_mentions,
+        )
+        source_count = max(len(source_types), preserved_source_count)
+        mention_records = list(mention_records_by_id.values())
         raw_variant_aliases = sorted(
             {
                 str(item.get("raw_phrase", "")).strip()
@@ -904,17 +1398,33 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
             alias_terms = [first["canonical_candidate_name_en"]]
         alias_terms = sorted({*alias_terms, *raw_variant_aliases[:4]})
         early_mentions, recent_mentions, validation_ratio, time_validated = _time_validation_metrics(mention_dates)
-        multi_source_validated = len(source_types) >= 2
-        multi_source_validation_score = 2.0 if len(source_types) >= 3 else 1.5 if len(source_types) == 2 else 0.0
+        multi_source_validated = source_count >= 2
+        multi_source_validation_score = 2.0 if source_count >= 3 else 1.5 if source_count == 2 else 0.0
         semantic_validated, semantic_score, semantic_pair_count = _cross_source_semantic_validation(evidence_items, alias_terms)
         event_doc_validation = _event_document_validation(evidence_items, alias_terms)
         candidate_stage = str(first.get("candidate_stage", "")).strip()
-        weak_signal_focus_candidate = (
-            candidate_stage == "formed_candidate_strong"
+        evidence_ready_formed_candidate = bool(
+            candidate_stage == "formed_candidate"
+            and cluster_evidence_count >= 2
             and bool(first.get("is_scope_internal_candidate", False))
             and not bool(first.get("is_scope_echo", False))
             and bool(first.get("has_mechanism_core", False))
             and bool(first.get("has_non_scope_constraint", False))
+            and str(first.get("topic_granularity", "")).strip() == "fine_grained_topic"
+            and str(first.get("display_tier", "")).strip() == "weak_signal"
+            and (
+                multi_source_validated
+                or semantic_validated
+                or event_doc_validation["event_doc_semantic_validated"]
+            )
+        )
+        weak_signal_focus_candidate = (
+            candidate_stage in {"formed_candidate_strong", "formed_candidate"}
+            and bool(first.get("is_scope_internal_candidate", False))
+            and not bool(first.get("is_scope_echo", False))
+            and bool(first.get("has_mechanism_core", False))
+            and bool(first.get("has_non_scope_constraint", False))
+            and (candidate_stage == "formed_candidate_strong" or evidence_ready_formed_candidate)
             and (multi_source_validated or semantic_validated or event_doc_validation["event_doc_semantic_validated"])
         )
         constraint_signatures = {
@@ -1031,11 +1541,22 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
             _safe_float(first.get("weak_signal_score", first.get("score", 0.0))),
         )
         candidate_evidence_quality_reason = str(first.get("candidate_evidence_quality_reason", "")).strip()
+        name_resolution = _resolve_final_technical_name(first)
+        final_technical_name = _safe_text(name_resolution.get("name", ""))
+        display_surface_name = _safe_text(first.get("display_candidate_name", ""))
+        if (
+            final_technical_name
+            and display_surface_name
+            and final_technical_name != display_surface_name
+            and _is_application_surface_name(display_surface_name)
+            and name_resolution.get("quality") == "technical"
+        ):
+            diagnostics["application_surface_rewritten_count"] += 1
         candidates.append(
             {
-                "tech_name": str(first.get("display_candidate_name", "")).strip() or str(first.get("canonical_candidate_name_en", "")).strip() or str(first.get("raw_candidate_text", "")).strip(),
-                "technology": str(first.get("display_candidate_name", "")).strip() or str(first.get("canonical_candidate_name_en", "")).strip(),
-                "display_candidate_name": str(first.get("display_candidate_name", "")).strip() or str(first.get("canonical_candidate_name_en", "")).strip(),
+                "tech_name": final_technical_name or str(first.get("canonical_candidate_name_en", "")).strip() or str(first.get("raw_candidate_text", "")).strip(),
+                "technology": final_technical_name or str(first.get("canonical_candidate_name_en", "")).strip(),
+                "display_candidate_name": final_technical_name or str(first.get("display_candidate_name", "")).strip() or str(first.get("canonical_candidate_name_en", "")).strip(),
                 "normalized_candidate_text": str(first.get("normalized_candidate_text", "")).strip(),
                 "canonical_candidate_name_en": str(first.get("canonical_candidate_name_en", "")).strip(),
                 "constraint_signature": str(first.get("constraint_signature", "")).strip(),
@@ -1058,12 +1579,12 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
                 "org_count": len(orgs),
                 "orgs": sorted(orgs),
                 "source_types": source_types,
-                "source_count": len(source_types),
+                "source_count": source_count,
                 "mention_ids": sorted(mention_ids),
                 "mention_dates": mention_dates,
                 "evidence_titles": evidence_titles[:5],
                 "evidence_items": evidence_items[:5],
-                "weak_signal_event_count": len(mention_ids),
+                "weak_signal_event_count": cluster_evidence_count,
                 "candidate_evidence_quality": candidate_evidence_quality,
                 "candidate_core_evidence_quality": candidate_core_evidence_quality,
                 "low_quality_evidence_ratio": low_quality_evidence_ratio,
@@ -1088,7 +1609,7 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
                 "next_observation_window_start": str(first.get("next_observation_window_start", "")).strip(),
                 "next_observation_window_end": str(first.get("next_observation_window_end", "")).strip(),
                 "temporal_validation_reason": str(first.get("temporal_validation_reason", "")).strip(),
-                "weak_signal_event_ratio": round(len(mention_ids) / max(total_mentions, 1), 2),
+                "weak_signal_event_ratio": round(cluster_evidence_count / max(total_mentions, 1), 2),
                 "low_attention_ratio": round(sum(1 for record in mention_records if record.get("source_type") in {"paper", "patent"}) / max(total_mentions, 1), 2),
                 "niche_actor_ratio": round(sum(1 for org in orgs if org not in {"Unknown", "arXiv"}) / max(len(orgs), 1), 2),
                 "non_dominant_ratio": round(sum(1 for item in items if item.get("has_mechanism_core")) / max(len(items), 1), 2),
@@ -1121,7 +1642,7 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
                 "display_candidate_aliases": alias_terms,
                 "alias_count": len(alias_terms),
                 "true_alias_count": len(alias_terms),
-                "cluster_evidence_count": len(mention_ids),
+                "cluster_evidence_count": cluster_evidence_count,
                 "cluster_item_count": len(items),
                 "is_scope_echo": bool(first.get("is_scope_echo", False)),
                 "has_mechanism_core": bool(first.get("has_mechanism_core", False)),
@@ -1150,9 +1671,13 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
                 "hotspot_score": float(first.get("hotspot_score", 0.0) or 0.0),
                 "score": float(first.get("score", first.get("weak_signal_score", first.get("hotspot_score", 0.0))) or 0.0),
                 "explanation": str(first.get("explanation", "")).strip(),
+                "upstream_signal_type": str(first.get("signal_type", "")).strip(),
                 # 新增：内部标签与最终表述分离
                 "raw_phrase_cluster": "；".join(raw_variant_aliases[:5]) if raw_variant_aliases else "",
-                "final_research_object_name": str(first.get("topic_summary_name", "")).strip() or str(first.get("display_candidate_name", "")).strip(),
+                "final_research_object_name": final_technical_name or str(first.get("topic_summary_name", "")).strip() or str(first.get("display_candidate_name", "")).strip(),
+                "final_name_source": str(name_resolution.get("source", "")).strip(),
+                "technical_name_quality": str(name_resolution.get("quality", "")).strip(),
+                "technical_name_issue": str(name_resolution.get("issue", "")).strip(),
                 # 新增：对象族归一化信息
                 "canonical_term": norm_result.canonical_term,
                 "normalization_type": norm_result.normalization_type,
@@ -1180,15 +1705,32 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
 
     candidates_df = pd.DataFrame(candidates, columns=_empty_candidate_columns())
     if candidates_df.empty:
-        return {"candidates_df": candidates_df, "near_strong_candidates_df": candidates_df.copy()}
+        return {"candidates_df": candidates_df, "near_strong_candidates_df": candidates_df.copy(), "diagnostics": diagnostics}
     
     # 设置信号类型
     def _set_signal_type(row):
+        if str(row.get("technical_name_issue", "")).strip() == "application_only_surface":
+            return "other"
+        upstream_signal_type = str(row.get("upstream_signal_type", "")).strip()
+        if upstream_signal_type in {"weak_signal", "hotspot", "near_strong", "scope_overview", "other"}:
+            return upstream_signal_type
         if row.get("candidate_stage") == "scope_overview":
             return "scope_overview"
         elif row.get("candidate_stage") == "formed_candidate_strong":
             return "weak_signal"
         elif row.get("candidate_stage") == "formed_candidate":
+            evidence_ready = bool(
+                _safe_int(row.get("cluster_evidence_count"), 0) >= 2
+                and _safe_int(row.get("source_count"), 0) >= 2
+                and str(row.get("topic_granularity", "")).strip() == "fine_grained_topic"
+                and str(row.get("display_tier", "")).strip() == "weak_signal"
+                and row.get("is_scope_internal_candidate")
+                and row.get("has_mechanism_core")
+                and row.get("has_non_scope_constraint")
+                and not row.get("is_scope_echo")
+            )
+            if evidence_ready:
+                return "weak_signal"
             if row.get("is_scope_internal_candidate") and row.get("has_mechanism_core") and row.get("has_non_scope_constraint"):
                 return "near_strong"
             else:
@@ -1197,6 +1739,9 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
             return "other"
     
     candidates_df["signal_type"] = candidates_df.apply(_set_signal_type, axis=1)
+    diagnostics["application_only_rejected_count"] = int(
+        (candidates_df["technical_name_issue"].astype(str) == "application_only_surface").sum()
+    )
     
     candidates_df = candidates_df.sort_values(
         by=["total_mentions", "source_count", "org_count", "tech_name"],
@@ -1205,9 +1750,13 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
     near_strong_candidates_df = candidates_df[
         (candidates_df["signal_type"] == "near_strong")
     ].copy()
+    diagnostics["output_candidate_count"] = int(len(candidates_df))
+    diagnostics["final_weak_signal_count"] = int((candidates_df["signal_type"] == "weak_signal").sum())
+    diagnostics["near_strong_count"] = int(len(near_strong_candidates_df))
     return {
         "candidates_df": candidates_df,
         "near_strong_candidates_df": near_strong_candidates_df.reset_index(drop=True),
+        "diagnostics": diagnostics,
     }
 
 

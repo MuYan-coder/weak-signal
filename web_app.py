@@ -94,6 +94,16 @@ from src.core.pipeline import AnalysisPipeline
 from src.core.agent import TechForesightAgent
 from src.data_access.models import SourceQuery
 from src.data_access.repository import DataRepository
+from src.domain import (
+    DomainContext,
+    DomainPackGenerationRequest,
+    DomainPackGenerator,
+    build_domain_pack_review_state,
+    is_current_generated_domain_pack,
+    load_domain_pack,
+    recommend_source_counts,
+    validate_domain_pack,
+)
 from src.utils.config import Config
 from src.utils.env_config import ensure_env_loaded
 from src.utils.llm_client import get_provider_and_client
@@ -114,6 +124,84 @@ STAGE_NAMES = [
     "信号生成",
     "报告生成",
 ]
+
+DB_SOURCE_TYPES = ["paper", "news", "policy", "report", "patent"]
+DB_RAW_SOURCE_TYPES = ["literature", "consulting", "policy", "report", "patent"]
+DB_SOURCE_LABELS = {
+    "paper": "文献",
+    "news": "资讯",
+    "policy": "政策",
+    "report": "研报",
+    "patent": "专利",
+}
+DB_DEFAULT_SAMPLE_TOTAL = 240
+
+DOMAIN_SEARCH_TEMPLATES = {
+    "自定义领域": {
+        "field_id": "",
+        "field_name": "",
+        "keywords": "",
+        "synonyms": "",
+        "exclude_terms": "招聘, 培训, 广告",
+        "preset_pack_ref": "",
+    },
+    "人形机器人 preset": {
+        "field_id": "humanoid_robot",
+        "field_name": "人形机器人",
+        "keywords": "人形机器人, 人型机器人, 仿人机器人, 双足机器人, 仿生机器人, 足式机器人, 通用机器人, 具身机器人, 服务机器人, humanoid robot, bipedal robot, anthropomorphic robot, android robot, legged robot, general-purpose robot, embodied robot",
+        "synonyms": "双足行走, 步态规划, 步态生成, 运动控制, 动态平衡, 全身控制, 质心动力学, 零力矩点, ZMP, 落脚点规划, 接触规划, 多接触运动, 地形适应, 抗扰控制, humanoid robotics, bipedal locomotion, gait planning, gait generation, locomotion control, dynamic balance, whole-body control, centroidal dynamics, zero moment point, capture point, footstep planning, multi-contact locomotion, terrain adaptation, disturbance rejection, 全身运动规划, 逆运动学, 逆动力学, 力矩控制, 阻抗控制, 导纳控制, 接触力控制, 模型预测控制, 最优控制, 运动规划, 机器人操作, 灵巧操作, 灵巧手, 抓取规划, 双臂协作, 手眼协调, 移动操作, 全身操作, 接触丰富操作, 力控抓取",
+        "exclude_terms": "招聘, 培训, 广告, 课程, 招生, 销售",
+        "preset_pack_ref": "humanoid_robot",
+    },
+    "具身智能": {
+        "field_id": "embodied_ai",
+        "field_name": "具身智能",
+        "keywords": "具身智能, embodied intelligence, VLA, 灵巧手, 双足机器人",
+        "synonyms": "vision-language-action, 机器人基础模型, world model, 脑体协同",
+        "exclude_terms": "招聘, 培训, 广告, 课程",
+        "preset_pack_ref": "",
+    },
+    "世界模型": {
+        "field_id": "world_model",
+        "field_name": "世界模型",
+        "keywords": "世界模型, world model, 物理世界仿真, 生成式视频",
+        "synonyms": "physical simulation, video generation model",
+        "exclude_terms": "招聘, 培训, 广告, 课程",
+        "preset_pack_ref": "",
+    },
+    "太空制造": {
+        "field_id": "space_manufacturing",
+        "field_name": "太空制造",
+        "keywords": "太空制造, 空间制造, 轨道制造, 零重力制造, 在轨服务, 空间工厂, 太空3D打印",
+        "synonyms": "space manufacturing, in-orbit manufacturing, zero-gravity manufacturing, in-space manufacturing, orbital factory, space 3D printing, 空间装配, 空间机器人操作",
+        "exclude_terms": "招聘, 培训, 广告, 科幻电影, 游戏",
+        "preset_pack_ref": "",
+    },
+    "工业软件": {
+        "field_id": "industrial_software",
+        "field_name": "工业软件",
+        "keywords": "工业软件, CAD, CAM, CAE, PLM, MES, ERP, 工业互联网, 数字孪生, 制造执行系统",
+        "synonyms": "industrial software, computer-aided design, computer-aided engineering, product lifecycle management, manufacturing execution system, digital twin, 工业自动化软件, 研发设计类软件, 生产制造类软件, 运维服务类软件",
+        "exclude_terms": "招聘, 培训, 广告, 销售, 代理",
+        "preset_pack_ref": "",
+    },
+    "智能传感器": {
+        "field_id": "smart_sensors",
+        "field_name": "智能传感器",
+        "keywords": "智能传感器, 柔性传感器, 激光雷达, 视觉传感器, 触觉传感器, 惯性传感器, 仿生传感器, MEMS",
+        "synonyms": "smart sensor, flexible sensor, LiDAR, vision sensor, tactile sensor, inertial sensor, biomimetic sensor, micro-electromechanical systems, 边缘计算传感器, 智能感知, 多模态感知",
+        "exclude_terms": "招聘, 培训, 广告, 手机评测, 相机评测",
+        "preset_pack_ref": "",
+    },
+    "新型电子材料": {
+        "field_id": "new_electronic_materials",
+        "field_name": "新型电子材料",
+        "keywords": "新型电子材料, 半导体材料, 宽禁带半导体, 碳化硅, 氮化镓, 二维材料, 钙钛矿, 拓扑绝缘体",
+        "synonyms": "new electronic materials, semiconductor materials, wide bandgap semiconductor, SiC, GaN, 2D materials, perovskite, topological insulator, 量子材料, 柔性电子材料, 纳米电子材料",
+        "exclude_terms": "招聘, 培训, 广告, 股票分析, 行情",
+        "preset_pack_ref": "",
+    },
+}
 
 def get_fragment_decorator(run_every: Optional[str] = None):
     """兼容不同 Streamlit 版本的 fragment 装饰器。"""
@@ -147,6 +235,10 @@ def init_analysis_state():
         "analysis_outcome": "idle",
         "analysis_full_refresh_requested": False,
         "analysis_run_description": "",
+        "domain_pack_current": None,
+        "domain_pack_validation_report": None,
+        "domain_pack_analysis_confirmed": False,
+        "domain_pack_confirmed_counts": {},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -508,6 +600,259 @@ def render_data_source_selection(sources):
 
     return source_counts, total
 
+def split_csv_terms(value):
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+def available_domain_pack_options():
+    options = []
+    seen_hashes = set()
+    pack_dirs = [
+        Path(__file__).parent / "src" / "config" / "domain_packs",
+        Config.MEMORY_DIR / "domain_packs",
+    ]
+    for pack_dir in pack_dirs:
+        if not pack_dir.exists():
+            continue
+        for path in sorted(pack_dir.glob("*")):
+            if path.suffix.lower() not in {".yaml", ".yml", ".json"}:
+                continue
+            try:
+                pack = load_domain_pack(path)
+            except Exception:
+                continue
+            if pack.pack_id == "neutral" or pack.domain_pack_hash in seen_hashes:
+                continue
+            if not is_current_generated_domain_pack(pack):
+                continue
+            seen_hashes.add(pack.domain_pack_hash)
+            options.append({
+                "label": f"{pack.pack_name} · {pack.pack_id} · {pack.domain_pack_version} · {pack.domain_pack_hash}",
+                "ref": str(path),
+                "pack": pack,
+            })
+    return options
+
+def set_current_domain_pack(pack):
+    st.session_state.domain_pack_current = pack
+    st.session_state.domain_pack_validation_report = validate_domain_pack(
+        pack,
+        require_dry_run=False,
+    )
+    st.session_state.domain_pack_analysis_confirmed = False
+    st.session_state.domain_pack_confirmed_counts = {}
+
+def render_domain_pack_validation(report):
+    if report is None:
+        return
+    if report.is_valid:
+        st.success(f"Domain Pack 基础校验通过：{report.gate_status}")
+    else:
+        st.error(f"Domain Pack 基础校验未通过：{report.gate_status}")
+    if report.errors:
+        st.markdown("**错误**")
+        for item in report.errors:
+            st.error(item)
+    if report.warnings:
+        st.markdown("**提醒**")
+        for item in report.warnings:
+            st.warning(item)
+    if report.checks:
+        st.dataframe(
+            pd.DataFrame(
+                [{"检查项": key, "状态": value} for key, value in report.checks.items()]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+def render_domain_pack_review_panel(available_counts):
+    pack = st.session_state.get("domain_pack_current")
+    report = st.session_state.get("domain_pack_validation_report")
+    if pack is None:
+        st.info("请先生成 Domain Pack，或复用已有 Domain Pack。")
+        return {}, False
+
+    st.markdown("#### 当前领域运行包")
+    meta_cols = st.columns(4)
+    with meta_cols[0]:
+        st.metric("Pack ID", pack.pack_id)
+    with meta_cols[1]:
+        st.metric("版本", pack.domain_pack_version)
+    with meta_cols[2]:
+        st.metric("Hash", pack.domain_pack_hash)
+    with meta_cols[3]:
+        st.metric("模式", pack.source.get("mode", ""))
+
+    with st.expander("运行包核心规则预览", expanded=False):
+        strategy = pack.search_strategy if isinstance(pack.search_strategy, dict) else {}
+        formation = pack.candidate_formation if isinstance(pack.candidate_formation, dict) else {}
+        preview_rows = [
+            {"项目": "核心关键词", "内容": ", ".join(strategy.get("core_keywords", [])[:12])},
+            {"项目": "排除词", "内容": ", ".join(strategy.get("exclude_terms", [])[:12])},
+            {"项目": "候选对象类型", "内容": ", ".join(formation.get("technical_object_types", [])[:12])},
+            {"项目": "泛化壳词", "内容": ", ".join(formation.get("shell_terms", [])[:12])},
+        ]
+        st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
+
+    render_domain_pack_validation(report)
+
+    st.markdown("#### 数据源数量推荐")
+    recommendation = recommend_source_counts(
+        pack,
+        available_counts=available_counts,
+        total_sample_size=DB_DEFAULT_SAMPLE_TOTAL,
+        source_types=DB_SOURCE_TYPES,
+    )
+    explicit_counts = {}
+    count_cols = st.columns(len(DB_SOURCE_TYPES))
+    rows_by_source = recommendation.rows_by_source
+    for index, source_type in enumerate(DB_SOURCE_TYPES):
+        row = rows_by_source.get(source_type)
+        default_count = row.recommended_count if row else 0
+        with count_cols[index]:
+            explicit_counts[source_type] = int(st.number_input(
+                f"{DB_SOURCE_LABELS[source_type]}",
+                min_value=0,
+                max_value=1000,
+                value=int(default_count),
+                step=5,
+                key=f"db_count_{source_type}_{pack.domain_pack_hash}",
+            ))
+
+    final_recommendation = recommend_source_counts(
+        pack,
+        available_counts=available_counts,
+        total_sample_size=DB_DEFAULT_SAMPLE_TOTAL,
+        explicit_counts=explicit_counts,
+        source_types=DB_SOURCE_TYPES,
+    )
+    review_state = build_domain_pack_review_state(
+        pack,
+        available_counts=available_counts,
+        total_sample_size=DB_DEFAULT_SAMPLE_TOTAL,
+        explicit_counts=explicit_counts,
+        source_types=DB_SOURCE_TYPES,
+        confirmed=bool(st.session_state.get("domain_pack_analysis_confirmed", False)),
+    )
+    final_recommendation = review_state.recommendation
+    st.session_state.domain_pack_confirmed_counts = review_state.final_counts
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "来源": DB_SOURCE_LABELS.get(row.source_type, row.source_type),
+                    "权重": row.weight,
+                    "可用": row.available_count,
+                    "推荐": row.recommended_count,
+                    "最终": row.final_count,
+                    "原因": row.limit_reason,
+                }
+                for row in final_recommendation.rows
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+    confirmed = st.checkbox(
+        "使用当前运行包开始分析",
+        key="domain_pack_analysis_confirmed",
+        disabled=not review_state.validation_report.is_valid,
+    )
+    return review_state.final_counts, bool(confirmed and review_state.validation_report.is_valid and review_state.total_count > 0)
+
+@st.dialog("预览 Domain Pack 内容", width="large")
+def show_domain_pack_preview(pack_dict):
+    st.json(pack_dict)
+
+def render_domain_pack_controls(field_id, field_name, keywords, synonyms, exclude_terms):
+    st.markdown("#### 领域运行包")
+    preset_ref = DOMAIN_SEARCH_TEMPLATES.get(
+        st.session_state.get("selected_domain_template", "自定义领域"),
+        {},
+    ).get("preset_pack_ref", "")
+
+    action_cols = st.columns([1, 1, 1])
+    with action_cols[0]:
+        refresh_cache = st.checkbox("重新生成运行包", value=False)
+        if st.button("生成 Domain Pack", use_container_width=True):
+            if not field_id or not field_name or not keywords:
+                st.error("请先填写技术领域 ID、名称和至少一个检索词。")
+            else:
+                status_placeholder = st.empty()
+                status_placeholder.info("⏳ 准备生成 Domain Pack...")
+                try:
+                    request = DomainPackGenerationRequest(
+                        field_id=field_id,
+                        field_name=field_name,
+                        keywords=keywords,
+                        synonyms=synonyms,
+                        exclude_terms=exclude_terms,
+                        source_types=DB_SOURCE_TYPES,
+                    )
+
+                    def update_progress(stage_name, stage_idx):
+                        stage_labels = {
+                            "domain_modeling": "阶段 1/4: 领域建模 (Domain Modeling)...",
+                            "candidate_formation": "阶段 2/4: 候选成形范式 (Candidate Formation)...",
+                            "weak_signal_rules": "阶段 3/4: 弱信号识别规则 (Weak Signal Rules)...",
+                            "integration": "阶段 4/4: 整合与校验 (Integration & Check)...",
+                        }
+                        label = stage_labels.get(stage_name, f"阶段 {stage_idx}/4")
+                        status_placeholder.info(f"⏳ {label}")
+
+                    pack = DomainPackGenerator(memory_dir=Config.MEMORY_DIR / "domain_packs").generate(
+                        request,
+                        refresh_cache=refresh_cache,
+                        progress_fn=update_progress,
+                    )
+                    set_current_domain_pack(pack)
+                    status_placeholder.empty()
+                    st.success("Domain Pack 已生成并完成基础校验。")
+                except Exception as exc:
+                    status_placeholder.empty()
+                    st.error(f"Domain Pack 生成失败: {exc}")
+
+    with action_cols[1]:
+        if preset_ref:
+            if st.button("使用 preset Domain Pack", use_container_width=True):
+                try:
+                    set_current_domain_pack(load_domain_pack(preset_ref))
+                    st.success("已载入 preset Domain Pack。")
+                except Exception as exc:
+                    st.error(f"载入 preset Domain Pack 失败: {exc}")
+        else:
+            st.caption("当前模板仅填充表单，需要生成或复用运行包。")
+
+    with action_cols[2]:
+        options = available_domain_pack_options()
+        if options:
+            selected_label = st.selectbox(
+                "复用已有 Domain Pack",
+                options=[item["label"] for item in options],
+            )
+            col_load, col_preview, col_del = st.columns(3)
+            with col_load:
+                if st.button("载入运行包", use_container_width=True):
+                    selected = next(item for item in options if item["label"] == selected_label)
+                    set_current_domain_pack(load_domain_pack(selected["ref"]))
+                    st.success("已载入已有 Domain Pack。")
+            with col_preview:
+                if st.button("预览运行包", use_container_width=True):
+                    selected = next(item for item in options if item["label"] == selected_label)
+                    show_domain_pack_preview(selected["pack"].to_dict())
+            with col_del:
+                if st.button("删除运行包", use_container_width=True):
+                    selected = next(item for item in options if item["label"] == selected_label)
+                    try:
+                        os.remove(selected["ref"])
+                        st.success("运行包已删除！")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"删除失败: {e}")
+        else:
+            st.caption("暂无可复用运行包。")
+
+
 def run_analysis(
     source_counts,
     use_cache,
@@ -569,6 +914,10 @@ def run_analysis(
         emit_event("error", message="未选择任何数据源")
         return None
 
+    domain_context = None
+    if isinstance(source_config, dict):
+        domain_context = source_config.get("domain_context")
+
     if resume_mode == "events":
         add_log("开始从已抽取事件继续分析", "info")
     elif resume_mode == "report":
@@ -576,7 +925,14 @@ def run_analysis(
     else:
         add_log(f"开始分析，共 {total_samples} 条数据", "info")
 
-    pipeline = AnalysisPipeline()
+    pipeline = AnalysisPipeline(domain_context=domain_context)
+    add_log(
+        "Domain Pack: "
+        f"{pipeline.domain_context.domain_pack_id} / "
+        f"{pipeline.domain_context.domain_pack_version} / "
+        f"{pipeline.domain_context.domain_pack_hash}",
+        "info",
+    )
 
     try:
         if resume_mode == "events":
@@ -590,6 +946,12 @@ def run_analysis(
                 return None
 
             raw_data = pipeline._raw_data_from_events(events_df)
+            source_result_dir = Path(resume_path).parent if resume_path else None
+            pipeline._resolve_domain_context(
+                source_result_dir=source_result_dir,
+                events_df=events_df,
+                raw_data=raw_data,
+            )
             add_log(f"读取了 {len(events_df)} 个事件，已跳过数据加载和事件抽取", "success")
 
             update_stage("事件抽取与质量评分", "active", 1)
@@ -670,6 +1032,7 @@ def run_analysis(
 
             results = {
                 "result_dir": str(result_dir),
+                "domain_context": pipeline.domain_context,
                 "events_df": events_df,
                 "event_quality_df": pipeline.latest_event_quality_df,
                 "candidate_forms_df": candidate_forms_df,
@@ -828,6 +1191,7 @@ def run_analysis(
         add_log("🎉 分析流程全部完成！", "success")
 
         results = {
+            'domain_context': pipeline.domain_context,
             'events_df': events_df,
             'event_quality_df': pipeline.latest_event_quality_df,
             'candidate_forms_df': candidate_forms_df,
@@ -891,7 +1255,13 @@ def render_results(results):
             df,
             ['weak_signal_score', 'hotspot_score', 'source_count', 'total_mentions', 'cluster_evidence_count']
         )
-        return sorted_df.drop_duplicates(subset=[dedupe_column], keep='first')
+        dedupe_values = sorted_df[dedupe_column].fillna("").astype(str).str.strip()
+        non_empty_mask = ~dedupe_values.str.lower().isin({"", "nan", "none", "null", "nat"})
+        deduped_non_empty = sorted_df[non_empty_mask].drop_duplicates(subset=[dedupe_column], keep='first')
+        empty_key_rows = sorted_df[~non_empty_mask]
+        if empty_key_rows.empty:
+            return deduped_non_empty
+        return pd.concat([deduped_non_empty, empty_key_rows], ignore_index=True)
 
     def build_unique_signal_view(df):
         if df is None or df.empty:
@@ -1043,6 +1413,34 @@ def render_results(results):
         st.altair_chart(chart, use_container_width=True)
 
     st.markdown("## 📈 分析结果")
+    domain_context = results.get('domain_context')
+    if domain_context is not None:
+        st.caption(
+            "Domain Pack: "
+            f"{domain_context.domain_pack_id} · "
+            f"{domain_context.domain_pack_version} · "
+            f"{domain_context.domain_pack_hash} · "
+            f"{domain_context.runtime_mode}"
+        )
+    else:
+        domain_meta = {}
+        for frame_key in ["events_df", "signals_df", "candidate_forms_df"]:
+            frame = results.get(frame_key)
+            if isinstance(frame, pd.DataFrame) and not frame.empty and "domain_pack_hash" in frame.columns:
+                row = frame.iloc[0]
+                domain_meta = {
+                    "domain_pack_id": row.get("domain_pack_id", ""),
+                    "domain_pack_version": row.get("domain_pack_version", ""),
+                    "domain_pack_hash": row.get("domain_pack_hash", ""),
+                }
+                break
+        if domain_meta.get("domain_pack_hash"):
+            st.caption(
+                "Domain Pack: "
+                f"{domain_meta.get('domain_pack_id') or 'unknown'} · "
+                f"{domain_meta.get('domain_pack_version') or 'unknown'} · "
+                f"{domain_meta.get('domain_pack_hash')}"
+            )
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
@@ -2864,11 +3262,20 @@ def _build_history_results(folder_path: Path) -> Dict[str, Any]:
     if raw_data.empty:
         raw_data = pd.DataFrame(columns=["source_type"])
 
+    domain_context = None
+    domain_pack_path = folder_path / "domain_pack.yaml"
+    if domain_pack_path.exists():
+        try:
+            domain_context = DomainContext.from_pack(load_domain_pack(domain_pack_path))
+        except Exception:
+            domain_context = None
+
     near_strong_df = pd.DataFrame()
     if not signals_df.empty and "signal_type" in signals_df.columns:
         near_strong_df = signals_df[signals_df["signal_type"].isin(["near_strong", "hotspot"])].copy()
 
     return {
+        'domain_context': domain_context,
         'events_df': events_df,
         'event_quality_df': event_quality_df,
         'temporal_validation_df': temporal_validation_df,
@@ -2969,62 +3376,25 @@ def main():
         resume_mode = None
         resume_path = None
         custom_source_config = None
+        domain_pack_ready = True
+        selected_db_total = 0
 
         if analysis_source.startswith("数据库检索"):
             st.markdown("### 🔍 数据库检索条件配置")
 
-            # 使用模板快速填充
-            template_options = ["人形机器人 (默认)", "具身智能", "世界模型", "太空制造", "工业软件", "智能传感器", "新型电子材料", "自定义"]
-            selected_template = st.selectbox("技术领域检索模板", options=template_options)
-
-            if selected_template == "人形机器人 (默认)":
-                default_id = "humanoid_robot"
-                default_name = "人形机器人"
-                default_keywords = "人形机器人, 人型机器人, 仿人机器人, 双足机器人, 仿生机器人, 足式机器人, 通用机器人, 具身机器人, 服务机器人, humanoid robot, bipedal robot, anthropomorphic robot, android robot, legged robot, general-purpose robot, embodied robot"
-                default_synonyms = "双足行走, 步态规划, 步态生成, 运动控制, 动态平衡, 全身控制, 质心动力学, 零力矩点, ZMP, 落脚点规划, 接触规划, 多接触运动, 地形适应, 抗扰控制, humanoid robotics, bipedal locomotion, gait planning, gait generation, locomotion control, dynamic balance, whole-body control, centroidal dynamics, zero moment point, capture point, footstep planning, multi-contact locomotion, terrain adaptation, disturbance rejection, 全身运动规划, 逆运动学, 逆动力学, 力矩控制, 阻抗控制, 导纳控制, 接触力控制, 模型预测控制, 最优控制, 运动规划, 机器人操作, 灵巧操作, 灵巧手, 抓取规划, 双臂协作, 手眼协调, 移动操作, 全身操作, 接触丰富操作, 力控抓取"
-                default_exclude = "招聘, 培训, 广告, 课程, 招生, 销售"
-            elif selected_template == "具身智能":
-                default_id = "embodied_ai"
-                default_name = "具身智能"
-                default_keywords = "具身智能, embodied intelligence, VLA, 灵巧手, 双足机器人"
-                default_synonyms = "vision-language-action, 机器人基础模型, world model, 脑体协同"
-                default_exclude = "招聘, 培训, 广告, 课程"
-            elif selected_template == "世界模型":
-                default_id = "world_model"
-                default_name = "世界模型"
-                default_keywords = "世界模型, world model, 物理世界仿真, 生成式视频"
-                default_synonyms = "physical simulation, video generation model"
-                default_exclude = "招聘, 培训, 广告, 课程"
-            elif selected_template == "太空制造":
-                default_id = "space_manufacturing"
-                default_name = "太空制造"
-                default_keywords = "太空制造, 空间制造, 轨道制造, 零重力制造, 在轨服务, 空间工厂, 太空3D打印"
-                default_synonyms = "space manufacturing, in-orbit manufacturing, zero-gravity manufacturing, in-space manufacturing, orbital factory, space 3D printing, 空间装配, 空间机器人操作"
-                default_exclude = "招聘, 培训, 广告, 科幻电影, 游戏"
-            elif selected_template == "工业软件":
-                default_id = "industrial_software"
-                default_name = "工业软件"
-                default_keywords = "工业软件, CAD, CAM, CAE, PLM, MES, ERP, 工业互联网, 数字孪生, 制造执行系统"
-                default_synonyms = "industrial software, computer-aided design, computer-aided engineering, product lifecycle management, manufacturing execution system, digital twin, 工业自动化软件, 研发设计类软件, 生产制造类软件, 运维服务类软件"
-                default_exclude = "招聘, 培训, 广告, 销售, 代理"
-            elif selected_template == "智能传感器":
-                default_id = "smart_sensors"
-                default_name = "智能传感器"
-                default_keywords = "智能传感器, 柔性传感器, 激光雷达, 视觉传感器, 触觉传感器, 惯性传感器, 仿生传感器, MEMS"
-                default_synonyms = "smart sensor, flexible sensor, LiDAR, vision sensor, tactile sensor, inertial sensor, biomimetic sensor, micro-electromechanical systems, 边缘计算传感器, 智能感知, 多模态感知"
-                default_exclude = "招聘, 培训, 广告, 手机评测, 相机评测"
-            elif selected_template == "新型电子材料":
-                default_id = "new_electronic_materials"
-                default_name = "新型电子材料"
-                default_keywords = "新型电子材料, 半导体材料, 宽禁带半导体, 碳化硅, 氮化镓, 二维材料, 钙钛矿, 拓扑绝缘体"
-                default_synonyms = "new electronic materials, semiconductor materials, wide bandgap semiconductor, SiC, GaN, 2D materials, perovskite, topological insulator, 量子材料, 柔性电子材料, 纳米电子材料"
-                default_exclude = "招聘, 培训, 广告, 股票分析, 行情"
-            elif selected_template == "自定义":
-                default_id = ""
-                default_name = ""
-                default_keywords = ""
-                default_synonyms = ""
-                default_exclude = ""
+            template_options = list(DOMAIN_SEARCH_TEMPLATES.keys())
+            selected_template = st.selectbox(
+                "技术领域检索模板",
+                options=template_options,
+                index=0,
+                key="selected_domain_template",
+            )
+            template = DOMAIN_SEARCH_TEMPLATES[selected_template]
+            default_id = template["field_id"]
+            default_name = template["field_name"]
+            default_keywords = template["keywords"]
+            default_synonyms = template["synonyms"]
+            default_exclude = template["exclude_terms"]
 
             col_id, col_name = st.columns(2)
             with col_id:
@@ -3046,13 +3416,13 @@ def main():
             start_date_str = start_date_val.strftime("%Y-%m-%d")
             end_date_str = end_date_val.strftime("%Y-%m-%d")
 
-            keywords_list = [k.strip() for k in keywords_input.split(",") if k.strip()]
-            synonyms_list = [s.strip() for s in synonyms_input.split(",") if s.strip()]
-            exclude_list = [e.strip() for e in exclude_input.split(",") if e.strip()]
+            keywords_list = split_csv_terms(keywords_input)
+            synonyms_list = split_csv_terms(synonyms_input)
+            exclude_list = split_csv_terms(exclude_input)
 
             # 获取或初始化数据库可用数量
             if "db_counts" not in st.session_state:
-                st.session_state.db_counts = {"paper": 0, "news": 0, "policy": 0, "report": 0, "patent": 0}
+                st.session_state.db_counts = {"paper": 1000, "news": 1000, "policy": 1000, "report": 1000, "patent": 1000}
 
             # 构建查询参数用于获取统计或进行分析
             temp_query = SourceQuery(
@@ -3077,33 +3447,15 @@ def main():
                     except Exception as ex:
                         st.error(f"查询数据库数量失败: {ex}")
 
-            # 展示数量选择
-            c_p, c_n, c_po, c_r, c_pat = st.columns(5)
-            with c_p:
-                paper_count = st.number_input(
-                    f"文献 (可用: {st.session_state.db_counts.get('paper', 0)})",
-                    min_value=0, max_value=1000, value=min(80, max(0, st.session_state.db_counts.get('paper', 0)))
-                )
-            with c_n:
-                news_count = st.number_input(
-                    f"咨询 (可用: {st.session_state.db_counts.get('news', 0)})",
-                    min_value=0, max_value=1000, value=min(50, max(0, st.session_state.db_counts.get('news', 0)))
-                )
-            with c_po:
-                policy_count = st.number_input(
-                    f"政策 (可用: {st.session_state.db_counts.get('policy', 0)})",
-                    min_value=0, max_value=1000, value=min(30, max(0, st.session_state.db_counts.get('policy', 0)))
-                )
-            with c_r:
-                report_count = st.number_input(
-                    f"研报 (可用: {st.session_state.db_counts.get('report', 0)})",
-                    min_value=0, max_value=1000, value=min(30, max(0, st.session_state.db_counts.get('report', 0)))
-                )
-            with c_pat:
-                patent_count = st.number_input(
-                    f"专利 (可用: {st.session_state.db_counts.get('patent', 0)})",
-                    min_value=0, max_value=1000, value=min(50, max(0, st.session_state.db_counts.get('patent', 0)))
-                )
+            render_domain_pack_controls(
+                tech_field_id,
+                tech_field_name,
+                keywords_list,
+                synonyms_list,
+                exclude_list,
+            )
+            selected_counts, domain_pack_ready = render_domain_pack_review_panel(st.session_state.db_counts)
+            selected_db_total = sum(selected_counts.values())
 
             col_sort, col_topic = st.columns(2)
             with col_sort:
@@ -3117,15 +3469,6 @@ def main():
             with col_topic:
                 use_topic_index = st.checkbox("启用话题词库自动扩展", value=True)
 
-            # 拼装真正的 SourceQuery
-            selected_counts = {
-                "paper": int(paper_count),
-                "news": int(news_count),
-                "policy": int(policy_count),
-                "report": int(report_count),
-                "patent": int(patent_count)
-            }
-
             source_query = SourceQuery(
                 tech_field_id=tech_field_id,
                 tech_field_name=tech_field_name,
@@ -3135,7 +3478,7 @@ def main():
                 start_date=start_date_str,
                 end_date=end_date_str,
                 source_types=[k for k, v in selected_counts.items() if v > 0],
-                raw_source_types=["literature", "consulting", "policy", "report", "patent"],
+                raw_source_types=DB_RAW_SOURCE_TYPES,
                 counts=selected_counts,
                 use_topic_index=use_topic_index,
                 sort=sort_mode
@@ -3143,7 +3486,8 @@ def main():
 
             custom_source_config = {
                 "backend": "db",
-                "query": source_query
+                "query": source_query,
+                "domain_context": DomainContext.from_pack(st.session_state.domain_pack_current) if domain_pack_ready else None,
             }
         elif analysis_source.startswith("原始数据"):
             sources = get_available_data_sources()
@@ -3222,6 +3566,8 @@ def main():
 
         st.markdown("## 🚀 开始分析")
         start_disabled = st.session_state.analysis_running or (resume_mode in {"events", "report"} and not resume_path)
+        if analysis_source.startswith("数据库检索"):
+            start_disabled = start_disabled or (not domain_pack_ready) or selected_db_total <= 0
 
         col1, col2, col3 = st.columns(3)
         with col1:

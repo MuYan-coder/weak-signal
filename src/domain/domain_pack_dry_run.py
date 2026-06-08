@@ -23,6 +23,7 @@ class DomainPackDryRunReport:
     specific_candidate_count: int
     shell_candidate_ratio: float
     off_domain_leakage_terms: List[str] = field(default_factory=list)
+    off_domain_leakage_count: int = 0
     top_invalid_candidate_reasons: Dict[str, int] = field(default_factory=dict)
     recommended_pack_changes: List[str] = field(default_factory=list)
     manual_override: bool = False
@@ -45,6 +46,7 @@ class DomainPackDryRunReport:
             specific_candidate_count=int(payload.get("specific_candidate_count", 0) or 0),
             shell_candidate_ratio=float(payload.get("shell_candidate_ratio", 0.0) or 0.0),
             off_domain_leakage_terms=_dedupe_texts(payload.get("off_domain_leakage_terms", [])),
+            off_domain_leakage_count=int(payload.get("off_domain_leakage_count", 0) or 0),
             top_invalid_candidate_reasons={
                 str(key): int(value or 0)
                 for key, value in (payload.get("top_invalid_candidate_reasons", {}) or {}).items()
@@ -79,6 +81,7 @@ def run_domain_pack_dry_run(
     specific_candidate_count = 0
     shell_candidate_count = 0
     off_domain_hits: List[str] = []
+    off_domain_leakage_count = 0
 
     for candidate in candidates:
         candidate_text = _candidate_text(candidate)
@@ -94,6 +97,7 @@ def run_domain_pack_dry_run(
         if leakage_matches:
             reasons.append("off_domain_leakage")
             off_domain_hits.extend(leakage_matches)
+            off_domain_leakage_count += 1
         if _is_shell_candidate(candidate_text, specific_matches, shell_matches):
             reasons.append("shell_only")
             shell_candidate_count += 1
@@ -114,6 +118,7 @@ def run_domain_pack_dry_run(
         specific_candidate_count=specific_candidate_count,
         shell_candidate_ratio=shell_candidate_ratio,
         off_domain_leakage_terms=_dedupe_texts(off_domain_hits),
+        off_domain_leakage_count=off_domain_leakage_count,
         top_invalid_candidate_reasons=dict(invalid_reasons.most_common(8)),
         recommended_pack_changes=_recommend_pack_changes(
             candidate_count=candidate_count,
@@ -129,6 +134,20 @@ def run_domain_pack_dry_run(
         },
     )
     save_domain_pack_dry_run_report(report, memory_dir=memory_dir)
+    # Layer 5: 输出 off-domain 泄漏诊断汇总，便于运行日志快速定位问题
+    if off_domain_leakage_count > 0:
+        leakage_terms_preview = ", ".join(list({t for t in off_domain_hits})[:8])
+        print(
+            f"[dry_run] 警告: off-domain 泄漏候选数={off_domain_leakage_count}/{candidate_count}  "
+            f"(比例={off_domain_leakage_count / candidate_count:.1%})"
+            f"，示例词: {leakage_terms_preview}"
+        )
+    print(
+        f"[dry_run] 完成: pack_id={pack.pack_id} | "
+        f"candidates={candidate_count} | specific={specific_candidate_count} | "
+        f"shell_ratio={shell_candidate_ratio:.1%} | "
+        f"off_domain={off_domain_leakage_count}"
+    )
     return report
 
 
@@ -286,7 +305,13 @@ def _recommend_pack_changes(
     if shell_candidate_ratio > 0:
         recommendations.append("将高频壳词加入 invalid_candidate_patterns，或提高 min_non_shell_slots。")
     if off_domain_terms:
-        recommendations.append("扩展 exclude_terms、off_domain_anchor_terms 和 evidence_rejection_patterns。")
+        unique_terms = list({t for t in off_domain_terms})
+        off_domain_count = len(off_domain_terms)
+        preview = ", ".join(unique_terms[:6])
+        recommendations.append(
+            f"考虑扩展 exclude_terms、off_domain_anchor_terms 和 evidence_rejection_patterns；"
+            f"当前调播到 {off_domain_count} 个候选的 off-domain 泄漏词示例：{preview}。"
+        )
     return recommendations
 
 

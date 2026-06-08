@@ -777,6 +777,26 @@ def _matches_alias_map(texts: Iterable[Any], alias_map: Dict[str, List[str]]) ->
     return matched
 
 
+def is_sentence_like_mechanism(text: str, max_term_chars: int = 15) -> bool:
+    """判断一段文本是否像一个完整句子而非术语/短语。
+    用于阻止 "硅是从沙子中提炼出来的" 这类内容作为 mechanism_core。
+    如果文本包含常见句子标志词或中文字符数超过 max_term_chars，视为句子。"""
+    if not text:
+        return False
+    text = str(text).strip()
+    # 中文字符计数
+    zh_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
+    if zh_chars > max_term_chars:
+        return True
+    # 句子标志：包含动词性助词、判断词等
+    sentence_markers = ["是", "的", "了", "在", "从", "被", "把", "将", "让", "给", "着", "过"]
+    marker_count = sum(1 for marker in sentence_markers if marker in text)
+    # 多个句子标志词 + 较长文本 = 很可能是句子
+    if marker_count >= 3 and zh_chars > 8:
+        return True
+    return False
+
+
 @dataclass
 class DomainLexicon:
     pack_id: str = "neutral"
@@ -792,6 +812,7 @@ class DomainLexicon:
     generic_terms: List[str] = field(default_factory=list)
     shell_terms: List[str] = field(default_factory=list)
     off_domain_terms: List[str] = field(default_factory=list)
+    domain_anchor_terms: List[str] = field(default_factory=list)
     valid_candidate_patterns: List[Dict[str, Any]] = field(default_factory=list)
     invalid_candidate_patterns: List[Dict[str, Any]] = field(default_factory=list)
     minimum_specificity_rule: Dict[str, Any] = field(default_factory=dict)
@@ -1021,6 +1042,38 @@ class DomainLexicon:
             return has_robot_domain_anchor(text)
         return bool(self.detect_supported_observation_scopes(text) or self.extract_technologies(text) != ["unknown"])
 
+    def has_domain_anchor(self, text: str) -> bool:
+        """判断文本是否包含至少一个领域锚点词。
+        领域锚点从 Domain Pack 的 core_keywords + technical_object_types +
+        observation_scopes.technical_object 自动构建。
+        用于在 analysis_field scope 模式下仍确保文档与领域相关。"""
+        if self.use_legacy_robot_rules:
+            return has_robot_domain_anchor(text)
+        if not self.domain_anchor_terms:
+            # 没有配置锚点时默认通过（向后兼容）
+            return True
+        haystack = normalize_signal_phrase(text)
+        if not haystack:
+            return False
+        for anchor in self.domain_anchor_terms:
+            anchor_norm = normalize_signal_phrase(anchor)
+            if anchor_norm and anchor_norm in haystack:
+                return True
+        return False
+
+    def is_valid_mechanism_core(self, text: str) -> bool:
+        """判断文本是否是一个合理的 mechanism_core。
+        拒绝像完整句子一样的内容（如'硅是从沙子中提炼出来的'）。"""
+        if not text:
+            return False
+        # 如果在 mechanism_aliases 中有精确匹配，直接接受
+        if _matches_alias_map([text], self.mechanism_aliases):
+            return True
+        # 句子样的文本不应作为 mechanism
+        if is_sentence_like_mechanism(text):
+            return False
+        return True
+
     def has_non_scope_constraint(
         self,
         task_tokens: Iterable[str] | None = None,
@@ -1193,7 +1246,25 @@ def build_domain_lexicon(domain_source: Any = None) -> DomainLexicon:
 
     data_method_terms = _list_values(candidate_formation.get("data_or_method_types"))
     generic_terms = _dedupe_text(candidate_formation.get("generic_terms", []))
+    default_shells = [
+        "技术", "方法", "系统", "应用", "数据", "性能", "效果", "场景",
+        "technology", "method", "system", "application", "data", "performance", "effect", "scene"
+    ]
+    if len(generic_terms) < 2:
+        seen = {normalize_signal_phrase(t) for t in generic_terms}
+        for default_word in default_shells:
+            if (default_norm := normalize_signal_phrase(default_word)) and default_norm not in seen:
+                seen.add(default_norm)
+                generic_terms.append(default_word)
+
     shell_terms = _dedupe_text(candidate_formation.get("shell_terms", []))
+    if len(shell_terms) < 2:
+        seen = {normalize_signal_phrase(t) for t in shell_terms}
+        for default_word in default_shells:
+            if (default_norm := normalize_signal_phrase(default_word)) and default_norm not in seen:
+                seen.add(default_norm)
+                shell_terms.append(default_word)
+
     off_domain_terms = _dedupe_text(
         [
             *_list_values(observation_scopes.get("off_domain_anchor_terms")),
@@ -1205,20 +1276,100 @@ def build_domain_lexicon(domain_source: Any = None) -> DomainLexicon:
 
     valid_patterns = candidate_formation.get("valid_candidate_patterns", [])
     invalid_patterns = candidate_formation.get("invalid_candidate_patterns", [])
+    # 构建领域锚点集合：从 core_keywords + technical_object_types + observation_scopes.technical_object 合并
+    domain_anchor_sources = [
+        *_list_values(search_strategy.get("core_keywords")),
+        *_list_values(search_strategy.get("synonyms")),
+        *_list_values(candidate_formation.get("technical_object_types")),
+        *_list_values(observation_scopes.get("technical_object")),
+        *_list_values(observation_scopes.get("mechanism")),
+    ]
+    domain_anchor_terms = _dedupe_text(domain_anchor_sources)
+
+    mechanism_aliases = _alias_map_from_terms(candidate_formation.get("mechanism_types", []))
+    task_aliases = _alias_map_from_terms(candidate_formation.get("task_or_performance_types", []))
+    object_aliases = _alias_map_from_terms(candidate_formation.get("technical_object_types", []))
+    data_aliases = _alias_map_from_terms(data_method_terms)
+    method_aliases = _alias_map_from_terms(data_method_terms)
+    scene_aliases = _alias_map_from_terms(candidate_formation.get("scene_or_application_types", []))
+
+    # Support enrichment of aliases from canonicalization
+    canonicalization = _pack_section(pack, "canonicalization")
+    object_families = canonicalization.get("object_families", []) or []
+    alias_groups = canonicalization.get("alias_groups", []) or []
+
+    def _merge_aliases(target_dict: Dict[str, List[str]], key: str, aliases: List[str]):
+        normalized_key = str(key).strip()
+        if not normalized_key:
+            return False
+        matched_key = None
+        for canonical, existing_aliases in target_dict.items():
+            if canonical.lower() == normalized_key.lower() or any(a.lower() == normalized_key.lower() for a in existing_aliases):
+                matched_key = canonical
+                break
+        if matched_key:
+            merged = _dedupe_text([*target_dict[matched_key], *aliases])
+            target_dict[matched_key] = merged
+            return True
+        return False
+
+    # 1. Process object_families (which have term_type to help map directly)
+    for family in object_families:
+        if not isinstance(family, dict):
+            continue
+        canonical = str(family.get("canonical_term", "")).strip()
+        if not canonical:
+            continue
+        aliases = _dedupe_text(family.get("aliases", []))
+        term_type = str(family.get("term_type", "unknown")).strip().lower()
+
+        merged = False
+        if term_type in {"task", "capability"}:
+            merged = _merge_aliases(task_aliases, canonical, aliases)
+        elif term_type in {"model_name", "component"}:
+            merged = _merge_aliases(object_aliases, canonical, aliases)
+        elif term_type == "method":
+            merged = _merge_aliases(method_aliases, canonical, aliases) or _merge_aliases(data_aliases, canonical, aliases)
+        elif term_type == "scenario":
+            merged = _merge_aliases(scene_aliases, canonical, aliases)
+
+        if not merged:
+            for target in [object_aliases, mechanism_aliases, task_aliases, method_aliases, data_aliases, scene_aliases]:
+                if _merge_aliases(target, canonical, aliases):
+                    break
+
+    # 2. Process alias_groups
+    for group in alias_groups:
+        if not isinstance(group, dict):
+            continue
+        canonical = str(group.get("canonical", "")).strip()
+        if not canonical:
+            continue
+        aliases = _dedupe_text(group.get("aliases", []))
+
+        merged = False
+        for target in [object_aliases, mechanism_aliases, task_aliases, method_aliases, data_aliases, scene_aliases]:
+            if _merge_aliases(target, canonical, aliases):
+                merged = True
+                break
+        if not merged:
+            object_aliases[canonical] = _dedupe_text([canonical, *aliases])
+
     return DomainLexicon(
         pack_id=pack_id,
         pack_name=pack_name,
         use_legacy_robot_rules=False,
         observation_scope_aliases=observation_scope_aliases,
-        mechanism_aliases=_alias_map_from_terms(candidate_formation.get("mechanism_types", [])),
-        task_aliases=_alias_map_from_terms(candidate_formation.get("task_or_performance_types", [])),
-        object_aliases=_alias_map_from_terms(candidate_formation.get("technical_object_types", [])),
-        data_aliases=_alias_map_from_terms(data_method_terms),
-        method_aliases=_alias_map_from_terms(data_method_terms),
-        scene_aliases=_alias_map_from_terms(candidate_formation.get("scene_or_application_types", [])),
+        mechanism_aliases=mechanism_aliases,
+        task_aliases=task_aliases,
+        object_aliases=object_aliases,
+        data_aliases=data_aliases,
+        method_aliases=method_aliases,
+        scene_aliases=scene_aliases,
         generic_terms=generic_terms,
         shell_terms=shell_terms,
         off_domain_terms=off_domain_terms,
+        domain_anchor_terms=domain_anchor_terms,
         valid_candidate_patterns=valid_patterns if isinstance(valid_patterns, list) else [],
         invalid_candidate_patterns=invalid_patterns if isinstance(invalid_patterns, list) else [],
         minimum_specificity_rule=(

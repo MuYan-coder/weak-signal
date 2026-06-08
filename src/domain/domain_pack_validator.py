@@ -178,11 +178,30 @@ def _check_candidate_formation(
         candidate_formation.get("mechanism_types")
     )
     if len(generic_terms) < 2:
-        warnings.append("candidate_formation.generic_terms should include at least two shell-like examples")
+        errors.append("candidate_formation.generic_terms must include at least two shell-like examples")
     if len(shell_terms) < 2:
-        warnings.append("candidate_formation.shell_terms should include at least two shell-like examples")
+        errors.append("candidate_formation.shell_terms must include at least two shell-like examples")
     if not specific_terms:
         errors.append("candidate_formation must include technical object or mechanism terms")
+
+    invalid_patterns = _dict_items(candidate_formation.get("invalid_candidate_patterns"))
+    if not invalid_patterns:
+        errors.append("candidate_formation.invalid_candidate_patterns must contain at least one invalid pattern")
+
+    task_or_perf = _list_values(candidate_formation.get("task_or_performance_types"))
+    task_set = {t.lower() for t in task_or_perf}
+    if task_set and task_set.issubset({"性能", "应用", "效果", "performance", "application", "effect"}):
+        errors.append("candidate_formation.task_or_performance_types contains only generic/broad shell terms")
+
+    data_or_method = _list_values(candidate_formation.get("data_or_method_types"))
+    method_set = {t.lower() for t in data_or_method}
+    if method_set and method_set.issubset({"数据", "方法", "技术", "data", "method", "technology"}):
+        errors.append("candidate_formation.data_or_method_types contains only generic/broad shell terms")
+
+    scene_or_app = _list_values(candidate_formation.get("scene_or_application_types"))
+    scene_set = {t.lower() for t in scene_or_app}
+    if scene_set and scene_set.issubset({"场景", "应用", "系统", "scene", "application", "system"}):
+        errors.append("candidate_formation.scene_or_application_types contains only generic/broad shell terms")
 
     specificity_rule = candidate_formation.get("minimum_specificity_rule", {})
     if not isinstance(specificity_rule, dict):

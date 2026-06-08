@@ -14,7 +14,7 @@ ensure_env_loaded()
 _provider: str | None = None
 _client: Any = None
 
-DEFAULT_TIMEOUT = 120.0
+DEFAULT_TIMEOUT = float(os.getenv("LLM_CLIENT_DEFAULT_TIMEOUT", "120.0"))
 
 
 def get_provider_and_client():
@@ -86,6 +86,8 @@ def chat_text(
         }
         if system:
             kwargs["system"] = system
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         response = client.messages.create(**kwargs)
         text = "".join(getattr(block, "text", "") for block in getattr(response, "content", []))
         usage = getattr(response, "usage", None)

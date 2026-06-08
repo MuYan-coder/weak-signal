@@ -320,7 +320,7 @@ def _score_foresight_relevance(event: pd.Series, raw_record: Dict[str, Any]) -> 
     return round(min(score, 10.0), 2), "；".join(reasons)
 
 
-def _score_tech_relevance(event: pd.Series, raw_record: Dict[str, Any]) -> Tuple[float, str]:
+def _score_tech_relevance(event: pd.Series, raw_record: Dict[str, Any], domain_lexicon=None) -> Tuple[float, str]:
     score = 0.0
     reasons = []
     technologies = [_safe_text(item) for item in _safe_list(event.get("technology", []))]
@@ -340,10 +340,45 @@ def _score_tech_relevance(event: pd.Series, raw_record: Dict[str, Any]) -> Tuple
         reasons.append("命中观察范围")
 
     text = _combined_text(event, raw_record).lower()
-    keyword_hits = sorted({keyword for keyword in TECH_KEYWORDS if keyword.lower() in text})
-    if keyword_hits:
-        score += min(3.3, 0.7 + len(keyword_hits[:5]) * 0.5)
-        reasons.append("技术关键词=" + "/".join(keyword_hits[:5]))
+
+    if domain_lexicon is not None and not domain_lexicon.use_legacy_robot_rules:
+        # Check off-domain exclusions
+        off_domain_hits = []
+        if getattr(domain_lexicon, "off_domain_terms", None):
+            from src.extraction.tech_lexicon import normalize_signal_phrase
+            haystack = normalize_signal_phrase(text)
+            for term in domain_lexicon.off_domain_terms:
+                term_norm = normalize_signal_phrase(term)
+                if term_norm and term_norm in haystack:
+                    off_domain_hits.append(term)
+
+        # Check domain anchors
+        anchor_hits = []
+        if getattr(domain_lexicon, "domain_anchor_terms", None):
+            from src.extraction.tech_lexicon import normalize_signal_phrase
+            haystack = normalize_signal_phrase(text)
+            for anchor in domain_lexicon.domain_anchor_terms:
+                anchor_norm = normalize_signal_phrase(anchor)
+                if anchor_norm and anchor_norm in haystack:
+                    anchor_hits.append(anchor)
+
+        # Apply score adjustments
+        if anchor_hits:
+            score += min(3.3, 0.7 + len(anchor_hits[:5]) * 0.5)
+            reasons.append("领域锚点=" + "/".join(anchor_hits[:5]))
+        else:
+            score = max(0.0, score - 3.0)
+            reasons.append("无领域锚点惩罚")
+
+        if off_domain_hits:
+            penalty = min(len(off_domain_hits) * 1.5, 6.0)
+            score = max(0.0, score - penalty)
+            reasons.append(f"域外惩罚-{penalty:.1f}(" + "/".join(off_domain_hits[:3]) + ")")
+    else:
+        keyword_hits = sorted({keyword for keyword in TECH_KEYWORDS if keyword.lower() in text})
+        if keyword_hits:
+            score += min(3.3, 0.7 + len(keyword_hits[:5]) * 0.5)
+            reasons.append("技术关键词=" + "/".join(keyword_hits[:5]))
 
     if not reasons:
         reasons.append("未发现明确技术线索")
@@ -400,11 +435,11 @@ def _quality_tier(score: float) -> str:
     return "very_low"
 
 
-def _quality_row(event: pd.Series, raw_record: Dict[str, Any], index: int) -> Dict[str, Any]:
+def _quality_row(event: pd.Series, raw_record: Dict[str, Any], index: int, domain_lexicon=None) -> Dict[str, Any]:
     event_id = _event_id(event, index)
     source_type = _normalize_source_type(event.get("source_type") or raw_record.get("source_type"))
     completeness, completeness_reason = _score_completeness(event, raw_record)
-    tech_relevance, tech_reason = _score_tech_relevance(event, raw_record)
+    tech_relevance, tech_reason = _score_tech_relevance(event, raw_record, domain_lexicon=domain_lexicon)
     traceability, trace_reason = _score_traceability(event, raw_record, event_id)
     evidence_span, evidence_reason = _score_evidence_span(event, raw_record)
     confidence, confidence_reason = _score_confidence(event)
@@ -456,7 +491,7 @@ def _quality_row(event: pd.Series, raw_record: Dict[str, Any], index: int) -> Di
     }
 
 
-def build_event_quality_table(events_df: pd.DataFrame, raw_data: pd.DataFrame | None = None) -> pd.DataFrame:
+def build_event_quality_table(events_df: pd.DataFrame, raw_data: pd.DataFrame | None = None, domain_lexicon=None) -> pd.DataFrame:
     """Build an event-level quality table.
 
     Every event row receives a score. Empty or malformed fields reduce the
@@ -470,7 +505,7 @@ def build_event_quality_table(events_df: pd.DataFrame, raw_data: pd.DataFrame | 
     for index, event in events_df.reset_index(drop=True).iterrows():
         event_id = _event_id(event, index)
         raw_record = raw_by_id.get(_safe_text(event.get("id")), {})
-        rows.append(_quality_row(event, raw_record, index))
+        rows.append(_quality_row(event, raw_record, index, domain_lexicon=domain_lexicon))
     return pd.DataFrame(rows, columns=EVENT_QUALITY_COLUMNS)
 
 
