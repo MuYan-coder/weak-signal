@@ -1,0 +1,641 @@
+schema_version: domain_pack_v1
+pack_id: humanoid_robot
+pack_name: 人形机器人技术领域
+pack_version: '1.0'
+source:
+  mode: llm_generated
+  model: Qwen/Qwen2.5-32B-Instruct
+  prompt_version: domain_pack_generator_v3
+  based_on_user_input:
+    field_id: humanoid_robot
+    field_name: 人形机器人
+    keywords:
+    - 人形机器人
+    - 人型机器人
+    - 仿人机器人
+    - 双足机器人
+    - 仿生机器人
+    - 足式机器人
+    - 通用机器人
+    - 具身机器人
+    - 服务机器人
+    - humanoid robot
+    - bipedal robot
+    - anthropomorphic robot
+    - android robot
+    - legged robot
+    - general-purpose robot
+    - embodied robot
+    synonyms:
+    - 双足行走
+    - 步态规划
+    - 步态生成
+    - 运动控制
+    - 动态平衡
+    - 全身控制
+    - 质心动力学
+    - 零力矩点
+    - ZMP
+    - 落脚点规划
+    - 接触规划
+    - 多接触运动
+    - 地形适应
+    - 抗扰控制
+    - humanoid robotics
+    - bipedal locomotion
+    - gait planning
+    - gait generation
+    - locomotion control
+    - dynamic balance
+    - whole-body control
+    - centroidal dynamics
+    - zero moment point
+    - capture point
+    - footstep planning
+    - multi-contact locomotion
+    - terrain adaptation
+    - disturbance rejection
+    - 全身运动规划
+    - 逆运动学
+    - 逆动力学
+    - 力矩控制
+    - 阻抗控制
+    - 导纳控制
+    - 接触力控制
+    - 模型预测控制
+    - 最优控制
+    - 运动规划
+    - 机器人操作
+    - 灵巧操作
+    - 灵巧手
+    - 抓取规划
+    - 双臂协作
+    - 手眼协调
+    - 移动操作
+    - 全身操作
+    - 接触丰富操作
+    - 力控抓取
+    exclude_terms:
+    - 招聘
+    - 培训
+    - 广告
+    - 课程
+    - 招生
+    - 销售
+domain_identity:
+  field_id: humanoid_robot
+  field_name: 人形机器人
+  parent_industries: []
+  domain_boundary: 人形机器人技术领域，涵盖人形机器人设计、制造、控制、应用等各个方面。
+  adjacent_domains:
+  - 机器人技术
+  - 人工智能
+  - 自动化工程
+  - 机械工程
+  - 计算机科学
+  out_of_scope_domains:
+  - 人力资源
+  - 金融分析
+  - 市场营销
+  - 社会新闻
+  - 电子商务
+  - 娱乐传媒
+  - 房地产
+  - 健康养生
+search_strategy:
+  core_keywords:
+  - 人形机器人
+  - 人型机器人
+  - 仿人机器人
+  - 双足机器人
+  - 仿生机器人
+  - 足式机器人
+  - 通用机器人
+  - 具身机器人
+  - 服务机器人
+  - humanoid robot
+  - bipedal robot
+  - anthropomorphic robot
+  - android robot
+  - legged robot
+  - general-purpose robot
+  - embodied robot
+  synonyms:
+  - 双足行走
+  - 步态规划
+  - 步态生成
+  - 运动控制
+  - 动态平衡
+  - 全身控制
+  - 质心动力学
+  - 零力矩点
+  - ZMP
+  - 落脚点规划
+  - 接触规划
+  - 多接触运动
+  - 地形适应
+  - 抗扰控制
+  - humanoid robotics
+  - bipedal locomotion
+  - gait planning
+  - gait generation
+  - locomotion control
+  - dynamic balance
+  - whole-body control
+  - centroidal dynamics
+  - zero moment point
+  - capture point
+  - footstep planning
+  - multi-contact locomotion
+  - terrain adaptation
+  - disturbance rejection
+  - 全身运动规划
+  - 逆运动学
+  - 逆动力学
+  - 力矩控制
+  - 阻抗控制
+  - 导纳控制
+  - 接触力控制
+  - 模型预测控制
+  - 最优控制
+  - 运动规划
+  - 机器人操作
+  - 灵巧操作
+  - 灵巧手
+  - 抓取规划
+  - 双臂协作
+  - 手眼协调
+  - 移动操作
+  - 全身操作
+  - 接触丰富操作
+  - 力控抓取
+  english_terms:
+  - humanoid robot
+  - bipedal robot
+  - anthropomorphic robot
+  - android robot
+  - legged robot
+  - general-purpose robot
+  - embodied robot
+  - humanoid robotics
+  - bipedal locomotion
+  - gait planning
+  - gait generation
+  - locomotion control
+  - dynamic balance
+  - whole-body control
+  - centroidal dynamics
+  - zero moment point
+  - capture point
+  - footstep planning
+  - multi-contact locomotion
+  - terrain adaptation
+  - disturbance rejection
+  - whole-body motion planning
+  - inverse kinematics
+  - inverse dynamics
+  - torque control
+  - impedance control
+  - admittance control
+  - contact force control
+  - model predictive control
+  - optimal control
+  - motion planning
+  - robotic manipulation
+  - dexterous manipulation
+  - dexterous hand
+  - grasping planning
+  - bimanual coordination
+  - hand-eye coordination
+  - mobile manipulation
+  - whole-body manipulation
+  - contact-rich manipulation
+  - force-controlled grasping
+  exclude_terms:
+  - 招聘
+  - 培训
+  - 广告
+  - 课程
+  - 招生
+  - 销售
+  - 股票分析
+  - 行情
+  - 娱乐
+  - 美食
+  - 旅游
+  - 健康养生
+  - 房地产
+  - 直播带货
+  - 二手交易
+  - 电商
+  - 退款
+  - 维权
+  - 社会新闻
+  source_type_weights:
+    paper: 1.0
+    patent: 1.0
+    news: 1.0
+    report: 1.0
+    policy: 1.0
+  count_policy:
+    mode: recommend_only
+    default_total_sample_size: 0
+    min_per_source: {}
+    max_per_source: {}
+  query_expansion_rules: []
+observation_scopes:
+  main_scope: 人形机器人技术领域
+  sub_scopes:
+  - 人形机器人设计
+  - 人形机器人控制
+  - 人形机器人应用
+  - 人形机器人制造
+  - 人形机器人
+  - 人型机器人
+  - 仿人机器人
+  - 双足机器人
+  - 仿生机器人
+  - 足式机器人
+  - 通用机器人
+  - 具身机器人
+  - 服务机器人
+  - humanoid robot
+  - bipedal robot
+  - anthropomorphic robot
+  - android robot
+  - legged robot
+  - general-purpose robot
+  - embodied robot
+  scope_aliases:
+  - 双足行走
+  - 步态规划
+  - 步态生成
+  - 运动控制
+  - 动态平衡
+  - 全身控制
+  - 质心动力学
+  - 零力矩点
+  - ZMP
+  - 落脚点规划
+  - 接触规划
+  - 多接触运动
+  - 地形适应
+  - 抗扰控制
+  - humanoid robotics
+  - bipedal locomotion
+  - gait planning
+  - gait generation
+  - locomotion control
+  - dynamic balance
+  - whole-body control
+  - centroidal dynamics
+  - zero moment point
+  - capture point
+  - footstep planning
+  - multi-contact locomotion
+  - terrain adaptation
+  - disturbance rejection
+  - 全身运动规划
+  - 逆运动学
+  - 逆动力学
+  - 力矩控制
+  scope_echo_terms:
+  - 人形机器人
+  - 人型机器人
+  - 仿人机器人
+  - 双足机器人
+  - 仿生机器人
+  - 足式机器人
+  - 通用机器人
+  - 具身机器人
+  - 服务机器人
+  - humanoid robot
+  - bipedal robot
+  - anthropomorphic robot
+  - android robot
+  - legged robot
+  - general-purpose robot
+  - embodied robot
+  - 双足行走
+  - 步态规划
+  - 步态生成
+  - 运动控制
+  - 动态平衡
+  - 全身控制
+  - 质心动力学
+  - 零力矩点
+  - ZMP
+  - 落脚点规划
+  - 接触规划
+  - 多接触运动
+  - 地形适应
+  - 抗扰控制
+  - humanoid robotics
+  - bipedal locomotion
+  off_domain_anchor_terms:
+  - 招聘
+  - 培训
+  - 广告
+  - 课程
+  - 招生
+  - 销售
+  - 股票分析
+  - 行情
+  - 娱乐
+  - 美食
+  - 旅游
+  - 健康养生
+  - 房地产
+  - 直播带货
+  - 二手交易
+  - 电商
+  - 退款
+  - 维权
+  - 社会新闻
+  - 人力资源
+  - 金融分析
+  - 市场营销
+  - 电子商务
+  - 娱乐传媒
+candidate_formation:
+  technical_object_types:
+  - 人形机器人
+  - 双足机器人
+  - 仿人机器人
+  - 人型机器人
+  - 足式机器人
+  - 通用机器人
+  - 具身机器人
+  - 服务机器人
+  - 仿生机器人
+  - humanoid robot
+  - bipedal robot
+  - anthropomorphic robot
+  mechanism_types:
+  - 质心动力学
+  - 零力矩点
+  - 捕获点
+  - 逆运动学
+  - 逆动力学
+  - 模型预测控制
+  - 最优控制
+  - 运动控制
+  - 动态平衡
+  - 全身控制
+  - 落脚点规划
+  - 多接触运动
+  - 地形适应
+  - 抗扰控制
+  - 运动规划
+  - 机器人操作
+  - 灵巧操作
+  - 双臂协作
+  - 手眼协调
+  - 移动操作
+  - 全身操作
+  - 接触丰富操作
+  - 力控抓取
+  task_or_performance_types:
+  - 行走任务
+  - 平衡任务
+  - 操作任务
+  - 动态性能
+  - 稳定性
+  - 操作性能
+  - 效率
+  data_or_method_types:
+  - 传感器数据
+  - 运动数据
+  - 控制方法
+  - 规划方法
+  - 学习方法
+  - 优化方法
+  scene_or_application_types:
+  - 室内应用
+  - 室外应用
+  - 服务应用
+  - 工业应用
+  - 研究应用
+  - 应急应用
+  generic_terms:
+  - 技术
+  - 方法
+  - 系统
+  - 应用
+  - 数据
+  - 性能
+  - 效果
+  - 场景
+  - technology
+  - method
+  - system
+  - application
+  - data
+  - performance
+  - effect
+  - scene
+  shell_terms:
+  - 技术
+  - 方法
+  - 系统
+  - 应用
+  - 数据
+  - 性能
+  - 效果
+  - 场景
+  - technology
+  - method
+  - system
+  - application
+  - data
+  - performance
+  - effect
+  - scene
+  valid_candidate_patterns:
+  - pattern_id: humanoid_robot_mechanism_task
+    pattern: technical_object + mechanism + task
+    required_slots:
+    - technical_object
+    - mechanism
+    - task
+  - pattern_id: humanoid_robot_performance_evidence
+    pattern: technical_object + performance + evidence_span
+    required_slots:
+    - technical_object
+    - performance
+    - evidence_span
+  - pattern_id: humanoid_robot_method_data
+    pattern: technical_object + method + data_modality
+    required_slots:
+    - technical_object
+    - method
+    - data_modality
+  - pattern_id: humanoid_robot_scene_application
+    pattern: technical_object + scene + application
+    required_slots:
+    - technical_object
+    - scene
+    - application
+  invalid_candidate_patterns:
+  - pattern_id: shell_term_only
+    pattern: shell_terms
+    reject_terms:
+    - technology
+    - method
+    - system
+    - application
+    - data
+    - performance
+    - effect
+    - scene
+    - technology_en
+    - method_en
+    - system_en
+    - application_en
+    - data_en
+    - performance_en
+    - effect_en
+    - scene_en
+    max_specific_slot_count: 0
+  - pattern_id: shell_only_rejection
+    reject_terms:
+    - 技术
+    - 方法
+    - 系统
+    - 应用
+    - 数据
+    - 性能
+    - 效果
+    - 场景
+    max_specific_slot_count: 0
+  minimum_specificity_rule:
+    min_non_shell_slots: 2
+    require_evidence_span: true
+    allow_scope_only_candidate: false
+weak_signal_rules:
+  early_stage_markers:
+  - 实验室验证
+  - 原型验证
+  - 概念验证
+  - 初步设计
+  - 理论研究
+  - 基础研究
+  - 探索性研究
+  - 创新性研究
+  - 初步实验
+  - 初步测试
+  - 初步应用
+  low_attention_markers:
+  - 低引用
+  - 少量报道
+  - 较少关注
+  - 较少提及
+  - 较少讨论
+  - 较少研究
+  - 较少应用
+  - 较少案例
+  - 较少文献
+  - 较少数据
+  niche_actor_markers:
+  - 小团队
+  - 初创企业
+  - 小型企业
+  - 研究机构
+  - 学术团体
+  - 个人研究者
+  - 独立开发者
+  - 非主流企业
+  - 非主流团队
+  - 非主流研究者
+  cross_domain_markers:
+  - 跨领域
+  - 交叉应用
+  - 跨学科
+  - 多学科
+  - 跨行业
+  - 多行业
+  - 跨技术
+  - 多技术
+  - 跨专业
+  - 多专业
+  engineering_trace_markers:
+  - 工艺优化
+  - 参数调整
+  - 设计改进
+  - 技术改进
+  - 性能提升
+  - 功能增强
+  - 系统优化
+  - 结构优化
+  - 材料优化
+  - 工艺创新
+  commercialization_noise_markers:
+  - 市场推广
+  - 融资
+  - 投资
+  - 商业合作
+  - 商业计划
+  - 商业模式
+  - 市场策略
+  - 营销活动
+  - 产品推广
+  - 品牌推广
+  policy_or_market_noise_markers:
+  - 政策支持
+  - 市场趋势
+  - 政策导向
+  - 政策变化
+  - 市场动态
+  - 市场分析
+  - 政策分析
+  - 政策解读
+  - 市场预测
+  - 政策预测
+  scoring_adjustments:
+  - rule_id: rule_001
+    score_delta: 5
+    max_delta: 10
+  - rule_id: rule_002
+    score_delta: -3
+    max_delta: -5
+  - rule_id: rule_003
+    score_delta: 2
+    max_delta: 5
+  - rule_id: rule_004
+    score_delta: -1
+    max_delta: -2
+generated_at: '2026-06-08T02:57:01.969007+00:00'
+canonicalization:
+  object_families: []
+  alias_groups: []
+  parent_child_terms: []
+  do_not_merge_rules: []
+  object_family_enabled: false
+evidence_rules:
+  strong_evidence_patterns: []
+  weak_evidence_patterns: []
+  source_reliability_hints:
+  - paper
+  - news
+  - policy
+  - report
+  - patent
+  traceability_fields:
+  - title
+  - text
+  - evidence_span
+  - source_type
+  evidence_rejection_patterns:
+  - 招聘
+  - 培训
+  - 广告
+  - 课程
+  - 招生
+  - 销售
+reporting:
+  display_labels:
+    domain: 人形机器人
+  explanation_templates: []
+  review_hints: []
+domain_pack_version: '1.0'
+domain_pack_hash: 6c66e05b3f6a6a67

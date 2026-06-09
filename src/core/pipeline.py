@@ -1805,9 +1805,18 @@ class AnalysisPipeline:
 
         if not dfs:
             if source_config:
-                print("  警告: 当前来源配置未加载到数据，停止本轮分析，避免回退到无关默认样例")
+                available_files = [f.name for f in data_files]
+                print(
+                    "  [数据加载] 当前来源配置未匹配到本地数据文件，"
+                    f"来源需求={source_config.get('sources', [])}，"
+                    f"data/ 目录中的文件={available_files}。"
+                    " 停止本轮分析，避免回退到无关默认样例。"
+                    " 请提供 data_path 或将 WEAK_SIGNAL_DATA_BACKEND 设置为 db。"
+                )
                 return pd.DataFrame()
-            # 如果没有按配置加载，回退到默认行为
+            # 如果没有按配置加载，回退到默认行为（仅在无 source_config 时）
+            print("  警告: 无来源配置，回退到 data/ 目录默认文件加载。"
+                  " 该行为可能导致分析内容与目标领域不相关，建议提供明确 data_path。")
             for f in data_files[:5]:
                 df = load_single_file(f)
                 if df is not None:

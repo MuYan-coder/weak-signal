@@ -1,0 +1,403 @@
+schema_version: domain_pack_v1
+pack_id: new_electronic_materials
+pack_name: 新型电子材料
+pack_version: '1.0'
+source:
+  mode: llm_generated
+  model: Qwen/Qwen2.5-32B-Instruct
+  prompt_version: domain_pack_generator_v3
+  based_on_user_input:
+    field_id: new_electronic_materials
+    field_name: 新型电子材料
+    keywords:
+    - 新型电子材料
+    - 半导体材料
+    - 宽禁带半导体
+    - 碳化硅
+    - 氮化镓
+    - 二维材料
+    - 钙钛矿
+    - 拓扑绝缘体
+    synonyms:
+    - new electronic materials
+    - semiconductor materials
+    - wide bandgap semiconductor
+    - SiC
+    - GaN
+    - 2D materials
+    - perovskite
+    - topological insulator
+    - 量子材料
+    - 柔性电子材料
+    - 纳米电子材料
+    exclude_terms:
+    - 招聘
+    - 培训
+    - 广告
+    - 股票分析
+    - 行情
+domain_identity:
+  field_id: new_electronic_materials
+  field_name: 新型电子材料
+  parent_industries: []
+  domain_boundary: 新型电子材料
+  adjacent_domains:
+  - 材料科学
+  - 半导体技术
+  - 纳米技术
+  - 量子技术
+  out_of_scope_domains:
+  - 人力资源
+  - 金融分析
+  - 市场营销
+  - 社会新闻
+  - 电子商务
+  - 娱乐传媒
+  - 房地产
+  - 健康养生
+search_strategy:
+  core_keywords:
+  - 新型电子材料
+  - 半导体材料
+  - 宽禁带半导体
+  - 碳化硅
+  - 氮化镓
+  - 二维材料
+  - 钙钛矿
+  - 拓扑绝缘体
+  synonyms:
+  - new electronic materials
+  - semiconductor materials
+  - wide bandgap semiconductor
+  - SiC
+  - GaN
+  - 2D materials
+  - perovskite
+  - topological insulator
+  - 量子材料
+  - 柔性电子材料
+  - 纳米电子材料
+  english_terms:
+  - new electronic materials
+  - semiconductor materials
+  - wide bandgap semiconductor
+  - SiC
+  - GaN
+  - 2D materials
+  - perovskite
+  - topological insulator
+  exclude_terms:
+  - 招聘
+  - 培训
+  - 广告
+  - 股票分析
+  - 行情
+  - 娱乐
+  - 美食
+  - 旅游
+  - 健康养生
+  - 房地产
+  - 直播带货
+  - 二手交易
+  - 电商
+  - 退款
+  - 维权
+  - 社会新闻
+  source_type_weights:
+    paper: 1.0
+    patent: 1.0
+    news: 1.0
+    report: 1.0
+    policy: 1.0
+  count_policy:
+    mode: recommend_only
+    default_total_sample_size: 0
+    min_per_source: {}
+    max_per_source: {}
+  query_expansion_rules: []
+observation_scopes:
+  main_scope: 新型电子材料
+  sub_scopes:
+  - 半导体材料
+  - 宽禁带半导体
+  - 二维材料
+  - 钙钛矿
+  - 拓扑绝缘体
+  - 新型电子材料
+  - 碳化硅
+  - 氮化镓
+  scope_aliases:
+  - new electronic materials
+  - semiconductor materials
+  - wide bandgap semiconductor
+  - SiC
+  - GaN
+  - 2D materials
+  - perovskite
+  - topological insulator
+  - 量子材料
+  - 柔性电子材料
+  - 纳米电子材料
+  scope_echo_terms:
+  - 新型电子材料
+  - 半导体材料
+  - 宽禁带半导体
+  - 碳化硅
+  - 氮化镓
+  - 二维材料
+  - 钙钛矿
+  - 拓扑绝缘体
+  - new_electronic_materials
+  off_domain_anchor_terms:
+  - 招聘
+  - 培训
+  - 广告
+  - 股票分析
+  - 行情
+  - 娱乐
+  - 美食
+  - 旅游
+  - 健康养生
+  - 房地产
+  - 直播带货
+  - 二手交易
+  - 电商
+  - 退款
+  - 维权
+  - 社会新闻
+  - 人力资源
+  - 金融分析
+  - 市场营销
+  - 电子商务
+  - 娱乐传媒
+candidate_formation:
+  technical_object_types:
+  - 新型电子材料
+  - new electronic materials
+  - 半导体材料
+  - semiconductor materials
+  - 宽禁带半导体
+  - wide bandgap semiconductor
+  - 碳化硅
+  - SiC
+  - 氮化镓
+  - GaN
+  - 二维材料
+  - 2D materials
+  - 钙钛矿
+  - perovskite
+  - 拓扑绝缘体
+  - topological insulator
+  mechanism_types:
+  - 能带理论
+  - band theory
+  - 量子效应
+  - quantum effect
+  - 电子迁移
+  - electron mobility
+  - 载流子传输
+  - carrier transport
+  - 化学气相沉积
+  - CVD
+  - 分子束外延
+  - MBE
+  - 薄膜生长
+  - film growth
+  - 掺杂工艺
+  - doping process
+  - 表面处理
+  - surface treatment
+  task_or_performance_types:
+  - 电导率
+  - conductivity
+  - 载流子浓度
+  - carrier concentration
+  - 热稳定性
+  - thermal stability
+  - 光电转换效率
+  - photoelectric conversion efficiency
+  - 机械强度
+  - mechanical strength
+  data_or_method_types:
+  - X射线衍射
+  - XRD
+  - 扫描电子显微镜
+  - SEM
+  - 透射电子显微镜
+  - TEM
+  - 拉曼光谱
+  - Raman spectroscopy
+  - 霍尔效应测量
+  - Hall effect measurement
+  scene_or_application_types:
+  - 电力电子
+  - power electronics
+  - 光电子
+  - optoelectronics
+  - 传感器
+  - sensors
+  - 集成电路
+  - ICs
+  - 光伏
+  - photovoltaics
+  generic_terms:
+  - 技术
+  - technology
+  - 方法
+  - method
+  - 系统
+  - system
+  - 应用
+  - application
+  - 数据
+  - data
+  - 性能
+  - performance
+  - 效果
+  - effect
+  - 场景
+  - scene
+  shell_terms:
+  - 技术
+  - technology
+  - 方法
+  - method
+  - 系统
+  - system
+  - 应用
+  - application
+  - 数据
+  - data
+  - 性能
+  - performance
+  - 效果
+  - effect
+  - 场景
+  - scene
+  valid_candidate_patterns:
+  - pattern_id: material_mechanism_task
+    pattern: technical_object + mechanism + task
+    required_slots:
+    - technical_object
+    - mechanism
+    - task
+  - pattern_id: material_performance_evidence
+    pattern: technical_object + performance + evidence_span
+    required_slots:
+    - technical_object
+    - performance
+    - evidence_span
+  - pattern_id: material_method_data
+    pattern: technical_object + method + data_modality
+    required_slots:
+    - technical_object
+    - method
+    - data_modality
+  invalid_candidate_patterns:
+  - pattern_id: shell_term_only
+    pattern: shell_terms
+    reject_terms:
+    - 技术
+    - technology
+    - 方法
+    - method
+    - 系统
+    - system
+    - 应用
+    - application
+    - 数据
+    - data
+    - 性能
+    - performance
+    - 效果
+    - effect
+    - 场景
+    - scene
+    max_specific_slot_count: 0
+  - pattern_id: shell_only_rejection
+    reject_terms:
+    - 技术
+    - 方法
+    - 系统
+    - 应用
+    - 数据
+    - 性能
+    - 效果
+    - 场景
+    max_specific_slot_count: 0
+  minimum_specificity_rule:
+    min_non_shell_slots: 2
+    require_evidence_span: true
+    allow_scope_only_candidate: false
+weak_signal_rules:
+  early_stage_markers:
+  - 实验室验证
+  - 原型验证
+  low_attention_markers:
+  - 低引用
+  - 少量报道
+  niche_actor_markers:
+  - 小团队
+  - 初创企业
+  cross_domain_markers:
+  - 跨领域
+  - 交叉应用
+  engineering_trace_markers:
+  - 工艺优化
+  - 参数调整
+  commercialization_noise_markers:
+  - 市场推广
+  - 融资
+  policy_or_market_noise_markers:
+  - 政策支持
+  - 市场趋势
+  scoring_adjustments:
+  - rule_id: rule_001
+    score_delta: 5
+    max_delta: 10
+  - rule_id: rule_002
+    score_delta: -3
+    max_delta: 5
+  - rule_id: rule_003
+    score_delta: 2
+    max_delta: 7
+  - rule_id: rule_004
+    score_delta: -1
+    max_delta: 3
+  - rule_id: rule_005
+    score_delta: 4
+    max_delta: 8
+generated_at: '2026-06-09T00:56:32.324476+00:00'
+canonicalization:
+  object_families: []
+  alias_groups: []
+  parent_child_terms: []
+  do_not_merge_rules: []
+  object_family_enabled: false
+evidence_rules:
+  strong_evidence_patterns: []
+  weak_evidence_patterns: []
+  source_reliability_hints:
+  - paper
+  - news
+  - policy
+  - report
+  - patent
+  traceability_fields:
+  - title
+  - text
+  - evidence_span
+  - source_type
+  evidence_rejection_patterns:
+  - 招聘
+  - 培训
+  - 广告
+  - 股票分析
+  - 行情
+reporting:
+  display_labels:
+    domain: 新型电子材料
+  explanation_templates: []
+  review_hints: []
+domain_pack_version: '1.0'
+domain_pack_hash: 709623efa4b9991e

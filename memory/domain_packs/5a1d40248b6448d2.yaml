@@ -1,0 +1,445 @@
+schema_version: domain_pack_v1
+pack_id: space_manufacturing_pack
+pack_name: 太空制造领域运行包
+pack_version: '1.0'
+source:
+  mode: llm_generated
+  model: Qwen/Qwen2.5-32B-Instruct
+  prompt_version: domain_pack_generator_v3
+  based_on_user_input:
+    field_id: space_manufacturing
+    field_name: 太空制造
+    keywords:
+    - 太空制造
+    - 空间制造
+    - 轨道制造
+    - 零重力制造
+    - 在轨服务
+    - 空间工厂
+    - 太空3D打印
+    synonyms:
+    - space manufacturing
+    - in-orbit manufacturing
+    - zero-gravity manufacturing
+    - in-space manufacturing
+    - orbital factory
+    - space 3D printing
+    - 空间装配
+    - 空间机器人操作
+    exclude_terms:
+    - 招聘
+    - 培训
+    - 广告
+    - 科幻电影
+    - 游戏
+domain_identity:
+  field_id: space_manufacturing
+  field_name: 太空制造
+  parent_industries: []
+  domain_boundary: 太空制造领域涉及在太空环境中进行的制造活动，包括但不限于零重力环境下的生产、组装和3D打印技术。
+  adjacent_domains:
+  - 航天工程
+  - 材料科学
+  - 机器人技术
+  - 3D打印技术
+  out_of_scope_domains:
+  - 人力资源
+  - 金融分析
+  - 市场营销
+  - 社会新闻
+  - 电子商务
+  - 娱乐传媒
+  - 房地产
+  - 健康养生
+  keywords:
+  - 太空制造
+  - 空间制造
+  - 轨道制造
+  - 零重力制造
+  - 在轨服务
+  - 空间工厂
+  - 太空3D打印
+  synonyms:
+  - space manufacturing
+  - in-orbit manufacturing
+  - zero-gravity manufacturing
+  - in-space manufacturing
+  - orbital factory
+  - space 3D printing
+  - 空间装配
+  - 空间机器人操作
+  exclude_terms:
+  - 招聘
+  - 培训
+  - 广告
+  - 股票分析
+  - 行情
+  - 娱乐
+  - 美食
+  - 旅游
+  - 健康养生
+  - 房地产
+  - 直播带货
+  - 二手交易
+  - 电商
+  - 退款
+  - 维权
+  - 社会新闻
+  - 科幻电影
+  - 游戏
+search_strategy:
+  core_keywords:
+  - 太空制造
+  - 空间制造
+  - 轨道制造
+  - 零重力制造
+  - 在轨服务
+  - 空间工厂
+  - 太空3D打印
+  synonyms:
+  - space manufacturing
+  - in-orbit manufacturing
+  - zero-gravity manufacturing
+  - in-space manufacturing
+  - orbital factory
+  - space 3D printing
+  - 空间装配
+  - 空间机器人操作
+  english_terms:
+  - space manufacturing
+  - in-orbit manufacturing
+  - zero-gravity manufacturing
+  - in-space manufacturing
+  - orbital factory
+  - space 3D printing
+  exclude_terms:
+  - 招聘
+  - 培训
+  - 广告
+  - 股票分析
+  - 行情
+  - 娱乐
+  - 美食
+  - 旅游
+  - 健康养生
+  - 房地产
+  - 直播带货
+  - 二手交易
+  - 电商
+  - 退款
+  - 维权
+  - 社会新闻
+  - 科幻电影
+  - 游戏
+  source_type_weights:
+    paper: 1.0
+    patent: 1.0
+    news: 1.0
+    report: 1.0
+    policy: 1.0
+  count_policy:
+    mode: recommend_only
+    default_total_sample_size: 0
+    min_per_source: {}
+    max_per_source: {}
+  query_expansion_rules: []
+observation_scopes:
+  main_scope: 太空制造
+  sub_scopes:
+  - 零重力制造技术
+  - 空间3D打印
+  - 在轨服务与维护
+  - 空间工厂设计
+  - 太空制造
+  - 空间制造
+  - 轨道制造
+  - 零重力制造
+  - 在轨服务
+  - 空间工厂
+  - 太空3D打印
+  scope_aliases:
+  - space manufacturing
+  - in-orbit manufacturing
+  - zero-gravity manufacturing
+  - in-space manufacturing
+  - orbital factory
+  - space 3D printing
+  - 空间装配
+  - 空间机器人操作
+  scope_echo_terms:
+  - 太空制造
+  - 空间制造
+  - 轨道制造
+  - 零重力制造
+  - 在轨服务
+  - 空间工厂
+  - 太空3D打印
+  - space_manufacturing
+  off_domain_anchor_terms:
+  - 招聘
+  - 培训
+  - 广告
+  - 股票分析
+  - 行情
+  - 娱乐
+  - 美食
+  - 旅游
+  - 健康养生
+  - 房地产
+  - 直播带货
+  - 二手交易
+  - 电商
+  - 退款
+  - 维权
+  - 社会新闻
+  - 科幻电影
+  - 游戏
+  - 人力资源
+  - 金融分析
+  - 市场营销
+  - 电子商务
+  - 娱乐传媒
+candidate_formation:
+  technical_object_types:
+  - 太空制造
+  - 轨道制造
+  - 零重力制造
+  - 空间制造
+  - 轨道工厂
+  - 太空3D打印
+  - space manufacturing
+  - in-orbit manufacturing
+  - zero-gravity manufacturing
+  - in-space manufacturing
+  - orbital factory
+  - space 3D printing
+  - space assembly
+  - space robotic operation
+  - 在轨服务
+  - 空间工厂
+  - 零重力制造技术
+  - 空间3D打印
+  - 在轨服务与维护
+  - 空间工厂设计
+  mechanism_types:
+  - microgravity effects
+  - material deposition
+  - additive manufacturing
+  - assembly automation
+  - robotic manipulation
+  - gravitational compensation
+  - material behavior
+  - process control
+  task_or_performance_types:
+  - part fabrication
+  - assembly accuracy
+  - material properties
+  - production efficiency
+  - maintenance operations
+  - quality inspection
+  - structural integrity
+  - material utilization
+  data_or_method_types:
+  - sensor data
+  - process monitoring
+  - material analysis
+  - manufacturing simulation
+  - quality control
+  - process optimization
+  - material testing
+  - performance evaluation
+  scene_or_application_types:
+  - space station
+  - orbital assembly
+  - satellite repair
+  - spacecraft construction
+  - material processing
+  - in-orbit assembly
+  - space habitat
+  - space exploration
+  generic_terms:
+  - 技术
+  - 方法
+  - 系统
+  - 应用
+  - 数据
+  - 性能
+  - 效果
+  - 场景
+  - technology
+  - method
+  - system
+  - application
+  - data
+  - performance
+  - effect
+  - scene
+  shell_terms:
+  - 技术
+  - 方法
+  - 系统
+  - 应用
+  - 数据
+  - 性能
+  - 效果
+  - 场景
+  - technology
+  - method
+  - system
+  - application
+  - data
+  - performance
+  - effect
+  - scene
+  valid_candidate_patterns:
+  - pattern_id: technical_object_mechanism_task
+    required_slots:
+    - technical_object
+    - mechanism
+    - task
+    optional_slots:
+    - performance
+    - data_modality
+    - method
+    - scene
+    - evidence_span
+  - pattern_id: technical_object_mechanism_performance
+    required_slots:
+    - technical_object
+    - mechanism
+    - performance
+    optional_slots:
+    - task
+    - data_modality
+    - method
+    - scene
+    - evidence_span
+  - pattern_id: technical_object_task_performance
+    required_slots:
+    - technical_object
+    - task
+    - performance
+    optional_slots:
+    - mechanism
+    - data_modality
+    - method
+    - scene
+    - evidence_span
+  invalid_candidate_patterns:
+  - pattern_id: shell_term_only
+    reject_terms:
+    - 技术
+    - 方法
+    - 系统
+    - 应用
+    - 数据
+    - 性能
+    - 效果
+    - 场景
+    - technology
+    - method
+    - system
+    - application
+    - data
+    - performance
+    - effect
+    - scene
+    max_specific_slot_count: 0
+  - pattern_id: shell_only_rejection
+    reject_terms:
+    - 技术
+    - 方法
+    - 系统
+    - 应用
+    - 数据
+    - 性能
+    - 效果
+    - 场景
+    max_specific_slot_count: 0
+  minimum_specificity_rule:
+    min_non_shell_slots: 2
+    require_evidence_span: true
+    allow_scope_only_candidate: false
+weak_signal_rules:
+  early_stage_markers:
+  - 实验室验证
+  - 原型验证
+  - 概念验证
+  - 初步测试
+  low_attention_markers:
+  - 低引用
+  - 少量报道
+  - 关注度低
+  - 研究较少
+  niche_actor_markers:
+  - 小团队
+  - 初创企业
+  - 非主流机构
+  - 独立研究者
+  cross_domain_markers:
+  - 跨领域
+  - 交叉应用
+  - 多学科
+  - 综合技术
+  engineering_trace_markers:
+  - 工艺优化
+  - 参数调整
+  - 技术改进
+  - 实验设计
+  commercialization_noise_markers:
+  - 市场推广
+  - 融资
+  - 投资
+  - 商业合作
+  policy_or_market_noise_markers:
+  - 政策支持
+  - 市场趋势
+  - 政策导向
+  - 市场分析
+  scoring_adjustments:
+  - rule_id: rule_001
+    score_delta: 5
+    max_delta: 10
+  - rule_id: rule_002
+    score_delta: -3
+    max_delta: 5
+  - rule_id: rule_003
+    score_delta: 2
+    max_delta: 7
+  - rule_id: rule_004
+    score_delta: -1
+    max_delta: 3
+generated_at: '2026-06-09T00:39:26.395646+00:00'
+canonicalization:
+  object_families: []
+  alias_groups: []
+  parent_child_terms: []
+  do_not_merge_rules: []
+  object_family_enabled: false
+evidence_rules:
+  strong_evidence_patterns: []
+  weak_evidence_patterns: []
+  source_reliability_hints:
+  - paper
+  - news
+  - policy
+  - report
+  - patent
+  traceability_fields:
+  - title
+  - text
+  - evidence_span
+  - source_type
+  evidence_rejection_patterns:
+  - 招聘
+  - 培训
+  - 广告
+  - 科幻电影
+  - 游戏
+reporting:
+  display_labels:
+    domain: 太空制造
+  explanation_templates: []
+  review_hints: []
+domain_pack_version: '1.0'
+domain_pack_hash: 5a1d40248b6448d2

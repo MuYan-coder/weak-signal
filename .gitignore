@@ -29,6 +29,7 @@ ENV/
 # IDE
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
@@ -51,22 +52,29 @@ result/*/
 result/*.md
 result/*.txt
 
-# Memory layer data
-memory/
+# Memory layer — ignore runtime cache, keep domain_packs for sharing
+memory/*
+!memory/.gitkeep
+!memory/domain_packs/
+memory/domain_packs/cache/
 
 # Local development files
-memory/*.json
 BUG_FIX_LOG.md
-*说明.md
-*方案.md
+_test_*.py
+update_mcp.py
+=*
+Foreword/
 
-# Local project maintenance docs
+# Local project maintenance docs (internal only, not for distribution)
 PROJECT_OVERVIEW.md
 ARCHITECTURE.md
 TASKS.md
 CHANGELOG.md
 DECISIONS.md
 KNOWN_ISSUES.md
+*实施方案.md
+*实施说明.md
+*-solution.md
 
 # Jupyter Notebook
 .ipynb_checkpoints

@@ -158,8 +158,8 @@ def normalize_es_consulting(hit: Dict[str, Any], policy_as_news: bool = True) ->
     """映射并标准化 ES 中的咨询 (Consulting)"""
     source_id = str(hit.get("id", hit.get("_id", "")))
 
-    title = str(get_first_valid(hit, ["title", "name", "标题"], ""))
-    abstract = str(get_first_valid(hit, ["abstract", "summary", "description"], ""))
+    title = str(get_first_valid(hit, ["title", "title_cn", "title_zh", "title_en", "name", "标题"], ""))
+    abstract = str(get_first_valid(hit, ["abstract", "abstract_cn", "abstract_zh", "abstract_en", "summary", "description"], ""))
     content = str(get_first_valid(hit, ["content", "main_content", "body", "html", "content_html"], ""))
     viewpoints = str(hit.get("viewpoints", ""))
 
@@ -178,7 +178,7 @@ def normalize_es_consulting(hit: Dict[str, Any], policy_as_news: bool = True) ->
     org = str(get_first_valid(hit, ["source", "org", "organization", "publisher"], ""))
     authors = parse_name_list(get_first_valid(hit, ["author", "authors"], ""))
     keywords = str(get_first_valid(hit, ["tags", "entities", "keywords"], ""))
-    url = str(get_first_valid(hit, ["url", "link", "source_url"], ""))
+    url = str(get_first_valid(hit, ["url", "link", "source_url", "url_source", "pdf_link"], ""))
     source_name = str(get_first_valid(hit, ["source", "source_name", "publisher"], ""))
     classification = str(get_first_valid(hit, ["node_classify", "domain", "channel", "classification"], ""))
     industry = str(get_first_valid(hit, ["lz_industry", "industry"], ""))
@@ -207,9 +207,9 @@ def normalize_es_policy(hit: Dict[str, Any], policy_as_news: bool = False) -> Do
     """映射并标准化 ES 中的政策 (Policy)"""
     source_id = str(hit.get("id", hit.get("_id", "")))
 
-    title = str(get_first_valid(hit, ["title", "name", "标题"], ""))
-    abstract = str(get_first_valid(hit, ["abstract", "summary", "policy_summary"], ""))
-    content = str(get_first_valid(hit, ["content", "main_content", "body"], ""))
+    title = str(get_first_valid(hit, ["title", "title_cn", "title_zh", "title_en", "name", "标题"], ""))
+    abstract = str(get_first_valid(hit, ["abstract", "abstract_cn", "abstract_zh", "abstract_en", "summary", "policy_summary", "description"], ""))
+    content = str(get_first_valid(hit, ["content", "main_content", "body", "html", "content_html"], ""))
 
     # 拼接 text
     text = f"{title}\n{abstract}\n{content}".strip()
@@ -221,7 +221,7 @@ def normalize_es_policy(hit: Dict[str, Any], policy_as_news: bool = False) -> Do
     org = str(get_first_valid(hit, ["publisher", "org", "organization"], ""))
     authors = parse_name_list(get_first_valid(hit, ["authors", "author"], ""))
     keywords = str(get_first_valid(hit, ["keywords", "tags"], ""))
-    url = str(get_first_valid(hit, ["url", "link"], ""))
+    url = str(get_first_valid(hit, ["url", "link", "source_url", "url_source", "pdf_link"], ""))
     source_name = str(get_first_valid(hit, ["publisher", "org", "source_name"], ""))
     classification = str(get_first_valid(hit, ["classification", "category"], ""))
 
@@ -251,9 +251,9 @@ def normalize_es_report(hit: Dict[str, Any]) -> DocumentRecord:
     """映射并标准化 ES 中的研报 (Report)"""
     source_id = str(hit.get("id", hit.get("doc_id", hit.get("_id", ""))))
 
-    title = str(get_first_valid(hit, ["title", "name"], ""))
-    abstract = str(get_first_valid(hit, ["abstract", "summary", "viewpoints"], ""))
-    content = str(get_first_valid(hit, ["html", "content", "main_content"], ""))
+    title = str(get_first_valid(hit, ["title", "title_cn", "title_zh", "title_en", "name"], ""))
+    abstract = str(get_first_valid(hit, ["abstract", "abstract_cn", "abstract_zh", "abstract_en", "summary", "viewpoints", "description"], ""))
+    content = str(get_first_valid(hit, ["html", "content", "main_content", "body", "content_html"], ""))
 
     # 拼接 text
     text = f"{title}\n{abstract}\n{content}".strip()
@@ -265,7 +265,7 @@ def normalize_es_report(hit: Dict[str, Any]) -> DocumentRecord:
     org = str(get_first_valid(hit, ["institution", "source", "org"], ""))
     authors = parse_name_list(get_first_valid(hit, ["authors", "author"], ""))
     keywords = str(hit.get("keywords", ""))
-    url = str(get_first_valid(hit, ["url", "url_source", "link"], ""))
+    url = str(get_first_valid(hit, ["url", "url_source", "link", "source_url", "pdf_link"], ""))
     source_name = str(get_first_valid(hit, ["source", "institution"], ""))
     classification = str(get_first_valid(hit, ["type", "classification"], ""))
     industry = str(get_first_valid(hit, ["industry", "stock_name"], ""))
@@ -293,7 +293,7 @@ def normalize_es_report(hit: Dict[str, Any]) -> DocumentRecord:
 def normalize_es_patent(hit: Dict[str, Any]) -> DocumentRecord:
     """映射并标准化 ES 中的专利 (Patent)"""
     # 专利可能没有自然主键，从日期与标题计算 hash
-    title = str(get_first_valid(hit, ["title_cn", "title", "name", "专利名称", "发明名称"], ""))
+    title = str(get_first_valid(hit, ["title_cn", "title_zh", "title", "title_en", "name", "专利名称", "发明名称"], ""))
     raw_date = get_first_valid(hit, ["public_date", "apply_date", "priority_date", "created_at"], "")
     date_str = clean_date_str(raw_date)
 
@@ -303,7 +303,7 @@ def normalize_es_patent(hit: Dict[str, Any]) -> DocumentRecord:
         seed = f"{title}:{date_str}"
         source_id = hashlib.md5(seed.encode("utf-8")).hexdigest()[:16]
 
-    abstract = str(get_first_valid(hit, ["abstract_cn", "abstract", "summary"], ""))
+    abstract = str(get_first_valid(hit, ["abstract_cn", "abstract_zh", "abstract", "abstract_en", "summary", "description"], ""))
     claims = str(get_first_valid(hit, ["first_claim", "claims", "claim"], ""))
 
     # 拼接 text
@@ -324,7 +324,7 @@ def normalize_es_patent(hit: Dict[str, Any]) -> DocumentRecord:
     authors = parse_name_list(authors_val)
 
     keywords = str(get_first_valid(hit, ["ipc", "cpc"], ""))
-    url = str(get_first_valid(hit, ["pdf_url", "url", "link"], ""))
+    url = str(get_first_valid(hit, ["pdf_url", "url", "link", "source_url", "url_source", "pdf_link"], ""))
     classification = str(get_first_valid(hit, ["ipc", "cpc", "classification"], ""))
     industry = str(get_first_valid(hit, ["方向", "industry"], ""))
 

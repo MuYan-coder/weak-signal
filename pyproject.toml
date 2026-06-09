@@ -1,0 +1,53 @@
+[project]
+name = "weak-signal-foresight"
+version = "0.4.0"
+description = "产业技术预见弱信号识别系统 — MCP Server"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "MuYan-coder" }
+]
+keywords = [
+    "weak-signal",
+    "technology-foresight",
+    "mcp-server",
+    "llm",
+    "tech-intelligence",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "pandas>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "openai>=1.0.0",
+    "anthropic>=0.25.0",
+    "httpx>=0.27.0",
+    "numpy>=1.24.0",
+    "PyYAML>=6.0.0",
+    "mcp>=1.0.0",
+    "openpyxl>=3.1.0",
+]
+
+[project.optional-dependencies]
+db = ["pymysql>=1.1.0", "elasticsearch>=8.0.0,<9"]
+semantic = ["sentence-transformers>=2.5.0"]
+web = ["streamlit>=1.37.0,<2", "altair>=5.0.0,<6"]
+dev = ["pytest>=7.0.0", "pytest-timeout>=2.0.0"]
+
+[project.scripts]
+weak-signal-mcp = "src.mcp_server.server:main"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.backends._legacy:_Backend"

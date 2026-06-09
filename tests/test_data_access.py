@@ -106,6 +106,21 @@ class DataAccessTests(unittest.TestCase):
         disabled_terms = QueryBuilder.expand_search_terms(disabled_query)
         self.assertEqual(disabled_terms, ["人形机器人"])
 
+    def test_query_builder_expands_compound_domain_terms(self):
+        """测试窄领域复合词会扩展为更容易出现在标题和正文中的锚点"""
+        query = SourceQuery(
+            tech_field_id="space_manufacturing",
+            tech_field_name="太空制造",
+            keywords=["太空制造", "太空3D打印"],
+            synonyms=["space manufacturing", "in-orbit manufacturing", "空间机器人操作"],
+            use_topic_index=True,
+        )
+
+        terms = QueryBuilder.expand_search_terms(query)
+
+        for expected in ["太空", "制造", "3d打印", "space", "manufacturing", "in orbit manufacturing", "空间", "机器人", "操作"]:
+            self.assertIn(expected, terms)
+
     def test_normalizer_deduplicate(self):
         """测试 DocumentNormalizer 去重逻辑"""
         records = [
@@ -316,6 +331,141 @@ class DataAccessTests(unittest.TestCase):
         df = repo.load_documents(query)
         self.assertEqual(len(df), 150)
         self.assertEqual(df["source_type"].value_counts().to_dict(), {"paper": 150})
+
+    def test_repository_es_loading_pages_until_post_filter_fills_limit(self):
+        """测试 ES 加载不会因首页后过滤不足而提前停止"""
+        class MockMySQLClient:
+            table_name = "literature"
+
+            def test_connection(self):
+                return False
+
+        class MockESClient:
+            indices = {"consulting": "news_index"}
+
+            def __init__(self):
+                self.calls = []
+
+            def test_connection(self):
+                return True
+
+            def search_documents(self, index_name, dsl):
+                self.calls.append(dsl)
+                if "search_after" not in dsl:
+                    return [
+                        {
+                            "_id": f"off_{idx}",
+                            "_score": 10.0 - idx,
+                            "sort": [10.0 - idx, "2026-01-01"],
+                            "_source": {
+                                "title": f"普通制造业新闻_{idx}",
+                                "abstract": "只提到制造行业和设备升级。",
+                                "publish_date": "2026-01-01",
+                                "url": f"http://example.com/off_{idx}",
+                            },
+                        }
+                        for idx in range(4)
+                    ]
+                return [
+                    {
+                        "_id": "space_1",
+                        "_score": 5.0,
+                        "sort": [5.0, "2025-12-31"],
+                        "_source": {
+                            "title": "空间机器人在轨建造系统完成演示",
+                            "abstract": "面向轨道基础设施的空间机器人操作和装配。",
+                            "publish_date": "2025-12-31",
+                            "url": "http://example.com/space_1",
+                        },
+                    },
+                    {
+                        "_id": "space_2",
+                        "_score": 4.0,
+                        "sort": [4.0, "2025-12-30"],
+                        "_source": {
+                            "title": "太空3D打印平台用于轨道制造",
+                            "abstract": "在轨增材制造面向大型太空结构。",
+                            "publish_date": "2025-12-30",
+                            "url": "http://example.com/space_2",
+                        },
+                    },
+                ]
+
+        es_client = MockESClient()
+        repo = DataRepository(MockMySQLClient(), es_client, backend="db")
+        query = SourceQuery(
+            tech_field_id="space_manufacturing",
+            tech_field_name="太空制造",
+            keywords=["太空制造"],
+            synonyms=["在轨建造", "空间机器人操作"],
+            source_types=["news"],
+            counts={"news": 2},
+        )
+
+        df = repo.load_documents(query)
+
+        self.assertEqual(len(df), 2)
+        self.assertEqual(df["source_type"].value_counts().to_dict(), {"news": 2})
+        self.assertGreaterEqual(len(es_client.calls), 2)
+        self.assertIn("search_after", es_client.calls[1])
+
+    def test_repository_source_counts_use_same_post_filter_for_es(self):
+        """测试 ES 可用数量统计不直接采用宽松 count，而按加载后过滤口径计算"""
+        class MockMySQLClient:
+            table_name = "literature"
+
+            def test_connection(self):
+                return False
+
+        class MockESClient:
+            indices = {"consulting": "news_index"}
+
+            def test_connection(self):
+                return True
+
+            def search_count(self, index_name, dsl):
+                return 999
+
+            def search_documents(self, index_name, dsl):
+                if "search_after" in dsl:
+                    return []
+                return [
+                    {
+                        "_id": "off_1",
+                        "_score": 10.0,
+                        "sort": [10.0, "2026-01-01"],
+                        "_source": {
+                            "title": "制造业投资观察",
+                            "abstract": "只提到制造行业投资和设备升级。",
+                            "publish_date": "2026-01-01",
+                            "url": "http://example.com/off_1",
+                        },
+                    },
+                    {
+                        "_id": "space_1",
+                        "_score": 8.0,
+                        "sort": [8.0, "2025-12-31"],
+                        "_source": {
+                            "title": "空间机器人在轨建造政策试点",
+                            "abstract": "围绕轨道基础设施装配和空间制造能力建设。",
+                            "publish_date": "2025-12-31",
+                            "url": "http://example.com/space_1",
+                        },
+                    },
+                ]
+
+        repo = DataRepository(MockMySQLClient(), MockESClient(), backend="db")
+        query = SourceQuery(
+            tech_field_id="space_manufacturing",
+            tech_field_name="太空制造",
+            keywords=["太空制造"],
+            synonyms=["在轨建造", "空间机器人操作"],
+            source_types=["news"],
+        )
+
+        counts = repo.get_source_counts(query)
+
+        self.assertEqual(counts, {"news": 1})
 
     def test_db_cache_path_handles_empty_source_query_id(self):
         """测试自定义数据库模板留空 ID 时不会把 SourceQuery 当 dict 调用"""

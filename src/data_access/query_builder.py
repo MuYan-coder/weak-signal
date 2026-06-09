@@ -1,3 +1,4 @@
+import re
 from typing import Any, Dict, List, Tuple, Optional
 from .models import SourceQuery
 from ..extraction.tech_lexicon import TECH_ALIASES
@@ -5,22 +6,78 @@ from ..extraction.tech_lexicon import TECH_ALIASES
 class QueryBuilder:
     """查询构造器，将 SourceQuery 翻译为 SQL 和 ES DSL"""
 
+    CJK_DOMAIN_FRAGMENTS = (
+        "太空",
+        "空间",
+        "轨道",
+        "在轨",
+        "零重力",
+        "微重力",
+        "航天",
+        "宇航",
+        "卫星",
+        "机器人",
+        "制造",
+        "建造",
+        "装配",
+        "服务",
+        "工厂",
+        "增材制造",
+        "3d打印",
+        "打印",
+        "操作",
+    )
+    ENGLISH_FRAGMENT_STOPWORDS = {
+        "the",
+        "and",
+        "or",
+        "for",
+        "with",
+        "from",
+        "into",
+        "over",
+        "under",
+        "via",
+        "using",
+        "use",
+        "uses",
+        "on",
+        "in",
+        "of",
+        "to",
+        "by",
+        "at",
+        "a",
+        "an",
+    }
+
     @staticmethod
     def expand_search_terms(query: SourceQuery) -> List[str]:
         """Combine user terms and optional local topic aliases into a deduped term list."""
         terms = []
-        for term in list(query.keywords) + list(query.synonyms):
-            text = str(term or "").strip()
+
+        def add_term(value: Any) -> None:
+            text = str(value or "").strip()
             if text:
                 terms.append(text)
 
+        for term in list(query.keywords) + list(query.synonyms):
+            add_term(term)
+
         if getattr(query, "use_topic_index", True):
+            for term in list(terms):
+                for expanded in QueryBuilder.expand_compound_term(term):
+                    add_term(expanded)
+
             lower_terms = {term.lower() for term in terms}
             for canonical, aliases in TECH_ALIASES.items():
                 alias_terms = [canonical] + list(aliases)
                 alias_lowers = {str(alias or "").strip().lower() for alias in alias_terms if str(alias or "").strip()}
                 if lower_terms & alias_lowers:
-                    terms.extend(alias_terms)
+                    for alias in alias_terms:
+                        add_term(alias)
+                        for expanded in QueryBuilder.expand_compound_term(alias):
+                            add_term(expanded)
 
         deduped = []
         seen = set()
@@ -30,6 +87,55 @@ class QueryBuilder:
                 continue
             seen.add(key)
             deduped.append(term)
+        return deduped
+
+    @staticmethod
+    def expand_compound_term(term: Any) -> List[str]:
+        """Expand narrow compound domain phrases into common anchor fragments."""
+        raw = str(term or "").strip()
+        if not raw:
+            return []
+
+        lower = raw.lower()
+        expansions: List[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip().lower()
+            if text and text != lower:
+                expansions.append(text)
+
+        hyphen_spaced = re.sub(r"[-_/]+", " ", lower)
+        add(hyphen_spaced)
+        add(re.sub(r"\s+", "", hyphen_spaced))
+
+        if "3d" in lower and "打印" in lower:
+            add("3d打印")
+
+        for fragment in QueryBuilder.CJK_DOMAIN_FRAGMENTS:
+            if fragment in lower:
+                add(fragment)
+
+        for token in re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", hyphen_spaced):
+            if re.fullmatch(r"[a-z0-9]+", token):
+                if len(token) >= 3 and token not in QueryBuilder.ENGLISH_FRAGMENT_STOPWORDS:
+                    add(token)
+                continue
+
+            if len(token) < 2:
+                continue
+            if len(token) <= 3:
+                add(token)
+            else:
+                add(token[:2])
+                add(token[-2:])
+
+        deduped = []
+        seen = set()
+        for value in expansions:
+            if value in seen:
+                continue
+            seen.add(value)
+            deduped.append(value)
         return deduped
 
     @staticmethod
@@ -157,11 +263,13 @@ class QueryBuilder:
         dsl = {
             "size": size,
             "_source": [
-                "id", "doc_id", "title", "abstract", "summary", "content", "main_content", "html",
+                "id", "doc_id", "title", "title_cn", "title_zh", "title_en",
+                "abstract", "abstract_cn", "abstract_zh", "abstract_en",
+                "summary", "description", "content", "main_content", "body", "html", "content_html",
                 "viewpoints", "claims", "first_claim", "keywords", "tags", "entities", "org",
                 "organization", "publisher", "applicant", "author", "authors", "inventors",
                 "publish_time", "publish_date", "public_date", "apply_date", "priority_date",
-                "created_at", "url", "link", "url_source", "classification", "ipc", "cpc",
+                "created_at", "url", "link", "source_url", "url_source", "pdf_link", "classification", "ipc", "cpc",
                 "industry", "stock_name", "stock_code", "direction", "lz_industry", "node_classify",
                 "domain", "channel"
             ]
@@ -186,11 +294,11 @@ class QueryBuilder:
                 "multi_match": {
                     "query": search_str,
                     "fields": [
-                        "title^4", "title_cn^4",
+                        "title^4", "title_cn^4", "title_zh^4", "title_en^3",
                         "keywords^3", "tags^3",
-                        "abstract^2", "abstract_cn^2", "summary^2",
+                        "abstract^2", "abstract_cn^2", "abstract_zh^2", "abstract_en^2", "summary^2", "description^2",
                         "viewpoints^2", "claims^2", "first_claim^2",
-                        "content", "main_content", "html"
+                        "content", "main_content", "body", "html", "content_html"
                     ],
                     "type": "best_fields",
                     "operator": "or"
@@ -205,7 +313,11 @@ class QueryBuilder:
             bool_query["must_not"].append({
                 "multi_match": {
                     "query": exclude_str,
-                    "fields": ["title", "title_cn", "abstract", "abstract_cn", "content", "main_content", "html"]
+                    "fields": [
+                        "title", "title_cn", "title_zh", "title_en",
+                        "abstract", "abstract_cn", "abstract_zh", "abstract_en",
+                        "summary", "description", "content", "main_content", "body", "html", "content_html"
+                    ]
                 }
             })
 

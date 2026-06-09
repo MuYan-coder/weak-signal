@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from typing import Dict, List, Any, Optional
 import pandas as pd
 
@@ -31,6 +32,8 @@ class DataRepository:
         "report": ("report", "研报"),
         "patent": ("patent", "专利"),
     }
+    ES_DEFAULT_COUNT_SCAN_LIMIT = 5000
+    ES_PAGE_SIZE_CAP = 1000
 
     def __init__(self, mysql_client: MySQLClient, es_client: ESClient, backend: str = "mock"):
         self.mysql_client = mysql_client
@@ -76,6 +79,221 @@ class DataRepository:
                     return 0
         return default
 
+    @staticmethod
+    def _raw_type_for_source(source_type: str) -> str:
+        if source_type == "policy":
+            return "policy"
+        if source_type == "report":
+            return "report"
+        if source_type == "patent":
+            return "patent"
+        return "consulting"
+
+    @staticmethod
+    def _date_field_for_source(source_type: str) -> str:
+        if source_type == "patent":
+            return "public_date"
+        return "publish_date"
+
+    @staticmethod
+    def _safe_positive_int_env(name: str, default: int) -> int:
+        try:
+            value = int(os.getenv(name, default))
+        except (TypeError, ValueError):
+            return default
+        return max(value, 1)
+
+    @staticmethod
+    def _normalize_match_text(value: Any) -> str:
+        text = str(value or "").lower()
+        text = re.sub(r"[-_/]+", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    @staticmethod
+    def _cjk_length(value: str) -> int:
+        return len(re.findall(r"[\u4e00-\u9fff]", value or ""))
+
+    @classmethod
+    def _is_strong_domain_term(cls, term: str) -> bool:
+        normalized = cls._normalize_match_text(term)
+        if not normalized:
+            return False
+        if " " in normalized and len(normalized) >= 4:
+            return True
+        cjk_len = cls._cjk_length(normalized)
+        if cjk_len >= 3:
+            return True
+        if cjk_len >= 2 and re.search(r"[a-z0-9]", normalized):
+            return True
+        return False
+
+    @classmethod
+    def _record_matches_domain_terms(cls, record: DocumentRecord, search_terms: List[str]) -> bool:
+        """Apply one shared domain relevance filter for count and load paths."""
+        normalized_terms = []
+        seen = set()
+        for term in search_terms:
+            normalized = cls._normalize_match_text(term)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            normalized_terms.append(normalized)
+        if not normalized_terms:
+            return True
+
+        haystack = cls._normalize_match_text(
+            " ".join(
+                str(value or "")
+                for value in [
+                    record.title,
+                    record.text,
+                    record.keywords,
+                    record.classification,
+                    record.industry,
+                    record.source_name,
+                    record.org,
+                ]
+            )
+        )
+        if not haystack:
+            return False
+
+        if len(normalized_terms) == 1:
+            return normalized_terms[0] in haystack
+
+        soft_hits = set()
+        for term in normalized_terms:
+            if term not in haystack:
+                continue
+            if re.fullmatch(r"[a-z0-9]{2,3}", term) and term not in QueryBuilder.ENGLISH_FRAGMENT_STOPWORDS:
+                return True
+            if cls._is_strong_domain_term(term):
+                return True
+            soft_hits.add(term)
+        return len(soft_hits) >= 2
+
+    @classmethod
+    def _filter_records_by_domain_terms(
+        cls,
+        records: List[DocumentRecord],
+        search_terms: List[str],
+    ) -> List[DocumentRecord]:
+        if not search_terms:
+            return records
+        return [record for record in records if cls._record_matches_domain_terms(record, search_terms)]
+
+    @staticmethod
+    def _normalize_es_hit(hit: Dict[str, Any], source_type: str) -> DocumentRecord:
+        source_data = dict(hit.get("_source", {}))
+        source_data["relevance_score"] = hit.get("_score", 0.0)
+        source_data["id"] = hit.get("_id", source_data.get("id", ""))
+
+        if source_type == "news":
+            return normalize_es_consulting(source_data)
+        if source_type == "policy":
+            return normalize_es_policy(source_data)
+        if source_type == "report":
+            return normalize_es_report(source_data)
+        if source_type == "patent":
+            return normalize_es_patent(source_data)
+        return normalize_es_consulting(source_data)
+
+    def _load_es_documents_paginated(
+        self,
+        query: SourceQuery,
+        *,
+        source_type: str,
+        index_name: str,
+        date_field: str,
+        limit: int,
+        search_terms: List[str],
+        existing_records: List[DocumentRecord],
+    ) -> List[DocumentRecord]:
+        page_size = min(max(limit * 2, 1), self.ES_PAGE_SIZE_CAP)
+        raw_fetch_cap = max(limit * 8, page_size)
+        search_after = None
+        raw_seen = 0
+        source_records: List[DocumentRecord] = []
+        other_records = [record for record in existing_records if record.source_type != source_type]
+
+        while raw_seen < raw_fetch_cap and len(source_records) < limit:
+            current_size = min(page_size, raw_fetch_cap - raw_seen)
+            dsl = QueryBuilder.build_es_dsl(
+                query,
+                date_field=date_field,
+                size=current_size,
+                search_after=search_after,
+            )
+            hits = self.es_client.search_documents(index_name, dsl)
+            if not hits:
+                break
+
+            raw_seen += len(hits)
+            current_batch = [self._normalize_es_hit(hit, source_type) for hit in hits]
+            current_batch = self._filter_records_by_domain_terms(current_batch, search_terms)
+
+            deduped_temp = DocumentNormalizer.deduplicate(other_records + source_records + current_batch)
+            source_records = [record for record in deduped_temp if record.source_type == source_type][:limit]
+
+            if len(source_records) >= limit or len(hits) < current_size:
+                break
+
+            next_search_after = hits[-1].get("sort")
+            if not next_search_after:
+                break
+            search_after = next_search_after
+
+        logger.info(
+            f"数据源 {source_type} (需求: {limit}): ES 翻页扫描 {raw_seen} 条，"
+            f"过滤去重后保留 {len(source_records)} 条。"
+        )
+        return source_records
+
+    def _count_es_documents_after_filter(
+        self,
+        query: SourceQuery,
+        *,
+        source_type: str,
+        index_name: str,
+        date_field: str,
+        search_terms: List[str],
+    ) -> int:
+        scan_limit = self._safe_positive_int_env(
+            "WEAK_SIGNAL_COUNT_SCAN_LIMIT",
+            self.ES_DEFAULT_COUNT_SCAN_LIMIT,
+        )
+        page_size = min(scan_limit, self.ES_PAGE_SIZE_CAP)
+        search_after = None
+        raw_seen = 0
+        matched_count = 0
+
+        while raw_seen < scan_limit:
+            current_size = min(page_size, scan_limit - raw_seen)
+            dsl = QueryBuilder.build_es_dsl(
+                query,
+                date_field=date_field,
+                size=current_size,
+                search_after=search_after,
+            )
+            hits = self.es_client.search_documents(index_name, dsl)
+            if not hits:
+                break
+
+            raw_seen += len(hits)
+            records = [self._normalize_es_hit(hit, source_type) for hit in hits]
+            matched_count += len(self._filter_records_by_domain_terms(records, search_terms))
+
+            if len(hits) < current_size:
+                break
+
+            next_search_after = hits[-1].get("sort")
+            if not next_search_after:
+                break
+            search_after = next_search_after
+
+        return matched_count
+
     def get_source_counts(self, query: SourceQuery) -> Dict[str, int]:
         """获取各来源在当前查询条件下的总可用数量"""
         counts = {}
@@ -103,26 +321,18 @@ class DataRepository:
                         counts[s_type] = len(mock_data)
                 else:
                     # ES
-                    raw_type = "consulting"
-                    if s_type == "policy":
-                        raw_type = "policy"
-                    elif s_type == "report":
-                        raw_type = "report"
-                    elif s_type == "patent":
-                        raw_type = "patent"
-
+                    raw_type = self._raw_type_for_source(s_type)
                     index_name = self.es_client.indices.get(raw_type, s_type)
-
-                    # 判断 ES 日期过滤列
-                    date_field = "publish_date"
-                    if s_type == "patent":
-                        date_field = "public_date"
-                    elif s_type == "policy":
-                        date_field = "publish_date"
+                    date_field = self._date_field_for_source(s_type)
 
                     if self.backend == "db" and self.es_active:
-                        dsl = QueryBuilder.build_es_dsl(query, date_field=date_field, size=0)
-                        counts[s_type] = self.es_client.search_count(index_name, dsl)
+                        counts[s_type] = self._count_es_documents_after_filter(
+                            query,
+                            source_type=s_type,
+                            index_name=index_name,
+                            date_field=date_field,
+                            search_terms=search_terms,
+                        )
                     else:
                         # 降级
                         mock_data = self.es_client.mock_query_documents(
@@ -183,39 +393,22 @@ class DataRepository:
                                 current_batch.append(normalize_mysql_literature(row))
                     else:
                         # ES
-                        raw_type = "consulting"
-                        if s_type == "policy":
-                            raw_type = "policy"
-                        elif s_type == "report":
-                            raw_type = "report"
-                        elif s_type == "patent":
-                            raw_type = "patent"
-
+                        raw_type = self._raw_type_for_source(s_type)
                         index_name = self.es_client.indices.get(raw_type, s_type)
-
-                        # 判断 ES 日期过滤列
-                        date_field = "publish_date"
-                        if s_type == "patent":
-                            date_field = "public_date"
-                        elif s_type == "policy":
-                            date_field = "publish_date"
+                        date_field = self._date_field_for_source(s_type)
 
                         if self.backend == "db" and self.es_active:
-                            dsl = QueryBuilder.build_es_dsl(query, date_field=date_field, size=current_limit)
-                            hits = self.es_client.search_documents(index_name, dsl)
-                            for hit in hits:
-                                source_data = hit.get("_source", {})
-                                source_data["relevance_score"] = hit.get("_score", 0.0)
-                                source_data["id"] = hit.get("_id", "")
-
-                                if s_type == "news":
-                                    current_batch.append(normalize_es_consulting(source_data))
-                                elif s_type == "policy":
-                                    current_batch.append(normalize_es_policy(source_data))
-                                elif s_type == "report":
-                                    current_batch.append(normalize_es_report(source_data))
-                                elif s_type == "patent":
-                                    current_batch.append(normalize_es_patent(source_data))
+                            source_records = self._load_es_documents_paginated(
+                                query,
+                                source_type=s_type,
+                                index_name=index_name,
+                                date_field=date_field,
+                                limit=limit,
+                                search_terms=search_terms,
+                                existing_records=all_records,
+                            )
+                            all_records = [r for r in all_records if r.source_type != s_type] + source_records
+                            break
                         else:
                             # 降级 mock
                             hits = self.es_client.mock_query_documents(
@@ -228,31 +421,12 @@ class DataRepository:
                                 limit=current_limit
                             )
                             for hit in hits:
-                                source_data = hit.get("_source", {})
-                                source_data["relevance_score"] = hit.get("_score", 0.0)
-                                source_data["id"] = hit.get("_id", "")
-
-                                if s_type == "news":
-                                    current_batch.append(normalize_es_consulting(source_data))
-                                elif s_type == "policy":
-                                    current_batch.append(normalize_es_policy(source_data))
-                                elif s_type == "report":
-                                    current_batch.append(normalize_es_report(source_data))
-                                elif s_type == "patent":
-                                    current_batch.append(normalize_es_patent(source_data))
+                                current_batch.append(self._normalize_es_hit(hit, s_type))
 
                     # A2: domain relevance pre-filtering on retrieved documents
+                    raw_batch_size = len(current_batch)
                     if search_terms:
-                        filtered_batch = []
-                        match_terms = [t.lower().strip() for t in search_terms if t.strip()]
-                        for record in current_batch:
-                            if record.source_type == "patent":
-                                filtered_batch.append(record)
-                                continue
-                            haystack = f"{record.title or ''} {record.text or ''}".lower()
-                            if any(term in haystack for term in match_terms):
-                                filtered_batch.append(record)
-                        current_batch = filtered_batch
+                        current_batch = self._filter_records_by_domain_terms(current_batch, search_terms)
 
                     # 针对当前单源与已加载的所有数据整体进行清洗去重
                     combined_temp = all_records + current_batch
@@ -263,13 +437,13 @@ class DataRepository:
 
                     # 终止条件：
                     # 1. 整体去重后，属于该源的唯一数据量达到了限制数量 limit
-                    # 2. 数据库检索返回的数据量少于索求的当前限制（说明底层数据库已查空）
+                    # 2. 底层检索返回的数据量少于索求的当前限制（说明底层数据库已查空）
                     # 3. 达到最大倍数限制
-                    if len(s_type_unique) >= limit or len(current_batch) < current_limit or multiplier >= max_multiplier:
+                    if len(s_type_unique) >= limit or raw_batch_size < current_limit or multiplier >= max_multiplier:
                         source_records = s_type_unique[:limit]
                         # 更新已加载数据，保留新加载的唯一数据以及其他类型的数据
                         all_records = [r for r in deduped_temp if r.source_type != s_type] + source_records
-                        logger.info(f"数据源 {s_type} (需求: {limit}): 最终通过倍数 {multiplier} 加载，获取 {len(current_batch)} 条，去重合并后该源有 {len(s_type_unique)} 条，保留并合并 {len(source_records)} 条。")
+                        logger.info(f"数据源 {s_type} (需求: {limit}): 最终通过倍数 {multiplier} 加载，获取 {raw_batch_size} 条，后过滤保留 {len(current_batch)} 条，去重合并后该源有 {len(s_type_unique)} 条，保留并合并 {len(source_records)} 条。")
                         break
                     else:
                         multiplier = min(multiplier * 2, max_multiplier)

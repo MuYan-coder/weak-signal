@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "weak-signal": {
+      "command": "python",
+      "args": ["-m", "src.mcp_server.server"],
+      "env": {
+        "WEAK_SIGNAL_PROJECT_ROOT": ".",
+        "PYTHONPATH": ".",
+        "WEAK_SIGNAL_DATA_BACKEND": "mock",
+        "LLM_CLIENT_DEFAULT_TIMEOUT": "120.0"
+      }
+    }
+  }
+}

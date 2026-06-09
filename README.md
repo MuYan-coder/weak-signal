@@ -90,6 +90,123 @@ python main.py
 python main.py --sample 100
 python main.py --data data/your_file.xlsx
 python main.py --from-result result/20260424_092011
+```
+
+## MCP Server 部署（供他人调用）
+
+本项目可作为 MCP Server 部署，让 Claude Code、Claude Desktop 等 MCP 客户端直接调用弱信号分析能力。
+
+### 方式一：Claude Code 项目级配置（推荐）
+
+1. **Clone 仓库**
+
+   ```bash
+   git clone <your-repo-url> weak-signal
+   cd weak-signal
+   ```
+
+2. **安装依赖**
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **配置 LLM API**
+
+   ```bash
+   cp .env.example .env
+   # 编辑 .env，填入你的 API Key
+   ```
+
+4. **在 Claude Code 中加载**
+
+   在 Claude Code 中打开项目目录，`.mcp.json` 会被自动发现。首次使用时会提示是否信任此 MCP Server，选择 "Allow" 即可。
+
+   或者手动添加：在 Claude Code 中输入 `/config`，将 MCP 页签指向该项目路径。
+
+### 方式二：Claude Desktop 全局配置
+
+在 Claude Desktop 的配置文件中添加：
+
+**Windows** (`%APPDATA%\Claude\claude_desktop_config.json`)：
+**macOS** (`~/Library/Application Support/Claude/claude_desktop_config.json`)：
+
+```json
+{
+  "mcpServers": {
+    "weak-signal": {
+      "command": "python",
+      "args": ["-m", "src.mcp_server.server"],
+      "env": {
+        "WEAK_SIGNAL_PROJECT_ROOT": "/path/to/weak-signal",
+        "PYTHONPATH": "/path/to/weak-signal",
+        "WEAK_SIGNAL_DATA_BACKEND": "mock",
+        "OPENAI_API_KEY": "your_api_key",
+        "OPENAI_BASE_URL": "https://api.siliconflow.cn/v1",
+        "LLM_CLIENT_DEFAULT_TIMEOUT": "120.0"
+      }
+    }
+  }
+}
+```
+
+> **注意**：将 `/path/to/weak-signal` 替换为实际 clone 路径。Windows 使用 `D:\\path\\to\\weak-signal`。
+
+### 方式三：pip 可编辑安装 + console_scripts
+
+```bash
+git clone <your-repo-url> weak-signal
+cd weak-signal
+pip install -e ".[db,web]"   # 核心依赖；db/web 可选
+cp .env.example .env         # 编辑填入 API Key
+```
+
+安装后获得 `weak-signal-mcp` 命令，MCP 配置可简化为：
+
+```json
+{
+  "mcpServers": {
+    "weak-signal": {
+      "command": "weak-signal-mcp",
+      "env": {
+        "WEAK_SIGNAL_PROJECT_ROOT": "/path/to/weak-signal",
+        "OPENAI_API_KEY": "your_api_key",
+        "OPENAI_BASE_URL": "https://api.siliconflow.cn/v1"
+      }
+    }
+  }
+}
+```
+
+### MCP 工具列表
+
+部署后，MCP 客户端可使用以下工具：
+
+| 工具 | 说明 |
+|------|------|
+| `weak_signal_analyze_weak_signals` | 一键执行完整弱信号分析（领域 + 关键词 → 报告） |
+| `weak_signal_get_service_info` | 查看服务状态与目录信息 |
+| `weak_signal_list_data_sources` | 列出 `data/` 目录下的本地数据文件 |
+
+### 环境变量参考
+
+| 变量 | 必填 | 说明 | 默认值 |
+|------|------|------|--------|
+| `OPENAI_API_KEY` | 是* | OpenAI 兼容 API Key | - |
+| `OPENAI_BASE_URL` | 是* | API Base URL | - |
+| `WEAK_SIGNAL_PROJECT_ROOT` | 否 | 项目根目录 | 当前工作目录 |
+| `WEAK_SIGNAL_DATA_BACKEND` | 否 | 数据后端 `mock` / `db` | `mock` |
+| `OPENAI_MODEL` | 否 | 默认聊天模型 | `deepseek-chat` |
+| `EXTRACTION_MODEL` | 否 | 事件抽取模型 | 同上 |
+| `LLM_CLIENT_DEFAULT_TIMEOUT` | 否 | LLM 请求超时（秒） | `120` |
+
+> \* 至少配置一种 LLM 后端：`OPENAI_API_KEY` + `OPENAI_BASE_URL`，或 `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL`，或 `DEEPSEEK_API_KEY`。
+
+### 使用示例
+
+部署后，在 Claude Code 中直接对话：
+
+> 请使用 MCP 工具，帮我分析氢能领域的弱信号，关键词用绿氢、电解水制氢、燃料电池，采样 50 条
 python main.py --backfill-events result/old/events.json
 ```
 

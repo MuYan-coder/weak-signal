@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Union
 
@@ -10,6 +11,7 @@ from .models import DomainContext, DomainPack
 
 
 DOMAIN_PACK_DIR = Path(__file__).resolve().parents[1] / "config" / "domain_packs"
+MEMORY_DOMAIN_PACK_DIR = Path(__file__).resolve().parents[2] / "memory" / "domain_packs"
 NEUTRAL_PACK_ID = "neutral"
 
 
@@ -48,6 +50,19 @@ def _resolve_pack_path(pack_ref: Union[str, Path, None]) -> Path | None:
     for path in _candidate_preset_paths(text):
         if path.exists():
             return path
+    # Search memory/domain_packs/ for a YAML file whose pack_id matches
+    if MEMORY_DOMAIN_PACK_DIR.exists():
+        for yaml_file in sorted(
+            MEMORY_DOMAIN_PACK_DIR.glob("*.yaml"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ):
+            try:
+                payload = _read_pack_file(yaml_file)
+                if payload.get("pack_id") == text:
+                    return yaml_file
+            except Exception:
+                continue
     return None
 
 

@@ -1,0 +1,393 @@
+schema_version: domain_pack_v1
+pack_id: space_manufacturing
+pack_name: 太空制造
+pack_version: '1.0'
+source:
+  mode: llm_generated
+  model: Qwen/Qwen2.5-32B-Instruct
+  prompt_version: domain_pack_generator_v2
+  based_on_user_input:
+    field_id: space_manufacturing
+    field_name: 太空制造
+    keywords:
+    - 太空制造
+    - 空间制造
+    - 轨道制造
+    - 零重力制造
+    - 在轨服务
+    - 空间工厂
+    - 太空3D打印
+    synonyms:
+    - space manufacturing
+    - in-orbit manufacturing
+    - zero-gravity manufacturing
+    - in-space manufacturing
+    - orbital factory
+    - space 3D printing
+    - 空间装配
+    - 空间机器人操作
+    exclude_terms:
+    - 招聘
+    - 培训
+    - 广告
+    - 科幻电影
+    - 游戏
+domain_identity:
+  field_id: space_manufacturing
+  field_name: 太空制造
+  parent_industries: []
+  domain_boundary: 太空制造领域涉及在太空环境中进行的制造活动，包括但不限于零重力环境下的制造技术、空间工厂的建设和运营、以及在轨服务等。
+  adjacent_domains:
+  - 航天工程
+  - 空间科学
+  - 材料科学
+  - 机器人技术
+  - 3D打印技术
+  out_of_scope_domains:
+  - 人力资源
+  - 金融分析
+  - 市场营销
+  - 社会新闻
+  - 电子商务
+  - 娱乐传媒
+  - 房地产
+  - 健康养生
+  keywords:
+  - 太空制造
+  - 空间制造
+  - 轨道制造
+  - 零重力制造
+  - 在轨服务
+  - 空间工厂
+  - 太空3D打印
+  synonyms:
+  - space manufacturing
+  - in-orbit manufacturing
+  - zero-gravity manufacturing
+  - in-space manufacturing
+  - orbital factory
+  - space 3D printing
+  - 空间装配
+  - 空间机器人操作
+  exclude_terms:
+  - 招聘
+  - 培训
+  - 广告
+  - 科幻电影
+  - 游戏
+search_strategy:
+  core_keywords:
+  - 太空制造
+  - 空间制造
+  - 轨道制造
+  - 零重力制造
+  - 在轨服务
+  - 空间工厂
+  - 太空3D打印
+  synonyms:
+  - space manufacturing
+  - in-orbit manufacturing
+  - zero-gravity manufacturing
+  - in-space manufacturing
+  - orbital factory
+  - space 3D printing
+  - 空间装配
+  - 空间机器人操作
+  english_terms:
+  - space manufacturing
+  - in-orbit manufacturing
+  - zero-gravity manufacturing
+  - in-space manufacturing
+  - orbital factory
+  - space 3D printing
+  exclude_terms:
+  - 招聘
+  - 培训
+  - 广告
+  - 股票分析
+  - 行情
+  - 娱乐
+  - 美食
+  - 旅游
+  - 健康养生
+  - 房地产
+  - 直播带货
+  - 二手交易
+  - 电商
+  - 退款
+  - 维权
+  - 社会新闻
+  - 科幻电影
+  - 游戏
+  source_type_weights:
+    paper: 1.0
+    patent: 1.0
+    news: 1.0
+    report: 1.0
+    policy: 1.0
+  count_policy:
+    mode: recommend_only
+    default_total_sample_size: 0
+    min_per_source: {}
+    max_per_source: {}
+  query_expansion_rules: []
+observation_scopes:
+  main_scope: ''
+  sub_scopes: []
+  scope_aliases: []
+  scope_echo_terms: []
+  off_domain_anchor_terms: []
+  domain_boundary: 太空制造领域涉及在太空环境中进行的制造活动，包括但不限于零重力环境下的制造技术、空间工厂的建设和运营、以及在轨服务等。
+  adjacent_domains:
+  - 航天工程
+  - 空间科学
+  - 材料科学
+  - 机器人技术
+  - 3D打印技术
+  out_of_scope_domains:
+  - 人力资源
+  - 金融分析
+  - 市场营销
+  - 社会新闻
+  - 电子商务
+  - 娱乐传媒
+  - 房地产
+  - 健康养生
+  sub_directions:
+  - 零重力制造技术
+  - 空间工厂设计
+  - 在轨服务技术
+  - 太空3D打印技术
+  - 空间机器人操作
+  noise_terms:
+  - 招聘
+  - 培训
+  - 广告
+  - 股票分析
+  - 行情
+  - 娱乐
+  - 美食
+  - 旅游
+  - 健康养生
+  - 房地产
+  - 直播带货
+  - 二手交易
+  - 电商
+  - 退款
+  - 维权
+  - 社会新闻
+  - 科幻电影
+  - 游戏
+candidate_formation:
+  technical_object_types:
+  - 轨道工厂
+  - 空间机器人
+  - 3D打印头
+  - 零重力设备
+  mechanism_types:
+  - 微重力效应
+  - 材料沉积
+  - 机器人臂操作
+  - 激光烧结
+  task_or_performance_types:
+  - 装配精度
+  - 制造效率
+  - 材料强度
+  - 设备可靠性
+  data_or_method_types:
+  - 遥感数据
+  - 机器学习
+  - 仿真模型
+  - 工艺参数
+  scene_or_application_types:
+  - 空间站装配
+  - 卫星维修
+  - 太空材料实验
+  - 轨道制造服务
+  generic_terms:
+  - 技术
+  - 方法
+  - 系统
+  - 应用
+  - 数据
+  - 性能
+  - 效果
+  - 场景
+  - technology
+  - method
+  - system
+  - application
+  - data
+  - performance
+  - effect
+  - scene
+  shell_terms:
+  - 技术
+  - 方法
+  - 系统
+  - 应用
+  - 数据
+  - 性能
+  - 效果
+  - 场景
+  - technology
+  - method
+  - system
+  - application
+  - data
+  - performance
+  - effect
+  - scene
+  valid_candidate_patterns:
+  - pattern_id: technical_object_mechanism_task
+    pattern: technical_object + mechanism + task
+    required_slots:
+    - technical_object
+    - mechanism
+    - task
+  - pattern_id: technical_object_mechanism_performance
+    pattern: technical_object + mechanism + performance
+    required_slots:
+    - technical_object
+    - mechanism
+    - performance
+  - pattern_id: technical_object_task_performance
+    pattern: technical_object + task + performance
+    required_slots:
+    - technical_object
+    - task
+    - performance
+  - pattern_id: mechanism_task_performance
+    pattern: mechanism + task + performance
+    required_slots:
+    - mechanism
+    - task
+    - performance
+  - pattern_id: technical_object_mechanism_task_performance
+    pattern: technical_object + mechanism + task + performance
+    required_slots:
+    - technical_object
+    - mechanism
+    - task
+    - performance
+  invalid_candidate_patterns:
+  - pattern_id: shell_term_only
+    pattern: shell_term
+    reject_terms:
+    - 技术
+    - 方法
+    - 系统
+    - 应用
+    - 数据
+    - 性能
+    - 效果
+    - 场景
+    - technology
+    - method
+    - system
+    - application
+    - data
+    - performance
+    - effect
+    - scene
+    max_specific_slot_count: 0
+  - pattern_id: shell_only_rejection
+    reject_terms:
+    - 技术
+    - 方法
+    - 系统
+    - 应用
+    - 数据
+    - 性能
+    - 效果
+    - 场景
+    max_specific_slot_count: 0
+  minimum_specificity_rule:
+    min_non_shell_slots: 2
+    require_evidence_span: true
+    allow_scope_only_candidate: false
+weak_signal_rules:
+  early_stage_markers:
+  - 初步研究
+  - 概念验证
+  - 实验阶段
+  - 原型设计
+  - 初期测试
+  - 早期开发
+  low_attention_markers:
+  - 较少关注
+  - 边缘话题
+  - 冷门领域
+  - 未受重视
+  - 关注度低
+  - 鲜有报道
+  niche_actor_markers:
+  - 小规模企业
+  - 初创公司
+  - 特定研究机构
+  - 独立研究者
+  - 小众组织
+  - 非主流参与者
+  cross_domain_markers:
+  - 跨领域合作
+  - 多学科融合
+  - 跨界技术
+  - 跨行业应用
+  - 跨领域创新
+  - 多领域结合
+  engineering_trace_markers:
+  - 技术细节
+  - 工程设计
+  - 制造工艺
+  - 技术参数
+  - 工程挑战
+  - 技术实现
+  commercialization_noise_markers:
+  - 市场炒作
+  - 商业推广
+  - 营销活动
+  - 产品宣传
+  - 市场预测
+  - 商业前景
+  policy_or_market_noise_markers:
+  - 政策导向
+  - 市场趋势
+  - 政策支持
+  - 市场分析
+  - 政策影响
+  - 市场动态
+  scoring_adjustments:
+  - rule_id: rule_001
+    score_delta: 5
+    max_delta: 10
+  - rule_id: rule_002
+    score_delta: -3
+    max_delta: 5
+  - rule_id: rule_003
+    score_delta: 2
+    max_delta: 8
+  - rule_id: rule_004
+    score_delta: -1
+    max_delta: 3
+  - rule_id: rule_005
+    score_delta: 4
+    max_delta: 9
+canonicalization:
+  object_families: []
+  alias_groups: []
+  parent_child_terms: []
+  do_not_merge_rules: []
+  object_family_enabled: false
+evidence_rules:
+  strong_evidence_patterns: []
+  weak_evidence_patterns: []
+  source_reliability_hints: []
+  traceability_fields: []
+  evidence_rejection_patterns: []
+reporting:
+  display_labels: {}
+  explanation_templates: []
+  review_hints: []
+generated_at: '2026-06-04T12:04:11.395168+00:00'
+domain_pack_version: '1.0'
+domain_pack_hash: cf307a8339a16ee8
