@@ -14,3 +14,5 @@
 - 阶段 1 RED 验证：`python -m unittest tests.test_space_manufacturing_domain_policy -v` 失败于缺少未来模块 `src.scoring.candidate_eligibility`，符合计划预期。
 - 阶段 2 完成：新增 `src/extraction/domain_candidate_policy.py`，提交 `614565d`；根据规格/质量审查修复 fallback 后提交 `70c0863`。
 - 阶段 2 验证：`python -m py_compile src/extraction/domain_candidate_policy.py` 通过；flattened `DomainLexicon` smoke check 输出 `smoke ok`。
+- 阶段 3 完成：`candidate_former.py` 已通过 `DomainCandidatePolicy` 门控人形机器人展示词、标题锚点和桥接逻辑，提交 `dad74f7`；根据审查补齐 display hint 策略传递和去重推断，提交 `52f2210`。
+- 阶段 3 验证：`python -m py_compile src/extraction/candidate_former.py src/extraction/domain_candidate_policy.py` 通过；`python -m unittest tests.test_no_default_robot_leakage -v` 通过，21 项测试 OK。
