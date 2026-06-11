@@ -59,6 +59,7 @@ memory/*
 memory/domain_packs/cache/
 
 # Local development files
+.worktrees/
 BUG_FIX_LOG.md
 _test_*.py
 update_mcp.py
