@@ -2204,7 +2204,7 @@ class AnalysisPipeline:
         reverse_df = build_reverse_validation_table(scored_df, candidate_forms_df, top_k=15)
         self.latest_reverse_validation_df = reverse_df.copy()
         validated_df = merge_reverse_validation_into_manual_review(scored_df, reverse_df)
-        return refresh_research_layers(validated_df)
+        return refresh_research_layers(validated_df, domain_context=self.domain_context)
 
     def _validate_temporal(
         self,

@@ -6,7 +6,13 @@ import re
 
 import pandas as pd
 
-from ..extraction.tech_lexicon import BARE_MECHANISM_CORES, DOMINANT_TECH_TERMS, OBSERVATION_SCOPE_SET
+from ..extraction.tech_lexicon import (
+    BARE_MECHANISM_CORES,
+    DOMINANT_TECH_TERMS,
+    OBSERVATION_SCOPE_SET,
+    build_domain_lexicon,
+    normalize_signal_phrase,
+)
 from .candidate_eligibility import apply_candidate_eligibility
 
 
@@ -1097,8 +1103,29 @@ SCOPE_SURFACE_TERMS = {
 }
 
 
-def _is_scope_shell_constraint(value, key):
+def _domain_shell_terms(domain_context=None):
+    if domain_context is None:
+        return set()
+    try:
+        from src.extraction.domain_candidate_policy import build_domain_candidate_policy
+    except Exception:
+        return set()
+    try:
+        policy = build_domain_candidate_policy(build_domain_lexicon(domain_context))
+        return {
+            normalize_signal_phrase(item)
+            for item in (*policy.generic_terms(), *policy.shell_terms())
+            if normalize_signal_phrase(item)
+        }
+    except Exception:
+        return set()
+
+
+def _is_scope_shell_constraint(value, key, domain_context=None):
     token = str(value or "").strip()
+    domain_shells = _domain_shell_terms(domain_context)
+    if domain_shells:
+        return normalize_signal_phrase(token) in domain_shells
     return (
         (key == "task_constraint_tokens" and token in SCOPE_SHELL_TASK_TOKENS)
         or (key == "object_modifier_tokens" and token in SCOPE_SHELL_OBJECT_TOKENS)
@@ -1107,7 +1134,7 @@ def _is_scope_shell_constraint(value, key):
     )
 
 
-def _scope_shell_profile(row):
+def _scope_shell_profile(row, domain_context=None):
     raw_count = int(row.get("non_scope_constraint_count", 0) or 0)
     raw_survive = bool(row.get("survives_without_scope", False))
     raw_heavy = bool(row.get("scope_shell_heavy", False))
@@ -1128,7 +1155,11 @@ def _scope_shell_profile(row):
                 pairs.append((token, key))
 
     filtered = [(value, key) for value, key in pairs if value not in {"", str(row.get("mechanism_core", "")).strip()}]
-    non_shell_pairs = [(value, key) for value, key in filtered if not _is_scope_shell_constraint(value, key)]
+    non_shell_pairs = [
+        (value, key)
+        for value, key in filtered
+        if not _is_scope_shell_constraint(value, key, domain_context=domain_context)
+    ]
     non_scope_constraint_count = len({value for value, _ in non_shell_pairs})
     has_anchor = any(key in {"task_constraint_tokens", "object_modifier_tokens", "data_modifier_tokens"} for _, key in non_shell_pairs)
     survives_without_scope = bool(non_scope_constraint_count >= 2 and has_anchor)
@@ -1151,7 +1182,7 @@ def _scope_shell_profile(row):
     }
 
 
-def _resolved_topic_granularity(row):
+def _resolved_topic_granularity(row, domain_context=None):
     raw = str(row.get("topic_granularity", "")).strip()
     llm_judgment = str(row.get("llm_small_topic_judgment", "")).strip()
     llm_pattern = str(row.get("llm_small_topic_pattern", "")).strip()
@@ -1169,14 +1200,14 @@ def _resolved_topic_granularity(row):
     if bool(row.get("is_scope_echo", False)) or bool(row.get("generic_core_only", False)):
         return "generic_or_failed"
     if bool(row.get("has_non_scope_constraint", False)) and bool(row.get("has_mechanism_core", False)):
-        profile = _scope_shell_profile(row)
+        profile = _scope_shell_profile(row, domain_context=domain_context)
         if bool(profile["survives_without_scope"]) or int(profile["non_scope_constraint_count"]) >= 3:
             return "fine_grained_topic"
         return "scope_internal_candidate"
     return "generic_or_failed"
 
 
-def _resolved_display_tier(row):
+def _resolved_display_tier(row, domain_context=None):
     raw = str(row.get("display_tier", "")).strip()
     llm_judgment = str(row.get("llm_small_topic_judgment", "")).strip()
     llm_pattern = str(row.get("llm_small_topic_pattern", "")).strip()
@@ -1188,7 +1219,7 @@ def _resolved_display_tier(row):
         if raw == "weak_signal" and bool(row.get("scope_shell_heavy", False)):
             return "hotspot"
         return raw
-    granularity = _resolved_topic_granularity(row)
+    granularity = _resolved_topic_granularity(row, domain_context=domain_context)
     if bool(row.get("is_observation_scope", False)):
         return "demo"
     if granularity == "fine_grained_topic":
@@ -1466,12 +1497,21 @@ def _prepare_scored_candidates(candidates_df, domain_context=None):
     scored_df["raw_phrase_example"] = scored_df["evidence_items"].apply(
         lambda items: items[0].get("raw_candidate_text", "") if items else ""
     )
-    scored_df["topic_granularity"] = scored_df.apply(_resolved_topic_granularity, axis=1)
-    scored_df["display_tier"] = scored_df.apply(_resolved_display_tier, axis=1)
+    scored_df["topic_granularity"] = scored_df.apply(
+        lambda row: _resolved_topic_granularity(row, domain_context=domain_context),
+        axis=1,
+    )
+    scored_df["display_tier"] = scored_df.apply(
+        lambda row: _resolved_display_tier(row, domain_context=domain_context),
+        axis=1,
+    )
     stage_profiles = scored_df.apply(_infer_stage_hypothesis, axis=1)
     scored_df["stage_hypothesis"] = [item[0] for item in stage_profiles]
     scored_df["stage_hypothesis_reason"] = [item[1] for item in stage_profiles]
-    profiles = scored_df.apply(_scope_shell_profile, axis=1)
+    profiles = scored_df.apply(
+        lambda row: _scope_shell_profile(row, domain_context=domain_context),
+        axis=1,
+    )
     scored_df["non_scope_constraint_count"] = [int(item["non_scope_constraint_count"]) for item in profiles]
     scored_df["survives_without_scope"] = [bool(item["survives_without_scope"]) for item in profiles]
     scored_df["scope_shell_heavy"] = [bool(item["scope_shell_heavy"]) for item in profiles]
@@ -1510,21 +1550,22 @@ def _prepare_scored_candidates(candidates_df, domain_context=None):
     return scored_df
 
 
-def _research_signal_type(row):
+def _research_signal_type(row, domain_context=None):
     if str(row.get("score_applicability", "")).strip() == "not_applicable":
         return "other"
     tech_name = str(row.get("display_candidate_name", row.get("tech_name", ""))).strip().lower()
     mechanism_core = str(row.get("mechanism_core", "")).strip()
     candidate_stage = str(row.get("candidate_stage", "")).strip()
     is_strong = candidate_stage == "formed_candidate_strong"
-    topic_granularity = _resolved_topic_granularity(row)
-    display_tier = _resolved_display_tier(row)
-    scope_shell_profile = _scope_shell_profile(row)
+    topic_granularity = _resolved_topic_granularity(row, domain_context=domain_context)
+    display_tier = _resolved_display_tier(row, domain_context=domain_context)
+    scope_shell_profile = _scope_shell_profile(row, domain_context=domain_context)
     survives_without_scope = bool(scope_shell_profile["survives_without_scope"])
     non_scope_constraint_count = int(scope_shell_profile["non_scope_constraint_count"])
     scope_shell_heavy = bool(scope_shell_profile["scope_shell_heavy"])
     has_anchor_constraint = any(
-        str(token).strip() and not _is_scope_shell_constraint(str(token).strip(), key)
+        str(token).strip()
+        and not _is_scope_shell_constraint(str(token).strip(), key, domain_context=domain_context)
         for key in ["task_constraint_tokens", "object_modifier_tokens", "data_modifier_tokens"]
         for token in _safe_list(row.get(key, []))
     )
@@ -1769,7 +1810,7 @@ def score_signals(candidates_df, data_df=None, domain_context=None):
     if scored_df.empty:
         empty = scored_df.copy()
         return empty, empty, empty
-    scored_df = refresh_research_layers(scored_df)
+    scored_df = refresh_research_layers(scored_df, domain_context=domain_context)
     scored_df["score"] = scored_df["weak_signal_score"]
     scored_df["evidence_preview"] = scored_df["evidence_items"].apply(_build_evidence_preview)
 
@@ -1791,7 +1832,7 @@ def score_signals(candidates_df, data_df=None, domain_context=None):
     return hotspot_df, weak_signal_df, scope_overview_df
 
 
-def refresh_research_layers(scored_df):
+def refresh_research_layers(scored_df, domain_context=None):
     """
     Recompute research layers after downstream validation columns are merged in.
 
@@ -1804,7 +1845,10 @@ def refresh_research_layers(scored_df):
         return scored_df
 
     refreshed = scored_df.copy()
-    refreshed["signal_type"] = refreshed.apply(_research_signal_type, axis=1)
+    refreshed["signal_type"] = refreshed.apply(
+        lambda row: _research_signal_type(row, domain_context=domain_context),
+        axis=1,
+    )
     score_source = "weak_signal_score" if "weak_signal_score" in refreshed.columns else "hotspot_score"
     refreshed["score"] = refreshed.get(score_source, 0)
     refreshed["explanation"] = refreshed.apply(build_signal_explanation, axis=1)
@@ -1831,7 +1875,7 @@ def score_all_candidates(candidates_df, domain_context=None):
     scored_df = _prepare_scored_candidates(candidates_df, domain_context=domain_context)
     if scored_df.empty:
         return scored_df
-    scored_df = refresh_research_layers(scored_df)
+    scored_df = refresh_research_layers(scored_df, domain_context=domain_context)
     scored_df["score"] = scored_df["hotspot_score"]
     return scored_df.sort_values(
         by=["hotspot_score", "quality_adjusted_rank_score", "source_count", "org_count", "total_mentions", "tech_name"],
