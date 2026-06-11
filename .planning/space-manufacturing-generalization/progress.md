@@ -18,3 +18,5 @@
 - 阶段 3 验证：`python -m py_compile src/extraction/candidate_former.py src/extraction/domain_candidate_policy.py` 通过；`python -m unittest tests.test_no_default_robot_leakage -v` 通过，21 项测试 OK。
 - 阶段 4 完成：`candidate_former.py` 的候选具体性、泛词/壳词、聚类风险和代表候选评分已接入 `DomainCandidatePolicy`，提交 `34ff19b`；规格审查指出 `_representative_candidate_score` 有两处 `_strong_slot_labels` 未传 policy，已修复并提交 `77f1486`。
 - 阶段 4 验证：`python -m py_compile src/extraction/candidate_former.py src/extraction/domain_candidate_policy.py` 通过；`python -m unittest tests.test_no_default_robot_leakage tests.test_event_extraction_refactor -v` 通过，49 项测试 OK；`git diff --check` 通过。
+- 阶段 5 完成：新增 `src/scoring/candidate_eligibility.py`，并在 `pipeline.py` 与 `scorer.py` 中传入 `domain_context`；太空制造 eligibility 现在使用 Domain Pack 技术锚点，提交 `24a6cb1`。
+- 阶段 5 验证：`python -m py_compile src/scoring/candidate_eligibility.py src/scoring/scorer.py src/core/pipeline.py` 通过；`python -m unittest tests.test_candidate_eligibility tests.test_space_manufacturing_domain_policy tests.test_no_default_robot_leakage tests.test_event_extraction_refactor -v` 通过，56 项测试 OK；`git diff --check` 通过。
