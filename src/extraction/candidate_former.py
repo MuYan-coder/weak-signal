@@ -472,10 +472,10 @@ def _bridge_reason(unit, policy=None):
     return "no_matching_pattern"
 
 
-def _bridge_confidence(unit, policy=None):
+def _bridge_confidence(unit, policy=None, candidate=None):
     if policy is not None and not policy.is_legacy_humanoid:
         return 0.0
-    candidate = _infer_bridged_object_surface(unit, policy=policy)
+    candidate = candidate if candidate is not None else _infer_bridged_object_surface(unit, policy=policy)
     if not candidate:
         return 0.0
 
@@ -539,10 +539,11 @@ def _display_title_task_surface(unit):
     return str(unit.get("preferred_task_surface", "")).strip()
 
 
-def _display_surface_hint_from_title(unit):
+def _display_surface_hint_from_title(unit, policy=None):
     title_hints = _source_surface_hints(
         str(unit.get("source_title", "")).strip(),
         _surface_hint_context(unit),
+        policy=policy,
     )
     preferred = str(title_hints.get("preferred_object_surface", "")).strip()
     if preferred not in BRIDGED_OBJECT_SURFACES:
@@ -594,13 +595,14 @@ def _display_surface_hint_from_title(unit):
     return preferred if has_fine_manipulation_task else ""
 
 
-def _display_task_hint_from_title(unit):
+def _display_task_hint_from_title(unit, policy=None):
     object_surface = str(unit.get("display_preferred_object_surface", "")).strip()
     if not object_surface:
         return ""
     title_hints = _source_surface_hints(
         str(unit.get("source_title", "")).strip(),
         _surface_hint_context(unit),
+        policy=policy,
     )
     preferred_task = str(title_hints.get("preferred_task_surface", "")).strip()
     if preferred_task not in {"抓取", "装配"}:
@@ -3603,7 +3605,7 @@ def _unit_row(event_id, scope_names, unit, source_type="", domain_lexicon=None, 
         "relation_method": str(unit.get("relation_method", "")).strip(),
         "canonical_candidate_name_en": canonical_name_en,
     }
-    gated_object_surface = _display_surface_hint_from_title(surface_hint_unit)
+    gated_object_surface = _display_surface_hint_from_title(surface_hint_unit, policy=policy)
     gated_object_candidates = [gated_object_surface] if gated_object_surface else []
     granularity_input = {
         **unit,
@@ -3624,7 +3626,7 @@ def _unit_row(event_id, scope_names, unit, source_type="", domain_lexicon=None, 
         "data_modifier_tokens": data_modifier_tokens,
         "method_modifier_tokens": method_modifier_tokens,
     }
-    granularity_input["display_preferred_task_surface"] = _display_task_hint_from_title(granularity_input)
+    granularity_input["display_preferred_task_surface"] = _display_task_hint_from_title(granularity_input, policy=policy)
     if granularity_input["display_preferred_task_surface"]:
         granularity_input["preferred_task_surface"] = granularity_input["display_preferred_task_surface"]
     scope_shell_profile = _scope_shell_profile(granularity_input)
@@ -3777,7 +3779,7 @@ def _unit_row(event_id, scope_names, unit, source_type="", domain_lexicon=None, 
         # 旁路 bridge 字段：记录桥接推断结果，但不影响主链
         "bridged_object_subtype_candidate": bridged_object_surface,
         "bridged_object_bridge_reason": _bridge_reason(granularity_input, policy=policy) if bridged_object_surface else "",
-        "bridged_object_bridge_confidence": _bridge_confidence(granularity_input, policy=policy),
+        "bridged_object_bridge_confidence": _bridge_confidence(granularity_input, policy=policy, candidate=bridged_object_surface),
         **domain_pack_trace,
     }
 

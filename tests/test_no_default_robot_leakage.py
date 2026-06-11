@@ -271,6 +271,61 @@ class NoDefaultRobotLeakageTest(unittest.TestCase):
         self.assertIn("technical_object", reasons)
         self.assertNotIn("机器人", names)
 
+    def test_non_humanoid_candidate_forms_do_not_leak_manipulator_surfaces(self):
+        events = pd.DataFrame(
+            [
+                {
+                    "id": "paper-battery-manipulator-words",
+                    "subject": "研究团队",
+                    "action": "提出",
+                    "technology": ["电解质"],
+                    "technical_object": "电解质",
+                    "mechanism": "界面钝化",
+                    "task": "提升循环稳定性",
+                    "evidence_span": "研究团队提出固态电池电解质界面钝化方法，提升循环稳定性。",
+                    "observation_scopes": ["电池材料"],
+                    "candidate_units": [
+                        {
+                            "raw_phrase": "电解质界面钝化",
+                            "raw_candidate_text": "电解质界面钝化",
+                            "mechanism_core": "界面钝化",
+                            "mechanism_core_tokens": ["界面钝化"],
+                            "object_modifier_tokens": ["电解质"],
+                            "task_constraint_tokens": ["循环稳定性"],
+                            "scope_names": ["电池材料"],
+                            "source_extraction_mode": "domain_pack_test",
+                        }
+                    ],
+                }
+            ]
+        )
+        raw = pd.DataFrame(
+            [
+                {
+                    "id": "paper-battery-manipulator-words",
+                    "source_type": "paper",
+                    "title": "固态电池夹爪抓取装配误报词界面钝化",
+                    "text": "固态电池研究文本包含夹爪、抓取和装配等旁路词，但主题是电解质界面钝化。",
+                    "analysis_tech_field_name": "电池材料",
+                }
+            ]
+        )
+
+        candidates = build_candidate_forms(events, raw, domain_context=_battery_context())
+        rows = candidates[
+            (candidates["id"].astype(str) == "paper-battery-manipulator-words")
+            & (candidates["raw_phrase"].astype(str) != "电池材料")
+            & (~candidates["candidate_stage"].astype(str).eq("scope_overview"))
+        ]
+
+        self.assertFalse(rows.empty)
+        for _, row in rows.iterrows():
+            self.assertEqual(row["object_surface_candidates"], [])
+            self.assertEqual(row["preferred_object_surface"], "")
+            self.assertEqual(row["display_preferred_object_surface"], "")
+            self.assertEqual(row["preferred_task_surface"], "")
+            self.assertEqual(row["display_preferred_task_surface"], "")
+
     def test_fine_grained_candidate_display_tier_remains_weak_signal_even_before_strong_stage(self):
         events = pd.DataFrame(
             [
