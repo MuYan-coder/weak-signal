@@ -20,3 +20,5 @@
 - 该文件私有函数较多，直接改签名容易影响内部测试。每个新增参数都应默认 `None` 并保留旧常量 fallback。
 - 如果一次性重写聚类逻辑，可能影响现有候选数量和报告结构。计划采用门控和策略适配，不重写聚类算法。
 - `DomainPack` schema 当前没有专门的 surface pattern 字段，因此非人形领域第一阶段应禁用人形 surface pattern，而不是立即扩 schema。
+
+Runtime pack hygiene: generated space manufacturing packs in `memory/domain_packs/` are runtime artifacts. Source-level regression coverage uses inline test packs so behavior does not depend on a specific cached hash.
