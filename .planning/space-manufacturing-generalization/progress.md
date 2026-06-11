@@ -16,3 +16,5 @@
 - 阶段 2 验证：`python -m py_compile src/extraction/domain_candidate_policy.py` 通过；flattened `DomainLexicon` smoke check 输出 `smoke ok`。
 - 阶段 3 完成：`candidate_former.py` 已通过 `DomainCandidatePolicy` 门控人形机器人展示词、标题锚点和桥接逻辑，提交 `dad74f7`；根据审查补齐 display hint 策略传递和去重推断，提交 `52f2210`。
 - 阶段 3 验证：`python -m py_compile src/extraction/candidate_former.py src/extraction/domain_candidate_policy.py` 通过；`python -m unittest tests.test_no_default_robot_leakage -v` 通过，21 项测试 OK。
+- 阶段 4 完成：`candidate_former.py` 的候选具体性、泛词/壳词、聚类风险和代表候选评分已接入 `DomainCandidatePolicy`，提交 `34ff19b`；规格审查指出 `_representative_candidate_score` 有两处 `_strong_slot_labels` 未传 policy，已修复并提交 `77f1486`。
+- 阶段 4 验证：`python -m py_compile src/extraction/candidate_former.py src/extraction/domain_candidate_policy.py` 通过；`python -m unittest tests.test_no_default_robot_leakage tests.test_event_extraction_refactor -v` 通过，49 项测试 OK；`git diff --check` 通过。
