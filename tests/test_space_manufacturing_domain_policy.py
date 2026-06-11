@@ -245,6 +245,7 @@ class SpaceManufacturingDomainPolicyTest(unittest.TestCase):
         candidates = build_candidate_forms(events, raw, domain_context=_space_context())
         rows = candidates[candidates["raw_phrase"].astype(str) == "太空制造技术方案"]
 
+        self.assertFalse(rows.empty)
         self.assertNotIn("formed_candidate_strong", set(rows["candidate_stage"].astype(str)))
         self.assertFalse(
             (
@@ -295,8 +296,13 @@ class SpaceManufacturingDomainPolicyTest(unittest.TestCase):
 
         profile = evaluate_candidate_eligibility(row, domain_context=_space_context())
         scored = score_all_candidates(pd.DataFrame([row]), domain_context=_space_context())
+        eligibility = getattr(
+            profile,
+            "candidate_eligibility",
+            profile.get("candidate_eligibility") if isinstance(profile, dict) else "",
+        )
 
-        self.assertIn(profile["status"], {"eligible", "candidate_monitoring"})
+        self.assertIn(eligibility, {"eligible", "candidate_monitoring"})
         self.assertNotEqual(scored.loc[0, "score_applicability"], "not_applicable")
         self.assertGreater(float(scored.loc[0, "weak_signal_raw_score"]), 0)
 
