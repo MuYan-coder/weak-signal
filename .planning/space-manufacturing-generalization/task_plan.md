@@ -6,12 +6,12 @@
 
 ## 当前阶段
 
-阶段 2：新增 `DomainCandidatePolicy` 策略适配层。
+阶段 3：在 `candidate_former.py` 中按策略门控人形机器人展示词、标题锚点和桥接逻辑。
 
 ## 阶段清单
 
 - [x] 阶段 1：新增太空制造污染复现测试
-- [ ] 阶段 2：新增 `DomainCandidatePolicy` 策略适配层
+- [x] 阶段 2：新增 `DomainCandidatePolicy` 策略适配层
 - [ ] 阶段 3：在 `candidate_former.py` 中按策略门控人形机器人展示词、标题锚点和桥接逻辑
 - [ ] 阶段 4：将候选具体性、泛词/壳词和聚类风险判断改为 Domain Pack 驱动
 - [ ] 阶段 5：将 `candidate_eligibility.py` 改为 Domain Pack 技术锚点驱动

@@ -12,3 +12,5 @@
 - 创建隔离 worktree：`.worktrees/space-manufacturing-domain-policy`，分支 `space-manufacturing-domain-policy`。
 - 阶段 1 完成：新增 `tests/test_space_manufacturing_domain_policy.py`，提交 `26a729f`，随后根据质量审查加固测试并提交 `ed8a016`。
 - 阶段 1 RED 验证：`python -m unittest tests.test_space_manufacturing_domain_policy -v` 失败于缺少未来模块 `src.scoring.candidate_eligibility`，符合计划预期。
+- 阶段 2 完成：新增 `src/extraction/domain_candidate_policy.py`，提交 `614565d`；根据规格/质量审查修复 fallback 后提交 `70c0863`。
+- 阶段 2 验证：`python -m py_compile src/extraction/domain_candidate_policy.py` 通过；flattened `DomainLexicon` smoke check 输出 `smoke ok`。
