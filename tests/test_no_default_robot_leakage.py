@@ -3,7 +3,13 @@ import unittest
 import pandas as pd
 
 from src.domain import DomainContext, DomainPack, load_domain_context
-from src.extraction.candidate_former import _technical_object_name_from_slots, build_candidate_forms
+from src.extraction.candidate_former import (
+    _cluster_specificity_profile,
+    _is_generic_method_only_display_name,
+    _technical_object_name_from_slots,
+    build_candidate_forms,
+)
+from src.extraction.domain_candidate_policy import build_domain_candidate_policy
 from src.extraction.event_extractor import process_events
 from src.extraction.tech_lexicon import build_domain_lexicon
 from src.scoring.scorer import score_all_candidates
@@ -158,6 +164,72 @@ def _electronic_materials_pack() -> DomainPack:
 
 def _electronic_materials_context() -> DomainContext:
     return DomainContext.from_pack(_electronic_materials_pack())
+
+
+def _space_manufacturing_pack() -> DomainPack:
+    return DomainPack.from_dict(
+        {
+            "schema_version": "domain_pack_v1",
+            "pack_id": "space_manufacturing",
+            "pack_name": "太空制造 Domain Pack",
+            "pack_version": "generated.v1",
+            "source": {
+                "mode": "llm_generated",
+                "model": "fake-model",
+                "prompt_version": "domain_pack_generator_v3",
+                "based_on_user_input": {
+                    "field_id": "space_manufacturing",
+                    "field_name": "太空制造",
+                    "keywords": ["太空制造", "在轨制造", "微重力制造"],
+                    "synonyms": ["space manufacturing", "in-space manufacturing"],
+                    "exclude_terms": ["人形机器人", "具身智能", "灵巧手", "夹爪", "机械臂", "world model"],
+                },
+            },
+            "domain_identity": {
+                "field_id": "space_manufacturing",
+                "field_name": "太空制造",
+                "domain_boundary": "微重力、在轨和航天场景下的材料沉积、结构成形、装配、维修与制造工艺。",
+                "out_of_scope_domains": ["人形机器人", "具身智能", "灵巧手", "夹爪", "机械臂", "world model"],
+            },
+            "search_strategy": {
+                "core_keywords": ["太空制造", "在轨制造", "微重力制造"],
+                "synonyms": ["space manufacturing", "in-space manufacturing"],
+                "english_terms": ["space manufacturing", "orbital additive manufacturing", "microgravity manufacturing"],
+                "exclude_terms": ["人形机器人", "具身智能", "灵巧手", "夹爪", "机械臂", "world model"],
+            },
+            "observation_scopes": {
+                "main_scope": "太空制造",
+                "sub_scopes": ["在轨制造", "微重力制造"],
+                "scope_aliases": ["太空制造", "在轨制造", "微重力制造", "space manufacturing"],
+                "scope_echo_terms": ["太空制造", "space manufacturing"],
+                "off_domain_anchor_terms": ["人形机器人", "具身智能", "灵巧手", "夹爪", "机械臂", "world model"],
+            },
+            "candidate_formation": {
+                "technical_object_types": ["太空3D打印", "微重力增材制造", "在轨装配", "冷焊"],
+                "mechanism_types": ["冷焊工艺", "additive manufacturing", "cold welding"],
+                "task_or_performance_types": ["在轨维修", "在轨建造", "结构成形"],
+                "data_or_method_types": ["冷焊工艺", "additive manufacturing"],
+                "scene_or_application_types": ["太空制造", "在轨装配"],
+                "generic_terms": ["太空制造", "space manufacturing", "技术", "方法", "系统", "平台", "方案"],
+                "shell_terms": ["太空制造", "space manufacturing", "技术", "方法", "系统", "平台", "方案"],
+                "valid_candidate_patterns": [],
+                "invalid_candidate_patterns": [],
+                "minimum_specificity_rule": {
+                    "min_non_shell_slots": 2,
+                    "require_evidence_span": True,
+                    "allow_scope_only_candidate": False,
+                },
+            },
+        }
+    )
+
+
+def _space_manufacturing_context() -> DomainContext:
+    return DomainContext.from_pack(_space_manufacturing_pack())
+
+
+def _space_manufacturing_policy():
+    return build_domain_candidate_policy(build_domain_lexicon(_space_manufacturing_context()))
 
 
 class NoDefaultRobotLeakageTest(unittest.TestCase):
@@ -1007,6 +1079,54 @@ class NoDefaultRobotLeakageTest(unittest.TestCase):
 
         self.assertEqual(battery_name, "world model planning")
         self.assertEqual(humanoid_name, "机器人社交导航规划")
+
+    def test_space_policy_does_not_treat_robot_default_object_slots_as_generic(self):
+        policy = _space_manufacturing_policy()
+        units = [
+            {
+                "raw_phrase": label,
+                "raw_candidate_text": label,
+                "canonical_candidate_name_en": label,
+                "object_modifier_tokens": [label],
+                "task_constraint_tokens": [],
+                "data_modifier_tokens": [],
+                "method_modifier_tokens": [],
+                "domain_context": _space_manufacturing_context(),
+            }
+            for label in ["world model", "机械臂", "夹爪", "灵巧手"]
+        ]
+
+        for unit in units:
+            with self.subTest(unit=unit["raw_phrase"]):
+                profile = _cluster_specificity_profile([unit], policy=policy)
+
+                self.assertNotEqual(profile["generic_cluster_risk"], "high")
+                self.assertIn("specific_object_slot", profile["specificity_reason"])
+
+    def test_space_policy_does_not_reject_legacy_robot_method_name_with_domain_anchor(self):
+        context = _space_manufacturing_context()
+        lexicon = build_domain_lexicon(context)
+        policy = build_domain_candidate_policy(lexicon)
+        unit = {
+            "raw_phrase": "训练技术",
+            "raw_candidate_text": "训练技术",
+            "canonical_candidate_name_en": "训练技术",
+            "mechanism_core": "训练",
+            "object_modifier_tokens": ["太空3D打印"],
+            "task_constraint_tokens": [],
+            "data_modifier_tokens": [],
+            "method_modifier_tokens": ["训练技术"],
+            "domain_context": context,
+        }
+
+        self.assertFalse(
+            _is_generic_method_only_display_name(
+                "训练技术",
+                unit,
+                domain_lexicon=lexicon,
+                policy=policy,
+            )
+        )
 
     def test_signal_generation_preserves_formed_candidate_aggregate_counts_for_weak_signals(self):
         forms = pd.DataFrame(

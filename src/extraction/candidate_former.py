@@ -703,12 +703,14 @@ def _label_for_token(token, prefer_zh=False):
     return "" if prefer_zh else normalized
 
 
-def _strong_slot_labels(values, key):
+def _strong_slot_labels(values, key, policy=None):
     labels = []
     for value in _dedupe_preserve_order(values):
-        if _is_generic_constraint(value, key) or _is_scope_shell_constraint(value, key):
+        if _is_generic_constraint_value(value, key, policy=policy) or _is_scope_shell_constraint_value(value, key, policy=policy):
             continue
         label = _label_for_token(value, prefer_zh=True)
+        if not label and policy is not None and not _policy_uses_legacy_robot_rules(policy):
+            label = str(value or "").strip()
         if label:
             labels.append(label)
     return _dedupe_preserve_order(labels)
@@ -723,7 +725,7 @@ def _fallback_slot_labels(values):
     return _dedupe_preserve_order(labels)
 
 
-def _compose_tech_object_slot(unit):
+def _compose_tech_object_slot(unit, policy=None):
     domain_lexicon = unit.get("domain_lexicon")
     if not domain_lexicon:
         domain_lexicon = build_domain_lexicon(unit.get("domain_pack") or unit.get("domain_context"))
@@ -735,11 +737,17 @@ def _compose_tech_object_slot(unit):
     if explicit_surface:
         return _clean(explicit_surface)
 
-    object_labels = _strong_slot_labels(unit.get("object_modifier_tokens", []), "object_modifier_tokens")
-    task_labels = _strong_slot_labels(unit.get("task_constraint_tokens", []), "task_constraint_tokens")
-    data_labels = _strong_slot_labels(unit.get("data_modifier_tokens", []), "data_modifier_tokens")
+    object_labels = _strong_slot_labels(unit.get("object_modifier_tokens", []), "object_modifier_tokens", policy=policy)
+    task_labels = _strong_slot_labels(unit.get("task_constraint_tokens", []), "task_constraint_tokens", policy=policy)
+    data_labels = _strong_slot_labels(unit.get("data_modifier_tokens", []), "data_modifier_tokens", policy=policy)
 
-    preferred_object_labels = [label for label in object_labels if label not in PRIMARY_GENERIC_OBJECT_LABELS]
+    generic_object_labels = _generic_object_labels(policy)
+    primary_generic_object_labels = (
+        PRIMARY_GENERIC_OBJECT_LABELS
+        if policy is None or _policy_uses_legacy_robot_rules(policy)
+        else PRIMARY_GENERIC_OBJECT_LABELS & generic_object_labels
+    )
+    preferred_object_labels = [label for label in object_labels if label not in primary_generic_object_labels]
     primary_object = preferred_object_labels[0] if preferred_object_labels else (object_labels[0] if object_labels else "")
     primary_task = task_labels[0] if task_labels else ""
     primary_data = data_labels[0] if data_labels else ""
@@ -757,21 +765,23 @@ def _compose_tech_object_slot(unit):
         fallback_objects = _fallback_slot_labels(unit.get("object_modifier_tokens", []))
         fallback_tasks = _fallback_slot_labels(unit.get("task_constraint_tokens", []))
         for label in fallback_objects + fallback_tasks:
-            if label and label not in TECH_OBJECT_GENERIC_LABELS:
+            if label and label not in generic_object_labels:
                 res = label
                 break
 
     return _clean(res)
 
 
-def _refine_tech_object_slot(unit, tech_object_slot, capability_slot="", process_slot="", application_slot=""):
+def _refine_tech_object_slot(unit, tech_object_slot, capability_slot="", process_slot="", application_slot="", policy=None):
     tech_object_slot = str(tech_object_slot or "").strip()
     if tech_object_slot != "机器人":
         return tech_object_slot
+    if policy is not None and not _policy_uses_legacy_robot_rules(policy):
+        return tech_object_slot
 
     ranked_hints = []
-    object_labels = _strong_slot_labels(unit.get("object_modifier_tokens", []), "object_modifier_tokens")
-    task_labels = _strong_slot_labels(unit.get("task_constraint_tokens", []), "task_constraint_tokens")
+    object_labels = _strong_slot_labels(unit.get("object_modifier_tokens", []), "object_modifier_tokens", policy=policy)
+    task_labels = _strong_slot_labels(unit.get("task_constraint_tokens", []), "task_constraint_tokens", policy=policy)
     for label in object_labels + task_labels:
         if label in TECH_OBJECT_REFINEMENT_HINTS:
             ranked_hints.append(label)
@@ -786,24 +796,24 @@ def _refine_tech_object_slot(unit, tech_object_slot, capability_slot="", process
     return tech_object_slot
 
 
-def _compose_capability_slot(unit, tech_object_slot=""):
+def _compose_capability_slot(unit, tech_object_slot="", policy=None):
     mechanism_label = _label_for_token(unit.get("mechanism_core", ""), prefer_zh=True)
     if not mechanism_label:
         return ""
-    task_labels = _strong_slot_labels(unit.get("task_constraint_tokens", []), "task_constraint_tokens")
+    task_labels = _strong_slot_labels(unit.get("task_constraint_tokens", []), "task_constraint_tokens", policy=policy)
     for label in task_labels:
         if label and label not in tech_object_slot and label != mechanism_label:
             return f"{label}{mechanism_label}"
     return mechanism_label
 
 
-def _compose_process_slot(unit):
+def _compose_process_slot(unit, policy=None):
     domain_lexicon = unit.get("domain_lexicon")
     if not domain_lexicon:
         domain_lexicon = build_domain_lexicon(unit.get("domain_pack") or unit.get("domain_context"))
 
-    data_labels = _strong_slot_labels(unit.get("data_modifier_tokens", []), "data_modifier_tokens")
-    method_labels = _strong_slot_labels(unit.get("method_modifier_tokens", []), "method_modifier_tokens")
+    data_labels = _strong_slot_labels(unit.get("data_modifier_tokens", []), "data_modifier_tokens", policy=policy)
+    method_labels = _strong_slot_labels(unit.get("method_modifier_tokens", []), "method_modifier_tokens", policy=policy)
     mechanism_label = _label_for_token(unit.get("mechanism_core", ""), prefer_zh=True)
     primary_data = "-".join(data_labels[:2]) if len(data_labels) >= 2 else (data_labels[0] if data_labels else "")
 
@@ -830,17 +840,17 @@ def _compose_process_slot(unit):
     return res
 
 
-def _compose_carrier_slot(unit):
-    data_labels = _strong_slot_labels(unit.get("data_modifier_tokens", []), "data_modifier_tokens")
+def _compose_carrier_slot(unit, policy=None):
+    data_labels = _strong_slot_labels(unit.get("data_modifier_tokens", []), "data_modifier_tokens", policy=policy)
     if data_labels:
         return "-".join(data_labels[:2]) if len(data_labels) >= 2 else data_labels[0]
     fallback_data = _fallback_slot_labels(unit.get("data_modifier_tokens", []))
     return fallback_data[0] if fallback_data else ""
 
 
-def _compose_application_slot(unit, tech_object_slot=""):
-    profile = _scope_shell_profile(unit)
-    task_labels = _strong_slot_labels(unit.get("task_constraint_tokens", []), "task_constraint_tokens")
+def _compose_application_slot(unit, tech_object_slot="", policy=None):
+    profile = _scope_shell_profile(unit, policy=policy)
+    task_labels = _strong_slot_labels(unit.get("task_constraint_tokens", []), "task_constraint_tokens", policy=policy)
     for label in task_labels:
         if label and label not in tech_object_slot:
             return label
@@ -848,27 +858,28 @@ def _compose_application_slot(unit, tech_object_slot=""):
     if not primary_scope:
         return ""
     if bool(profile.get("scope_shell_heavy", False)) and not bool(profile.get("survives_without_scope", False)):
-        return SCOPE_LABELS.get(primary_scope, "")
+        return _scope_label(primary_scope, policy=policy)
     if not tech_object_slot:
-        return SCOPE_LABELS.get(primary_scope, "")
+        return _scope_label(primary_scope, policy=policy)
     return ""
 
 
-def _build_technical_object_slots(unit):
-    tech_object_slot = _compose_tech_object_slot(unit)
-    capability_slot = _compose_capability_slot(unit, tech_object_slot=tech_object_slot)
-    process_slot = _compose_process_slot(unit)
-    carrier_slot = _compose_carrier_slot(unit)
-    application_slot = _compose_application_slot(unit, tech_object_slot=tech_object_slot)
+def _build_technical_object_slots(unit, policy=None):
+    tech_object_slot = _compose_tech_object_slot(unit, policy=policy)
+    capability_slot = _compose_capability_slot(unit, tech_object_slot=tech_object_slot, policy=policy)
+    process_slot = _compose_process_slot(unit, policy=policy)
+    carrier_slot = _compose_carrier_slot(unit, policy=policy)
+    application_slot = _compose_application_slot(unit, tech_object_slot=tech_object_slot, policy=policy)
     tech_object_slot = _refine_tech_object_slot(
         unit,
         tech_object_slot,
         capability_slot=capability_slot,
         process_slot=process_slot,
         application_slot=application_slot,
+        policy=policy,
     )
 
-    profile = _scope_shell_profile(unit)
+    profile = _scope_shell_profile(unit, policy=policy)
     score = 0
     reasons = []
     if tech_object_slot:
@@ -906,8 +917,8 @@ def _build_technical_object_slots(unit):
     }
 
 
-def _specific_anchor_strength(unit):
-    slots = _build_technical_object_slots(unit)
+def _specific_anchor_strength(unit, policy=None):
+    slots = _build_technical_object_slots(unit, policy=policy)
     score = 0
     reasons = []
     tech_object_slot = slots.get("tech_object_slot", "")
@@ -916,7 +927,10 @@ def _specific_anchor_strength(unit):
     carrier_slot = slots.get("carrier_slot", "")
     application_slot = slots.get("application_slot", "")
 
-    if tech_object_slot and tech_object_slot not in GENERIC_TECH_OBJECT_SLOTS:
+    generic_tech_object_slots = _generic_tech_object_slots(policy)
+    generic_application_slots = generic_tech_object_slots if policy is not None else GENERIC_APPLICATION_SLOTS
+
+    if tech_object_slot and tech_object_slot not in generic_tech_object_slots:
         score += 2
         reasons.append("specific_object_slot")
     elif tech_object_slot:
@@ -940,7 +954,7 @@ def _specific_anchor_strength(unit):
         if "-" in carrier_slot:
             score += 1
             reasons.append("compound_carrier_slot")
-    if application_slot and application_slot not in GENERIC_APPLICATION_SLOTS:
+    if application_slot and application_slot not in generic_application_slots:
         score += 1
         reasons.append("specific_application_slot")
     elif application_slot:
@@ -948,16 +962,17 @@ def _specific_anchor_strength(unit):
     return min(score, 6), "；".join(reasons), slots
 
 
-def _is_specific_slot_value(dim, value):
+def _is_specific_slot_value(dim, value, policy=None):
     value = str(value or "").strip()
     if not value:
         return False
     if dim == "tech_object_slot":
-        return value not in GENERIC_TECH_OBJECT_SLOTS
+        return value not in _generic_tech_object_slots(policy)
     if dim == "capability_slot":
         return value not in GENERIC_CAPABILITY_SLOTS
     if dim == "application_slot":
-        return value not in GENERIC_APPLICATION_SLOTS
+        generic_application_slots = _generic_tech_object_slots(policy) if policy is not None else GENERIC_APPLICATION_SLOTS
+        return value not in generic_application_slots
     if dim in {"process_slot", "carrier_slot"}:
         return True
     return True
@@ -967,17 +982,17 @@ def _stable_anchor_threshold(item_count):
     return max(MIN_SECOND_ANCHOR_COUNT, int(math.ceil(item_count * MIN_SECOND_ANCHOR_RATIO)))
 
 
-def _candidate_second_anchor_variants(items):
+def _candidate_second_anchor_variants(items, policy=None):
     dims = ["tech_object_slot", "process_slot", "carrier_slot", "application_slot"]
     counters = {dim: Counter() for dim in dims}
     item_count = max(len(items), 1)
     threshold = _stable_anchor_threshold(item_count)
 
     for item in items:
-        slots = _build_technical_object_slots(item)
+        slots = _build_technical_object_slots(item, policy=policy)
         for dim in dims:
             value = str(slots.get(dim, "")).strip()
-            if not value or not _is_specific_slot_value(dim, value):
+            if not value or not _is_specific_slot_value(dim, value, policy=policy):
                 continue
             counters[dim][value] += 1
 
@@ -998,7 +1013,7 @@ def _candidate_second_anchor_variants(items):
     return variants, threshold
 
 
-def _cluster_specificity_profile(items):
+def _cluster_specificity_profile(items, policy=None):
     if not items:
         return {
             "generic_cluster_risk": "unknown",
@@ -1023,7 +1038,7 @@ def _cluster_specificity_profile(items):
     capability_slots = set()
 
     for item in items:
-        strength, reason, slots = _specific_anchor_strength(item)
+        strength, reason, slots = _specific_anchor_strength(item, policy=policy)
         strengths.append(strength)
         if reason:
             reasons.append(reason)
@@ -1042,8 +1057,10 @@ def _cluster_specificity_profile(items):
     avg_strength = sum(strengths) / max(len(strengths), 1)
     specific_process_count = len([value for value in process_slots if value])
     specific_carrier_count = len([value for value in carrier_slots if value])
-    specific_application_count = len([value for value in application_slots if value and value not in GENERIC_APPLICATION_SLOTS])
-    generic_object_only = all(value in GENERIC_TECH_OBJECT_SLOTS for value in object_slots) if object_slots else True
+    generic_tech_object_slots = _generic_tech_object_slots(policy)
+    generic_application_slots = generic_tech_object_slots if policy is not None else GENERIC_APPLICATION_SLOTS
+    specific_application_count = len([value for value in application_slots if value and value not in generic_application_slots])
+    generic_object_only = all(value in generic_tech_object_slots for value in object_slots) if object_slots else True
 
     if max_strength >= 4 or specific_process_count >= 2 or specific_carrier_count >= 2:
         specificity = "high"
@@ -1080,7 +1097,7 @@ def _cluster_specificity_profile(items):
     if reasons:
         reason_parts.append("slot_evidence=" + "；".join(_dedupe_preserve_order(reasons)[:4]))
 
-    second_anchor_variants, second_anchor_threshold = _candidate_second_anchor_variants(items)
+    second_anchor_variants, second_anchor_threshold = _candidate_second_anchor_variants(items, policy=policy)
     stable_second_anchor_entries = [entry for entry in second_anchor_variants if entry["stable"]]
     stable_entries_by_dim = {}
     for entry in stable_second_anchor_entries:
@@ -1189,10 +1206,10 @@ def _cluster_specificity_profile(items):
     }
 
 
-def _split_generic_cluster_groups(cluster_groups):
+def _split_generic_cluster_groups(cluster_groups, policy=None):
     refined = {}
     for signature, items in cluster_groups.items():
-        profile = _cluster_specificity_profile(items)
+        profile = _cluster_specificity_profile(items, policy=policy)
         split_dimension = ""
         if profile.get("can_refine_further") == "yes" and profile.get("refine_split_dimension"):
             split_dimension = profile["refine_split_dimension"]
@@ -1205,7 +1222,7 @@ def _split_generic_cluster_groups(cluster_groups):
 
         subgroup_map = {}
         for item in items:
-            slots = _build_technical_object_slots(item)
+            slots = _build_technical_object_slots(item, policy=policy)
             split_value = str(slots.get(split_dimension, "")).strip()
             if not split_value:
                 split_value = "generic_anchor"
@@ -1250,7 +1267,7 @@ def _tfidf_cluster_doc(item):
     return doc or "_"
 
 
-def _tfidf_split_heterogeneous_clusters(cluster_groups):
+def _tfidf_split_heterogeneous_clusters(cluster_groups, policy=None):
     """对 size ≥ _TFIDF_MIN_SIZE 且 pairwise median TF-IDF 低的桶应用拆分。
 
     只拆不合：任何 cluster 成员集合只会被拆成若干非空子集，不与其他 cluster 合并。
@@ -1280,7 +1297,7 @@ def _tfidf_split_heterogeneous_clusters(cluster_groups):
         # 结构/算法）会算出很低 median，这些是合法的同质主案例，绝不能拆。
         # generic_cluster_risk=high 的 cluster 才是 scope 空壳（感知机器人
         # 控制技术 / 机器人控制技术 等），拆它们不会伤害具体技术主案例。
-        cluster_profile = _cluster_specificity_profile(items)
+        cluster_profile = _cluster_specificity_profile(items, policy=policy)
         if cluster_profile.get("generic_cluster_risk") != "high":
             refined[signature] = items
             continue
@@ -1363,23 +1380,23 @@ def _normalize_process_anchor(process_slot, carrier_slot):
     return process_slot or carrier_slot
 
 
-def _technical_subject_anchor(unit):
-    slots = _build_technical_object_slots(unit)
+def _technical_subject_anchor(unit, policy=None):
+    slots = _build_technical_object_slots(unit, policy=policy)
     tech_object_slot = str(slots.get("tech_object_slot", "")).strip()
-    if not tech_object_slot or tech_object_slot in GENERIC_TECH_OBJECT_SLOTS:
+    if not tech_object_slot or tech_object_slot in _generic_tech_object_slots(policy):
         return ""
     return tech_object_slot
 
 
-def _technical_process_anchor(unit):
-    slots = _build_technical_object_slots(unit)
+def _technical_process_anchor(unit, policy=None):
+    slots = _build_technical_object_slots(unit, policy=policy)
     return _normalize_process_anchor(slots.get("process_slot", ""), slots.get("carrier_slot", ""))
 
 
-def _technical_item_profile(unit):
-    slots = _build_technical_object_slots(unit)
-    subject_anchor = _technical_subject_anchor(unit)
-    process_anchor = _technical_process_anchor(unit)
+def _technical_item_profile(unit, policy=None):
+    slots = _build_technical_object_slots(unit, policy=policy)
+    subject_anchor = _technical_subject_anchor(unit, policy=policy)
+    process_anchor = _technical_process_anchor(unit, policy=policy)
     capability_slot = str(slots.get("capability_slot", "")).strip()
     application_slot = str(slots.get("application_slot", "")).strip()
     generic_risk = str(unit.get("generic_cluster_risk", "")).strip()
@@ -1430,12 +1447,12 @@ def _technical_item_profile(unit):
     }
 
 
-def _technical_object_name_from_slots(unit, include_suffix=True):
+def _technical_object_name_from_slots(unit, include_suffix=True, policy=None):
     domain_lexicon = unit.get("domain_lexicon")
     if not domain_lexicon:
         domain_lexicon = build_domain_lexicon(unit.get("domain_pack") or unit.get("domain_context"))
 
-    slots = _build_technical_object_slots(unit)
+    slots = _build_technical_object_slots(unit, policy=policy)
     tech_object_slot = slots["tech_object_slot"]
     capability_slot = slots["capability_slot"]
     process_slot = slots["process_slot"]
@@ -1447,7 +1464,7 @@ def _technical_object_name_from_slots(unit, include_suffix=True):
     if non_empty_slots and all(domain_lexicon.is_generic_or_shell(s) for s in non_empty_slots):
         return ""
 
-    item_profile = _technical_item_profile({**unit, **slots})
+    item_profile = _technical_item_profile({**unit, **slots}, policy=policy)
 
     if not tech_object_slot and not capability_slot:
         return ""
@@ -1596,6 +1613,7 @@ def _technical_object_name_from_slots(unit, include_suffix=True):
             capability_slot=capability_phrase,
             process_slot=process_slot,
             application_slot=application_slot,
+            policy=policy,
         )
         subject_phrase = _dedupe_compound(subject_phrase)
         subject_process = _dedupe_compound(prefix_anchor)
@@ -1620,12 +1638,12 @@ def _technical_object_name_from_slots(unit, include_suffix=True):
     return _compact_display_candidate_label(name, {**unit, **slots})
 
 
-def _stable_object_key_basis(unit):
+def _stable_object_key_basis(unit, policy=None):
     signature = str(unit.get("cluster_signature_key", "")).strip() or str(unit.get("premerge_signature_key", "")).strip()
     if signature:
         return f"signature::{signature}"
 
-    slots = _build_technical_object_slots(unit)
+    slots = _build_technical_object_slots(unit, policy=policy)
     parts = []
     for key in ["primary_scope", "tech_object_slot", "process_slot", "capability_slot", "carrier_slot", "application_slot", "mechanism_core"]:
         value = str(slots.get(key, "") if key in slots else unit.get(key, "")).strip()
@@ -1692,27 +1710,38 @@ def _compact_display_candidate_label(text, unit=None, max_chars=32):
     return _strip_narrative_display_tail(value, max_chars=max_chars)
 
 
-def _is_generic_method_only_display_name(name, unit, domain_lexicon=None):
+def _is_generic_method_only_display_name(name, unit, domain_lexicon=None, policy=None):
     text = str(name or "").strip()
     if not text:
         return False
     normalized = normalize_signal_phrase(text)
-    generic_names = {normalize_signal_phrase(item) for item in GENERIC_METHOD_ONLY_DISPLAY_NAMES}
+    generic_names = _generic_method_display_names(policy)
     mechanism = str((unit or {}).get("mechanism_core", "")).strip()
     mechanism_label = MECHANISM_LABELS.get(mechanism, _label_for_token(mechanism, prefer_zh=True))
-    mechanism_only = mechanism_label and text in {mechanism_label, f"{mechanism_label}技术", f"{mechanism_label}方法"}
+    legacy_mechanism_only = mechanism_label and text in {mechanism_label, f"{mechanism_label}技术", f"{mechanism_label}方法"}
+    if policy is not None and not _policy_uses_legacy_robot_rules(policy):
+        mechanism_only = bool(legacy_mechanism_only and _policy_generic_or_shell(policy, mechanism_label))
+    else:
+        mechanism_only = legacy_mechanism_only
     if normalized not in generic_names and not mechanism_only:
         return False
     if domain_lexicon is None:
         domain_lexicon = build_domain_lexicon((unit or {}).get("domain_pack") or (unit or {}).get("domain_context"))
     if domain_lexicon is None or domain_lexicon.use_legacy_robot_rules:
         return False
+    if (
+        policy is not None
+        and not _policy_uses_legacy_robot_rules(policy)
+        and normalized not in generic_names
+        and _has_policy_technical_anchor(unit or {}, policy=policy, extra_text=text)
+    ):
+        return False
     context = _surface_hint_context(unit or {}, extra_text=text)
     return not domain_lexicon.has_domain_anchor(context)
 
 
-def _stable_object_label(unit):
-    slots = _build_technical_object_slots(unit)
+def _stable_object_label(unit, policy=None):
+    slots = _build_technical_object_slots(unit, policy=policy)
     subject = str(slots.get("tech_object_slot", "")).strip() or str(slots.get("application_slot", "")).strip()
     process = str(slots.get("process_slot", "")).strip()
     capability = str(slots.get("capability_slot", "")).strip()
@@ -1744,7 +1773,7 @@ def _stable_object_label(unit):
     )
 
 
-def _sanitize_display_candidate_name(name, unit):
+def _sanitize_display_candidate_name(name, unit, policy=None):
     text = str(name or "").strip()
     if not text:
         return ""
@@ -1759,7 +1788,7 @@ def _sanitize_display_candidate_name(name, unit):
         return text
     mechanism = str(unit.get("mechanism_core", "")).strip()
     mechanism_label = MECHANISM_LABELS.get(mechanism, _label_for_token(mechanism, prefer_zh=True))
-    selected = _ordered_display_constraints(unit)
+    selected = _ordered_display_constraints(unit, policy=policy)
     labels = []
     for value, _ in selected:
         label = _label_for_token(value, prefer_zh=True)
@@ -1770,7 +1799,7 @@ def _sanitize_display_candidate_name(name, unit):
     return "".join(_dedupe_preserve_order(labels)) if labels else text
 
 
-def _display_candidate_name_issue(name, unit):
+def _display_candidate_name_issue(name, unit, policy=None):
     text = str(name or "").strip()
     if not text:
         return "missing_name"
@@ -1781,7 +1810,7 @@ def _display_candidate_name_issue(name, unit):
         issues.append("bare_mechanism")
     if any(word in text for word in DISPLAY_SHELL_WORDS):
         issues.append("upper_shell_word")
-    profile = _scope_shell_profile(unit)
+    profile = _scope_shell_profile(unit, policy=policy)
     if bool(profile.get("scope_shell_heavy", False)):
         issues.append("scope_shell_heavy")
     if not bool(profile.get("survives_without_scope", False)):
@@ -2337,19 +2366,19 @@ def _is_scope_shell_constraint(value, key):
     )
 
 
-def _scope_shell_profile(unit):
+def _scope_shell_profile(unit, policy=None):
     selected_constraints = _ordered_constraints(unit)
     non_scope_constraints = [
         (value, key)
         for value, key in selected_constraints
-        if not _is_generic_constraint(value, key)
+        if not _is_generic_constraint_value(value, key, policy=policy)
     ]
     non_scope_constraint_count = len({value for value, _ in non_scope_constraints})
     specific_anchor_constraints = [
         (value, key)
         for value, key in non_scope_constraints
         if key in {"task_constraint_tokens", "object_modifier_tokens", "data_modifier_tokens"}
-        and not _is_scope_shell_constraint(value, key)
+        and not _is_scope_shell_constraint_value(value, key, policy=policy)
     ]
     task_object_anchor_constraints = [
         (value, key)
@@ -2554,7 +2583,7 @@ def _source_premerge_signature(unit):
     return " || ".join(part for part in parts if part)
 
 
-def _refresh_unit_row_fields(row):
+def _refresh_unit_row_fields(row, policy=None):
     refreshed = dict(row)
     refreshed["canonical_candidate_name_en"] = _canonical_candidate_name_en(refreshed)
     refreshed["normalized_candidate_text"] = refreshed["canonical_candidate_name_en"]
@@ -2566,12 +2595,12 @@ def _refresh_unit_row_fields(row):
         refreshed["canonical_candidate_name_en"],
         refreshed["constraint_signature"],
     )
-    slot_fields = _build_technical_object_slots(refreshed)
+    slot_fields = _build_technical_object_slots(refreshed, policy=policy)
     refreshed.update(slot_fields)
     return refreshed
 
 
-def _premerge_source_units(rows):
+def _premerge_source_units(rows, policy=None):
     if not rows:
         return rows
 
@@ -2646,7 +2675,7 @@ def _premerge_source_units(rows):
         merged["source_premerge_block_reason"] = ""
         merged["source_premerge_before_signatures"] = " ||| ".join(distinct_source_signatures)
         merged["source_premerge_before_unit_count"] = len(source_items)
-        merged = _refresh_unit_row_fields(merged)
+        merged = _refresh_unit_row_fields(merged, policy=policy)
         merged_rows.append(merged)
 
     return merged_rows
@@ -2741,6 +2770,65 @@ def _candidate_policy(domain_lexicon):
     )
 
 
+def _policy_uses_legacy_robot_rules(policy=None):
+    return bool(policy is not None and getattr(policy, "is_legacy_humanoid", False))
+
+
+def _generic_object_labels(policy=None):
+    return set(policy.generic_object_labels()) if policy is not None else TECH_OBJECT_GENERIC_LABELS
+
+
+def _generic_tech_object_slots(policy=None):
+    return set(policy.generic_tech_object_slots()) if policy is not None else GENERIC_TECH_OBJECT_SLOTS
+
+
+def _generic_method_display_names(policy=None):
+    if policy is not None:
+        return set(policy.generic_method_display_names())
+    return {normalize_signal_phrase(item) for item in GENERIC_METHOD_ONLY_DISPLAY_NAMES}
+
+
+def _policy_generic_or_shell(policy, value):
+    checker = getattr(policy, "is_generic_or_shell", None) if policy is not None else None
+    return bool(checker(value)) if callable(checker) else False
+
+
+def _is_generic_constraint_value(value, key, policy=None):
+    if policy is None or _policy_uses_legacy_robot_rules(policy):
+        return _is_generic_constraint(value, key)
+    return _policy_generic_or_shell(policy, value)
+
+
+def _is_scope_shell_constraint_value(value, key, policy=None):
+    if policy is None or _policy_uses_legacy_robot_rules(policy):
+        return _is_scope_shell_constraint(value, key)
+    return _policy_generic_or_shell(policy, value)
+
+
+def _has_policy_technical_anchor(unit, policy=None, extra_text=""):
+    if policy is None:
+        return False
+    terms = getattr(policy, "technical_anchor_terms", None)
+    anchor_terms = terms() if callable(terms) else ()
+    if not anchor_terms:
+        return False
+    parts = [_surface_hint_context(unit or {}, extra_text=extra_text)]
+    for key in (
+        "object_modifier_tokens",
+        "task_constraint_tokens",
+        "data_modifier_tokens",
+        "method_modifier_tokens",
+        "mechanism_core_tokens",
+        "scene_tokens",
+    ):
+        parts.extend(str(value or "").strip() for value in _dedupe_preserve_order((unit or {}).get(key, [])))
+    haystack = normalize_signal_phrase(" ".join(part for part in parts if part))
+    return any(
+        (term_norm := normalize_signal_phrase(term)) and term_norm in haystack
+        for term in anchor_terms
+    )
+
+
 def _scope_label(scope, policy=None):
     if policy is not None:
         return policy.scope_label(scope)
@@ -2793,9 +2881,9 @@ def _theme_group_signature(unit, policy=None):
     normalized_unit = _normalized_grouping_view(unit)
     primary_scope = str(normalized_unit.get("primary_scope", "")).strip()
     mechanism = str(normalized_unit.get("mechanism_core", "")).strip()
-    slots = _build_technical_object_slots(normalized_unit)
+    slots = _build_technical_object_slots(normalized_unit, policy=policy)
     anchors = _anchor_bundle(normalized_unit)
-    profile = _scope_shell_profile(normalized_unit)
+    profile = _scope_shell_profile(normalized_unit, policy=policy)
 
     signature_parts = []
     if slots.get("tech_object_slot"):
@@ -2858,9 +2946,9 @@ def _theme_group_signature(unit, policy=None):
     return " || ".join(part for part in signature_parts if part)
 
 
-def _representative_candidate_score(unit):
-    slots = _build_technical_object_slots(unit)
-    profile = _scope_shell_profile(unit)
+def _representative_candidate_score(unit, policy=None):
+    slots = _build_technical_object_slots(unit, policy=policy)
+    profile = _scope_shell_profile(unit, policy=policy)
     score = 0
     reasons = []
 
@@ -2882,7 +2970,8 @@ def _representative_candidate_score(unit):
     if slots.get("carrier_slot"):
         score += 4
         reasons.append("has_carrier_slot")
-    if slots.get("application_slot") and slots.get("application_slot") not in {"世界模型", "具身智能"}:
+    generic_application_slots = _generic_tech_object_slots(policy) if policy is not None else GENERIC_APPLICATION_SLOTS
+    if slots.get("application_slot") and slots.get("application_slot") not in generic_application_slots:
         score += 3
         reasons.append("has_specific_application_slot")
     if "-" in str(slots.get("process_slot", "")):
@@ -2924,9 +3013,10 @@ def _representative_candidate_score(unit):
         reasons.append("scope_shell_heavy")
 
     display_issue = _display_candidate_name_issue(
-        _technical_object_name_from_slots({**unit, **slots}, include_suffix=True)
+        _technical_object_name_from_slots({**unit, **slots}, include_suffix=True, policy=policy)
         or str(unit.get("display_candidate_name", "")).strip(),
         {**unit, **profile},
+        policy=policy,
     )
     if "bare_mechanism" in display_issue:
         score -= 8
@@ -2943,10 +3033,10 @@ def _representative_candidate_score(unit):
     return score, "；".join(reasons), slots
 
 
-def _select_cluster_representative(items):
+def _select_cluster_representative(items, policy=None):
     scored_items = []
     for idx, item in enumerate(items):
-        score, reason, slots = _representative_candidate_score(item)
+        score, reason, slots = _representative_candidate_score(item, policy=policy)
         scored_items.append(
             {
                 "index": idx,
@@ -2972,7 +3062,7 @@ def _select_cluster_representative(items):
     alternatives = []
     for candidate in scored_items[1:4]:
         alt = candidate["item"]
-        alt_name = _technical_object_name_from_slots(alt, include_suffix=True) or str(alt.get("canonical_candidate_name_en", "")).strip()
+        alt_name = _technical_object_name_from_slots(alt, include_suffix=True, policy=policy) or str(alt.get("canonical_candidate_name_en", "")).strip()
         alternatives.append(f"{alt_name or '未成形'}[{candidate['score']}]")
     selection_summary = "；".join(alternatives)
     return {
@@ -2982,14 +3072,14 @@ def _select_cluster_representative(items):
         "selected_reason": selected["reason"],
         "legacy_item": legacy_item,
         "legacy_index": 0,
-        "legacy_name": _technical_object_name_from_slots(legacy_item, include_suffix=True) or str(legacy_item.get("canonical_candidate_name_en", "")).strip(),
-        "selected_name": _technical_object_name_from_slots(selected["item"], include_suffix=True) or str(selected["item"].get("canonical_candidate_name_en", "")).strip(),
+        "legacy_name": _technical_object_name_from_slots(legacy_item, include_suffix=True, policy=policy) or str(legacy_item.get("canonical_candidate_name_en", "")).strip(),
+        "selected_name": _technical_object_name_from_slots(selected["item"], include_suffix=True, policy=policy) or str(selected["item"].get("canonical_candidate_name_en", "")).strip(),
         "switched_from_legacy": bool(selected["index"] != 0),
         "selection_competitors_summary": selection_summary,
     }
 
 
-def _ordered_display_constraints(unit):
+def _ordered_display_constraints(unit, policy=None):
     selected = _preferred_display_constraints(unit, max_items=2)
     if len(selected) >= 2:
         has_data = any(key == "data_modifier_tokens" for _, key in selected)
@@ -2998,7 +3088,7 @@ def _ordered_display_constraints(unit):
             data_part = [item for item in selected if item[1] == "data_modifier_tokens"]
             other_part = [item for item in selected if item[1] != "data_modifier_tokens"]
             selected = data_part + other_part
-    strong_items = [item for item in selected if not _is_generic_constraint(*item)]
+    strong_items = [item for item in selected if not _is_generic_constraint_value(item[0], item[1], policy=policy)]
     cleaned = []
     for value, key in selected:
         if value in DISPLAY_SUPPRESS_TOKENS and strong_items:
@@ -3009,13 +3099,15 @@ def _ordered_display_constraints(unit):
     return cleaned or selected
 
 
-def _should_insert_scope_label(primary_scope, selected_constraints):
+def _should_insert_scope_label(primary_scope, selected_constraints, policy=None):
     if not primary_scope or not selected_constraints:
         return False
     if primary_scope == "embodied intelligence" and any(value in {"embodied", "interactive"} for value, _ in selected_constraints):
         return False
     non_method_constraints = [item for item in selected_constraints if item[1] != "method_modifier_tokens"]
-    strong_non_method_constraints = [item for item in non_method_constraints if not _is_generic_constraint(*item)]
+    strong_non_method_constraints = [
+        item for item in non_method_constraints if not _is_generic_constraint_value(item[0], item[1], policy=policy)
+    ]
     if len(strong_non_method_constraints) >= 2:
         return False
     if any(value in SCOPE_DISAMBIGUATION_TOKENS for value, _ in non_method_constraints):
@@ -3029,7 +3121,7 @@ def _should_insert_scope_label(primary_scope, selected_constraints):
     return False
 
 
-def _infer_topic_granularity(unit, display_name):
+def _infer_topic_granularity(unit, display_name, policy=None):
     if bool(unit.get("is_observation_scope", False)):
         return "generic_or_failed"
     if bool(unit.get("is_scope_echo", False)) or bool(unit.get("generic_core_only", False)):
@@ -3040,7 +3132,7 @@ def _infer_topic_granularity(unit, display_name):
     if candidate_stage not in {"formed_candidate", "formed_candidate_strong"}:
         return "generic_or_failed"
 
-    profile = _scope_shell_profile(unit)
+    profile = _scope_shell_profile(unit, policy=policy)
     non_scope_constraint_count = int(profile["non_scope_constraint_count"])
     if bool(profile["survives_without_scope"]) or non_scope_constraint_count >= 3:
         return "fine_grained_topic"
@@ -3053,7 +3145,7 @@ def _infer_topic_granularity(unit, display_name):
     return "scope_internal_candidate"
 
 
-def _infer_topic_granularity_reason(unit, display_name):
+def _infer_topic_granularity_reason(unit, display_name, policy=None):
     if bool(unit.get("is_observation_scope", False)):
         return "observation_scope"
     if bool(unit.get("is_scope_echo", False)):
@@ -3068,7 +3160,7 @@ def _infer_topic_granularity_reason(unit, display_name):
     if candidate_stage not in {"formed_candidate", "formed_candidate_strong"}:
         return "not_formed_candidate"
 
-    profile = _scope_shell_profile({**unit, "display_candidate_name": display_name})
+    profile = _scope_shell_profile({**unit, "display_candidate_name": display_name}, policy=policy)
     if bool(profile["survives_without_scope"]):
         return "survives_without_scope"
 
@@ -3077,15 +3169,15 @@ def _infer_topic_granularity_reason(unit, display_name):
         (value, key)
         for value, key in selected_constraints
         if key in {"task_constraint_tokens", "object_modifier_tokens"}
-        and not _is_generic_constraint(value, key)
-        and not _is_scope_shell_constraint(value, key)
+        and not _is_generic_constraint_value(value, key, policy=policy)
+        and not _is_scope_shell_constraint_value(value, key, policy=policy)
     ]
     data_anchor = [
         (value, key)
         for value, key in selected_constraints
         if key == "data_modifier_tokens"
-        and not _is_generic_constraint(value, key)
-        and not _is_scope_shell_constraint(value, key)
+        and not _is_generic_constraint_value(value, key, policy=policy)
+        and not _is_scope_shell_constraint_value(value, key, policy=policy)
     ]
     mechanism = str(unit.get("mechanism_core", "")).strip()
     repeated = [
@@ -3124,9 +3216,9 @@ def _internal_candidate_label(unit, canonical_name_en, constraint_signature):
     return " || ".join([part for part in pieces if part])
 
 
-def _naturalized_topic_name(unit, fallback_name):
-    profile = _scope_shell_profile(unit)
-    slot_name = _technical_object_name_from_slots(unit, include_suffix=True)
+def _naturalized_topic_name(unit, fallback_name, policy=None):
+    profile = _scope_shell_profile(unit, policy=policy)
+    slot_name = _technical_object_name_from_slots(unit, include_suffix=True, policy=policy)
     if slot_name:
         return slot_name
     relation_summary = str(unit.get("relation_summary", "")).strip()
@@ -3147,20 +3239,20 @@ def _naturalized_topic_name(unit, fallback_name):
         if relation_target and mechanism_label and bool(profile.get("survives_without_scope", False)):
             return f"{relation_target}{mechanism_label}"
     if bool(profile.get("scope_shell_heavy", False)) and not bool(profile.get("survives_without_scope", False)):
-        selected_constraints = _ordered_display_constraints(unit)
+        selected_constraints = _ordered_display_constraints(unit, policy=policy)
         task_object_labels = [
             _label_for_token(value, prefer_zh=True)
             for value, key in selected_constraints
             if key in {"task_constraint_tokens", "object_modifier_tokens"}
-            and not _is_generic_constraint(value, key)
-            and not _is_scope_shell_constraint(value, key)
+            and not _is_generic_constraint_value(value, key, policy=policy)
+            and not _is_scope_shell_constraint_value(value, key, policy=policy)
         ]
         data_labels = [
             _label_for_token(value, prefer_zh=True)
             for value, key in selected_constraints
             if key == "data_modifier_tokens"
-            and not _is_generic_constraint(value, key)
-            and not _is_scope_shell_constraint(value, key)
+            and not _is_generic_constraint_value(value, key, policy=policy)
+            and not _is_scope_shell_constraint_value(value, key, policy=policy)
         ]
         mechanism_label = _label_for_token(unit.get("mechanism_core", ""), prefer_zh=True)
         labels = _dedupe_preserve_order([label for label in task_object_labels + data_labels if label])
@@ -3171,8 +3263,8 @@ def _naturalized_topic_name(unit, fallback_name):
     return str(fallback_name or "").strip()
 
 
-def _topic_naturalness_reason(unit, topic_name):
-    profile = _scope_shell_profile(unit)
+def _topic_naturalness_reason(unit, topic_name, policy=None):
+    profile = _scope_shell_profile(unit, policy=policy)
     if bool(profile.get("scope_shell_heavy", False)):
         reason = str(profile.get("scope_shell_reason", "")).strip()
         if reason == "only_data_method_anchor":
@@ -3189,16 +3281,18 @@ def _topic_naturalness_reason(unit, topic_name):
     return "主题约束较弱，建议人工复核"
 
 
-def _display_candidate_name(canonical_name_en, unit):
+def _display_candidate_name(canonical_name_en, unit, policy=None):
     mechanism = str(unit.get("mechanism_core", "")).strip()
     if not mechanism or canonical_name_en == mechanism:
         return ""
-    slot_name = _technical_object_name_from_slots(unit, include_suffix=True)
+    slot_name = _technical_object_name_from_slots(unit, include_suffix=True, policy=policy)
     if slot_name:
-        return _sanitize_display_candidate_name(slot_name, unit)
-    selected_constraints = _ordered_display_constraints(unit)
+        return _sanitize_display_candidate_name(slot_name, unit, policy=policy)
+    selected_constraints = _ordered_display_constraints(unit, policy=policy)
     non_method_constraints = [item for item in selected_constraints if item[1] != "method_modifier_tokens"]
-    strong_non_method_constraints = [item for item in non_method_constraints if not _is_generic_constraint(*item)]
+    strong_non_method_constraints = [
+        item for item in non_method_constraints if not _is_generic_constraint_value(item[0], item[1], policy=policy)
+    ]
     labels = []
     primary_scope = str(unit.get("primary_scope", "")).strip()
     mechanism_label = MECHANISM_LABELS.get(mechanism, _label_for_token(mechanism))
@@ -3212,8 +3306,10 @@ def _display_candidate_name(canonical_name_en, unit):
         filtered_constraints.append((value, key))
     selected_constraints = filtered_constraints or selected_constraints
     non_method_constraints = [item for item in selected_constraints if item[1] != "method_modifier_tokens"]
-    strong_non_method_constraints = [item for item in non_method_constraints if not _is_generic_constraint(*item)]
-    profile = _scope_shell_profile(unit)
+    strong_non_method_constraints = [
+        item for item in non_method_constraints if not _is_generic_constraint_value(item[0], item[1], policy=policy)
+    ]
+    profile = _scope_shell_profile(unit, policy=policy)
 
     if strong_non_method_constraints:
         for value, _ in selected_constraints:
@@ -3226,7 +3322,7 @@ def _display_candidate_name(canonical_name_en, unit):
         labels.extend(_dedupe_preserve_order(weak_labels[:2]))
     if bool(profile.get("scope_shell_heavy", False)) and not bool(profile.get("survives_without_scope", False)):
         pass
-    elif _should_insert_scope_label(primary_scope, selected_constraints):
+    elif _should_insert_scope_label(primary_scope, selected_constraints, policy=policy):
         if primary_scope == "embodied intelligence" and mechanism == "grounding":
             labels = [label for label in labels if label != SCOPE_LABELS.get(primary_scope, "")]
             return "".join(_dedupe_preserve_order(labels + [mechanism_label]))
@@ -3244,7 +3340,7 @@ def _display_candidate_name(canonical_name_en, unit):
         if scope_label:
             labels.append(scope_label)
     labels.append(mechanism_label)
-    resolved = _sanitize_display_candidate_name("".join(_dedupe_preserve_order(labels)), unit)
+    resolved = _sanitize_display_candidate_name("".join(_dedupe_preserve_order(labels)), unit, policy=policy)
     if primary_scope == "world model" and resolved == f"{SCOPE_LABELS.get(primary_scope, '')}{mechanism_label}":
         override_label = METHOD_ONLY_SCOPE_MECHANISM_LABELS.get((primary_scope, mechanism))
         if override_label:
@@ -3252,17 +3348,17 @@ def _display_candidate_name(canonical_name_en, unit):
     return resolved
 
 
-def _patent_friendly_display_name(canonical_name_en, unit):
+def _patent_friendly_display_name(canonical_name_en, unit, policy=None):
     primary_scope = str(unit.get("primary_scope", "")).strip()
     mechanism = str(unit.get("mechanism_core", "")).strip()
     mechanism_label = MECHANISM_LABELS.get(mechanism, _label_for_token(mechanism, prefer_zh=True))
     if not mechanism:
         return ""
-    slot_name = _technical_object_name_from_slots(unit, include_suffix=True)
+    slot_name = _technical_object_name_from_slots(unit, include_suffix=True, policy=policy)
     if slot_name:
-        return _sanitize_display_candidate_name(slot_name, unit)
+        return _sanitize_display_candidate_name(slot_name, unit, policy=policy)
 
-    selected_constraints = _ordered_display_constraints(unit)
+    selected_constraints = _ordered_display_constraints(unit, policy=policy)
     strong_constraints = [
         (value, key)
         for value, key in selected_constraints
@@ -3275,7 +3371,7 @@ def _patent_friendly_display_name(canonical_name_en, unit):
             labels.append(label)
 
     if not labels:
-        return _display_candidate_name(canonical_name_en, unit)
+        return _display_candidate_name(canonical_name_en, unit, policy=policy)
 
     scope_label = SCOPE_LABELS.get(primary_scope, "")
     if primary_scope == "world model" and scope_label and scope_label not in labels:
@@ -3285,7 +3381,7 @@ def _patent_friendly_display_name(canonical_name_en, unit):
             labels.append(scope_label)
 
     labels.append(mechanism_label)
-    return _sanitize_display_candidate_name("".join(_dedupe_preserve_order(labels)), unit)
+    return _sanitize_display_candidate_name("".join(_dedupe_preserve_order(labels)), unit, policy=policy)
 
 
 def _term_in_text(term, text):
@@ -3629,9 +3725,9 @@ def _unit_row(event_id, scope_names, unit, source_type="", domain_lexicon=None, 
     granularity_input["display_preferred_task_surface"] = _display_task_hint_from_title(granularity_input, policy=policy)
     if granularity_input["display_preferred_task_surface"]:
         granularity_input["preferred_task_surface"] = granularity_input["display_preferred_task_surface"]
-    scope_shell_profile = _scope_shell_profile(granularity_input)
-    topic_granularity = _infer_topic_granularity(granularity_input, "")
-    topic_granularity_reason = _infer_topic_granularity_reason(granularity_input, "")
+    scope_shell_profile = _scope_shell_profile(granularity_input, policy=policy)
+    topic_granularity = _infer_topic_granularity(granularity_input, "", policy=policy)
+    topic_granularity_reason = _infer_topic_granularity_reason(granularity_input, "", policy=policy)
     display_tier = _infer_display_tier(topic_granularity)
     internal_label = _internal_candidate_label(granularity_input, canonical_name_en, constraint_signature)
     relation_summary = str(unit.get("relation_summary", "")).strip()
@@ -3644,7 +3740,8 @@ def _unit_row(event_id, scope_names, unit, source_type="", domain_lexicon=None, 
             "relation_task": str(unit.get("relation_task", "")).strip(),
             "relation_data_modality": str(unit.get("relation_data_modality", "")).strip(),
             "relation_method": str(unit.get("relation_method", "")).strip(),
-        }
+        },
+        policy=policy,
     )
     domain_pack_trace = _domain_pack_candidate_trace(
         {
@@ -4222,38 +4319,38 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
                 rows.append(row)
 
     cluster_groups = {}
-    premerged_formed_rows = _premerge_source_units(formed_rows)
+    premerged_formed_rows = _premerge_source_units(formed_rows, policy=policy)
     for row in premerged_formed_rows:
         signature = _theme_group_signature(row, policy=policy)
         cluster_groups.setdefault(signature, []).append(row)
-    cluster_groups = _split_generic_cluster_groups(cluster_groups)
+    cluster_groups = _split_generic_cluster_groups(cluster_groups, policy=policy)
     # M2/A4: post-hoc TF-IDF-based heterogeneity split (only-split, never-merge)
-    cluster_groups = _tfidf_split_heterogeneous_clusters(cluster_groups)
+    cluster_groups = _tfidf_split_heterogeneous_clusters(cluster_groups, policy=policy)
 
     for signature, items in cluster_groups.items():
-        cluster_profile = _cluster_specificity_profile(items)
+        cluster_profile = _cluster_specificity_profile(items, policy=policy)
         cluster_id = f"cand::{hashlib.md5(signature.encode('utf-8')).hexdigest()[:10]}"
         cluster_evidence_count = len({item["id"] for item in items})
         alias_values = _dedupe_preserve_order(item["canonical_candidate_name_en"] for item in items if item["canonical_candidate_name_en"])
         raw_variants = _dedupe_preserve_order(item["raw_phrase"] for item in items if item["raw_phrase"])
         patent_in_cluster = any(str(item.get("source_type", "")).strip().lower() == "patent" for item in items)
-        selection_bundle = _select_cluster_representative(items)
+        selection_bundle = _select_cluster_representative(items, policy=policy)
         cluster_surface_hints = _merge_cluster_surface_hints(items)
         representative = {
             **selection_bundle["selected_item"],
             **cluster_surface_hints,
             "source_type": "patent" if patent_in_cluster else str(selection_bundle["selected_item"].get("source_type", "")).strip().lower(),
         }
-        stable_object_key_basis = _stable_object_key_basis({**representative, "cluster_signature_key": signature})
+        stable_object_key_basis = _stable_object_key_basis({**representative, "cluster_signature_key": signature}, policy=policy)
         stable_object_id = _stable_object_id_from_basis(stable_object_key_basis)
         canonical_name_en = representative.get("canonical_candidate_name_en", "")
         if patent_in_cluster:
-            display_candidate_name = _patent_friendly_display_name(canonical_name_en, representative)
+            display_candidate_name = _patent_friendly_display_name(canonical_name_en, representative, policy=policy)
         else:
-            display_candidate_name = _display_candidate_name(canonical_name_en, representative)
-        topic_summary_name = _naturalized_topic_name(representative, display_candidate_name)
-        topic_naturalness_reason = _topic_naturalness_reason(representative, topic_summary_name)
-        stable_object_label = _stable_object_label({**representative, "display_candidate_name": topic_summary_name or display_candidate_name})
+            display_candidate_name = _display_candidate_name(canonical_name_en, representative, policy=policy)
+        topic_summary_name = _naturalized_topic_name(representative, display_candidate_name, policy=policy)
+        topic_naturalness_reason = _topic_naturalness_reason(representative, topic_summary_name, policy=policy)
+        stable_object_label = _stable_object_label({**representative, "display_candidate_name": topic_summary_name or display_candidate_name}, policy=policy)
         topic_granularity = _infer_topic_granularity(
             {
                 **representative,
@@ -4264,6 +4361,7 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
                 "generic_core_only": bool(representative.get("generic_core_only", False)),
             },
             display_candidate_name,
+            policy=policy,
         )
         topic_granularity_reason = _infer_topic_granularity_reason(
             {
@@ -4275,17 +4373,19 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
                 "generic_core_only": bool(representative.get("generic_core_only", False)),
             },
             display_candidate_name,
+            policy=policy,
         )
         if cluster_profile["generic_cluster_risk"] == "high":
             topic_granularity = "scope_internal_candidate"
             topic_granularity_reason = "generic_cluster_high_risk"
         display_tier = "manual_review" if cluster_profile["generic_cluster_risk"] == "high" else _infer_display_tier(topic_granularity)
-        cluster_scope_shell_profile = _scope_shell_profile(representative)
+        cluster_scope_shell_profile = _scope_shell_profile(representative, policy=policy)
         item_profile = _technical_item_profile(
             {
                 **representative,
                 **cluster_profile,
-            }
+            },
+            policy=policy,
         )
         is_shell_heavy = bool(cluster_scope_shell_profile.get("scope_shell_heavy") or not cluster_scope_shell_profile.get("survives_without_scope"))
         is_strong = bool(
@@ -4312,8 +4412,13 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
                 resolved_display_name,
                 {**representative, **item},
                 domain_lexicon=domain_lexicon,
+                policy=policy,
             )
-            display_candidate_name_issue = _display_candidate_name_issue(resolved_display_name, {**item, **cluster_scope_shell_profile})
+            display_candidate_name_issue = _display_candidate_name_issue(
+                resolved_display_name,
+                {**item, **cluster_scope_shell_profile},
+                policy=policy,
+            )
             if generic_method_only_name:
                 display_candidate_name_issue = "；".join(
                     _dedupe_preserve_order(
