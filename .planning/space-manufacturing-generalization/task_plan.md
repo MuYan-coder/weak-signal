@@ -6,7 +6,7 @@
 
 ## 当前阶段
 
-阶段 8：运行聚焦测试、Domain Pack 回归和 diff 检查。
+全部阶段已完成，等待最终合并/收尾。
 
 ## 阶段清单
 
@@ -17,7 +17,7 @@
 - [x] 阶段 5：将 `candidate_eligibility.py` 改为 Domain Pack 技术锚点驱动
 - [x] 阶段 6：将 `scorer.py` 的 scope-shell 复判改为领域感知
 - [x] 阶段 7：补充太空制造 Domain Pack 质量契约
-- [ ] 阶段 8：运行聚焦测试、Domain Pack 回归和 diff 检查
+- [x] 阶段 8：运行聚焦测试、Domain Pack 回归和 diff 检查
 
 ## 关键文件
 
