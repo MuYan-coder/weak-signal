@@ -6,6 +6,7 @@ from src.domain import DomainContext, DomainPack, load_domain_context
 from src.extraction.candidate_former import (
     _cluster_specificity_profile,
     _is_generic_method_only_display_name,
+    _representative_candidate_score,
     _technical_object_name_from_slots,
     build_candidate_forms,
 )
@@ -1127,6 +1128,26 @@ class NoDefaultRobotLeakageTest(unittest.TestCase):
                 policy=policy,
             )
         )
+
+    def test_space_representative_scoring_uses_policy_for_strong_anchor_counts(self):
+        policy = _space_manufacturing_policy()
+        unit = {
+            "raw_phrase": "control agent simulation video",
+            "raw_candidate_text": "control agent simulation video",
+            "canonical_candidate_name_en": "control agent simulation video",
+            "mechanism_core": "control",
+            "object_modifier_tokens": ["control", "agent"],
+            "data_modifier_tokens": ["simulation", "video"],
+            "task_constraint_tokens": [],
+            "method_modifier_tokens": [],
+            "domain_context": _space_manufacturing_context(),
+        }
+
+        score, reason, _slots = _representative_candidate_score(unit, policy=policy)
+
+        self.assertGreaterEqual(score, 8)
+        self.assertIn("multi_specific_object_tokens", reason)
+        self.assertIn("multi_specific_data_tokens", reason)
 
     def test_signal_generation_preserves_formed_candidate_aggregate_counts_for_weak_signals(self):
         forms = pd.DataFrame(

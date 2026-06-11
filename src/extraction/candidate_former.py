@@ -2992,8 +2992,8 @@ def _representative_candidate_score(unit, policy=None):
     non_scope_constraint_count = int(unit.get("non_scope_constraint_count", 0) or 0)
     score += min(non_scope_constraint_count, 4) * 3
     reasons.append(f"non_scope_constraints={non_scope_constraint_count}")
-    strong_object_count = len(_strong_slot_labels(unit.get("object_modifier_tokens", []), "object_modifier_tokens"))
-    strong_data_count = len(_strong_slot_labels(unit.get("data_modifier_tokens", []), "data_modifier_tokens"))
+    strong_object_count = len(_strong_slot_labels(unit.get("object_modifier_tokens", []), "object_modifier_tokens", policy=policy))
+    strong_data_count = len(_strong_slot_labels(unit.get("data_modifier_tokens", []), "data_modifier_tokens", policy=policy))
     if strong_object_count >= 2:
         score += 4
         reasons.append("multi_specific_object_tokens")
