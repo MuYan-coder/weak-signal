@@ -9,6 +9,7 @@ import re
 import pandas as pd
 
 from .event_schema import clean_event_list, clean_event_text
+from .domain_candidate_policy import build_domain_candidate_policy
 from .tech_lexicon import (
     BARE_MECHANISM_CORES,
     build_domain_lexicon,
@@ -218,18 +219,20 @@ def _detect_surface_candidates(text, patterns):
     return matched
 
 
-def _source_surface_hints(title="", text="", source_type=""):
+def _source_surface_hints(title="", text="", source_type="", policy=None):
     title_s = str(title or "").strip()
     text_s = str(text or "").strip()
     combined = " ".join(part for part in [title_s, text_s] if part)
-    object_candidates = _detect_surface_candidates(combined, DISPLAY_OBJECT_SURFACE_PATTERNS)
-    task_candidates = _detect_surface_candidates(combined, DISPLAY_TASK_SURFACE_PATTERNS)
+    object_patterns = policy.surface_object_patterns() if policy is not None else DISPLAY_OBJECT_SURFACE_PATTERNS
+    task_patterns = policy.surface_task_patterns() if policy is not None else DISPLAY_TASK_SURFACE_PATTERNS
+    object_candidates = _detect_surface_candidates(combined, object_patterns)
+    task_candidates = _detect_surface_candidates(combined, task_patterns)
     # Round 39 P1 修复：news 正文长（2-3k 字），常包含"装配/抓取"这类
     # 无关的 side-mention（例如工博会综述里一句"智能装配检测机器人"）。
     # 这类 substring 命中会被 cluster 代表传播到整簇，污染 patent 成员的
     # preferred_task_surface。对 news 源只信任 title 里的任务面命中。
     if str(source_type or "").strip().lower() == "news":
-        title_task_candidates = _detect_surface_candidates(title_s, DISPLAY_TASK_SURFACE_PATTERNS) if title_s else []
+        title_task_candidates = _detect_surface_candidates(title_s, task_patterns) if title_s else []
         task_candidates = title_task_candidates
     preferred_task_surface = task_candidates[0] if task_candidates else ""
     preferred_object_surface = ""
@@ -343,7 +346,9 @@ def _context_match_count(text, aliases):
     return sum(1 for alias in aliases if _normalize_surface_hint_text(alias) in haystack)
 
 
-def _infer_bridged_object_surface(unit):
+def _infer_bridged_object_surface(unit, policy=None):
+    if policy is not None and not policy.is_legacy_humanoid:
+        return ""
     if str(unit.get("preferred_object_surface", "")).strip():
         return ""
     if _normalize_surface_candidates(unit.get("object_surface_candidates", [])):
@@ -406,8 +411,10 @@ def _infer_bridged_object_surface(unit):
     return ""
 
 
-def _bridge_reason(unit):
+def _bridge_reason(unit, policy=None):
     """返回桥接推断的原因，用于旁路诊断"""
+    if policy is not None and not policy.is_legacy_humanoid:
+        return ""
     context = _unit_context_text(unit)
     object_tokens = _normalized_token_set(unit.get("object_modifier_tokens", []))
     task_tokens = _normalized_token_set(unit.get("task_constraint_tokens", []))
@@ -465,8 +472,10 @@ def _bridge_reason(unit):
     return "no_matching_pattern"
 
 
-def _bridge_confidence(unit):
-    candidate = _infer_bridged_object_surface(unit)
+def _bridge_confidence(unit, policy=None):
+    if policy is not None and not policy.is_legacy_humanoid:
+        return 0.0
+    candidate = _infer_bridged_object_surface(unit, policy=policy)
     if not candidate:
         return 0.0
 
@@ -2717,7 +2726,26 @@ STRONG_TITLE_TOPIC_ANCHORS = (
 )
 
 
-def _title_topic_discriminator(unit):
+def _candidate_policy(domain_lexicon):
+    return build_domain_candidate_policy(
+        domain_lexicon,
+        legacy_scope_labels=SCOPE_LABELS,
+        legacy_generic_method_display_names=GENERIC_METHOD_ONLY_DISPLAY_NAMES,
+        legacy_generic_object_labels=TECH_OBJECT_GENERIC_LABELS,
+        legacy_generic_tech_object_slots=GENERIC_TECH_OBJECT_SLOTS,
+        legacy_surface_object_patterns=DISPLAY_OBJECT_SURFACE_PATTERNS,
+        legacy_surface_task_patterns=DISPLAY_TASK_SURFACE_PATTERNS,
+        legacy_title_topic_anchors=STRONG_TITLE_TOPIC_ANCHORS,
+    )
+
+
+def _scope_label(scope, policy=None):
+    if policy is not None:
+        return policy.scope_label(scope)
+    return SCOPE_LABELS.get(scope, scope)
+
+
+def _title_topic_discriminator(unit, policy=None):
     """从 source_title / raw_phrase 里找一个强区分锚点。
 
     - 只取 STRONG_TITLE_TOPIC_ANCHORS 里的词
@@ -2733,11 +2761,12 @@ def _title_topic_discriminator(unit):
     # STRONG_TITLE_TOPIC_ANCHORS 在默认 flag=0 下 = _BASE_TITLE_TOPIC_ANCHORS，
     # 所以行为与 M0 一致。若实验需要 humanoid 英文 anchor，
     # 设 WS_TITLE_ANCHOR_EXT=1 启用（会改变 cluster 结构，需验收）。
+    anchors = policy.title_topic_anchors() if policy is not None else STRONG_TITLE_TOPIC_ANCHORS
     hits = []
     for source_text_value in (title, raw_phrase, text):
         if not source_text_value:
             continue
-        for anchor in STRONG_TITLE_TOPIC_ANCHORS:
+        for anchor in anchors:
             if anchor in source_text_value:
                 hits.append(anchor)
         if hits:
@@ -2750,7 +2779,7 @@ def _title_topic_discriminator(unit):
     return indexed[0][1]
 
 
-def _theme_group_signature(unit):
+def _theme_group_signature(unit, policy=None):
     """对象层聚合签名的小修版。
 
     目标不是重写聚合，而是在原有字符串签名框架上，把主导因子从
@@ -2810,7 +2839,7 @@ def _theme_group_signature(unit):
 
     # round1 patch: 追加 source_title 强区分锚点，减少异质事件碰撞。
     # 只在锚点未被任何现有 slot 覆盖时才追加，避免与 object/capability/process 重复。
-    title_discriminator = _title_topic_discriminator(unit)
+    title_discriminator = _title_topic_discriminator(unit, policy=policy)
     if title_discriminator:
         existing_slot_values = " ".join(
             str(slots.get(key, "") or "")
@@ -3429,7 +3458,7 @@ def _domain_pack_candidate_trace(unit, domain_lexicon=None):
     }
 
 
-def _unit_row(event_id, scope_names, unit, source_type="", domain_lexicon=None):
+def _unit_row(event_id, scope_names, unit, source_type="", domain_lexicon=None, policy=None):
     mechanism_core_tokens = _dedupe_preserve_order(unit.get("mechanism_core_tokens", []))
     task_constraint_tokens = _dedupe_preserve_order(unit.get("task_constraint_tokens", []))
     object_modifier_tokens = _dedupe_preserve_order(unit.get("object_modifier_tokens", []))
@@ -3511,6 +3540,7 @@ def _unit_row(event_id, scope_names, unit, source_type="", domain_lexicon=None):
             extra_text=raw_phrase,
         ),
         source_type=source_type,
+        policy=policy,
     )
     evidence_present = bool(
         str(unit.get("evidence_span", "")).strip()
@@ -3635,6 +3665,8 @@ def _unit_row(event_id, scope_names, unit, source_type="", domain_lexicon=None):
             stage = "filtered_scope_echo"
             granularity_input["candidate_stage"] = stage
 
+    bridged_object_surface = _infer_bridged_object_surface(granularity_input, policy=policy)
+
     return {
         "id": event_id,
         "raw_phrase": raw_phrase,
@@ -3743,9 +3775,9 @@ def _unit_row(event_id, scope_names, unit, source_type="", domain_lexicon=None):
         "scope_match_mode": scope_match_mode,
         "source_type": source_type,
         # 旁路 bridge 字段：记录桥接推断结果，但不影响主链
-        "bridged_object_subtype_candidate": _infer_bridged_object_surface(granularity_input),
-        "bridged_object_bridge_reason": _bridge_reason(granularity_input) if _infer_bridged_object_surface(granularity_input) else "",
-        "bridged_object_bridge_confidence": _bridge_confidence(granularity_input),
+        "bridged_object_subtype_candidate": bridged_object_surface,
+        "bridged_object_bridge_reason": _bridge_reason(granularity_input, policy=policy) if bridged_object_surface else "",
+        "bridged_object_bridge_confidence": _bridge_confidence(granularity_input, policy=policy),
         **domain_pack_trace,
     }
 
@@ -3818,6 +3850,7 @@ def _event_passes_domain_relevance_gate(event_record, context, domain_lexicon=No
 
 def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain_context=None, domain_pack=None) -> pd.DataFrame:
     domain_lexicon = build_domain_lexicon(domain_context or domain_pack)
+    policy = _candidate_policy(domain_lexicon)
     columns = [
         "id", "raw_phrase", "raw_candidate_text", "raw_phrase_type", "source_extraction_mode",
         "mechanism_core", "secondary_mechanism_cores", "mechanism_core_tokens",
@@ -4038,7 +4071,8 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
         candidate_units = _candidate_units_for_event(event_record, observation_scopes, domain_lexicon=domain_lexicon)
 
         for scope in observation_scopes:
-            scope_metric_payload = _build_metric_payload(scope_items_map.get(scope, []), display_name=SCOPE_LABELS.get(scope, scope), raw_candidate_text=scope)
+            scope_display_label = _scope_label(scope, policy=policy)
+            scope_metric_payload = _build_metric_payload(scope_items_map.get(scope, []), display_name=scope_display_label, raw_candidate_text=scope)
             rows.append(
                 {
                     "id": event_id,
@@ -4071,13 +4105,13 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
                     "cluster_signature_mode": "scope_overview",
                     "stable_object_key_basis": f"signature::scope::{scope}",
                     "stable_object_id": _stable_object_id_from_basis(f"signature::scope::{scope}"),
-                    "stable_object_label": SCOPE_LABELS.get(scope, scope),
-                    "legacy_representative_name": SCOPE_LABELS.get(scope, scope),
-                    "representative_candidate_name": SCOPE_LABELS.get(scope, scope),
+                    "stable_object_label": scope_display_label,
+                    "legacy_representative_name": scope_display_label,
+                    "representative_candidate_name": scope_display_label,
                     "representative_candidate_score": 0,
                     "representative_selection_reason": "scope_overview",
                     "representative_name_source": "scope_overview",
-                    "current_representative_name": SCOPE_LABELS.get(scope, scope),
+                    "current_representative_name": scope_display_label,
                     "selection_competitors_summary": "",
                     "representative_selected_index": 0,
                     "representative_switched_from_legacy": False,
@@ -4108,11 +4142,11 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
                     "relation_method": "",
                     "relation_summary": "",
                     "relation_signature": "",
-                    "topic_summary_name": SCOPE_LABELS.get(scope, scope),
+                    "topic_summary_name": scope_display_label,
                     "topic_naturalness_reason": "观察范围概览项",
                     "compression_mode": "scope_overview",
                     "candidate_cluster_id": f"scope::{scope}",
-                    "display_candidate_name": SCOPE_LABELS.get(scope, scope),
+                    "display_candidate_name": scope_display_label,
                     "display_candidate_aliases": [scope],
                     "object_surface_candidates": [],
                     "preferred_object_surface": "",
@@ -4164,6 +4198,7 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
                 },
                 source_type=source_type,
                 domain_lexicon=domain_lexicon,
+                policy=policy,
             )
             if row["candidate_stage"] == "formed_candidate":
                 formed_rows.append(row)
@@ -4187,7 +4222,7 @@ def build_candidate_forms(events_df: pd.DataFrame, data_df: pd.DataFrame, domain
     cluster_groups = {}
     premerged_formed_rows = _premerge_source_units(formed_rows)
     for row in premerged_formed_rows:
-        signature = _theme_group_signature(row)
+        signature = _theme_group_signature(row, policy=policy)
         cluster_groups.setdefault(signature, []).append(row)
     cluster_groups = _split_generic_cluster_groups(cluster_groups)
     # M2/A4: post-hoc TF-IDF-based heterogeneity split (only-split, never-merge)
