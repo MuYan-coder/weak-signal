@@ -6,7 +6,7 @@
 
 ## 当前阶段
 
-阶段 6：将 `scorer.py` 的 scope-shell 复判改为领域感知。
+阶段 7：补充太空制造 Domain Pack 质量契约。
 
 ## 阶段清单
 
@@ -15,7 +15,7 @@
 - [x] 阶段 3：在 `candidate_former.py` 中按策略门控人形机器人展示词、标题锚点和桥接逻辑
 - [x] 阶段 4：将候选具体性、泛词/壳词和聚类风险判断改为 Domain Pack 驱动
 - [x] 阶段 5：将 `candidate_eligibility.py` 改为 Domain Pack 技术锚点驱动
-- [ ] 阶段 6：将 `scorer.py` 的 scope-shell 复判改为领域感知
+- [x] 阶段 6：将 `scorer.py` 的 scope-shell 复判改为领域感知
 - [ ] 阶段 7：补充太空制造 Domain Pack 质量契约
 - [ ] 阶段 8：运行聚焦测试、Domain Pack 回归和 diff 检查
 
