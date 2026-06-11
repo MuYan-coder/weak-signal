@@ -7,6 +7,7 @@ import re
 import pandas as pd
 
 from ..extraction.tech_lexicon import BARE_MECHANISM_CORES, DOMINANT_TECH_TERMS, OBSERVATION_SCOPE_SET
+from .candidate_eligibility import apply_candidate_eligibility
 
 
 def _safe_list(value):
@@ -1293,6 +1294,16 @@ def _prepare_scored_candidates(candidates_df, domain_context=None):
         "weak_signal_readiness": "",
         "weak_signal_readiness_reason": "",
         "foresight_significance": "",
+        "candidate_eligibility": "",
+        "score_applicability": "applicable",
+        "eligibility_reason_codes": [],
+        "eligibility_reason": "",
+        "candidate_eligibility_phase": "",
+        "candidate_has_technical_anchor": False,
+        "candidate_technical_envelope": False,
+        "domain_technical_anchor_count": 0,
+        "weak_signal_raw_score": 0.0,
+        "hotspot_raw_score": 0.0,
         "domain_pack_scoring_delta": 0.0,
         "domain_pack_scoring_rule_ids": "",
         "domain_pack_scoring_reason": "",
@@ -1438,6 +1449,17 @@ def _prepare_scored_candidates(candidates_df, domain_context=None):
     ]
     scored_df["weak_signal_score"] = scored_df.apply(_weak_signal_score, axis=1)
     scored_df["hotspot_score"] = scored_df.apply(_hotspot_score, axis=1)
+    scored_df["weak_signal_raw_score"] = scored_df["weak_signal_score"]
+    scored_df["hotspot_raw_score"] = scored_df["hotspot_score"]
+    scored_df = apply_candidate_eligibility(
+        scored_df,
+        phase="scoring_ready",
+        domain_context=domain_context,
+    )
+    not_applicable = scored_df["score_applicability"].astype(str) == "not_applicable"
+    if not_applicable.any():
+        scored_df.loc[not_applicable, "weak_signal_score"] = 0.0
+        scored_df.loc[not_applicable, "hotspot_score"] = 0.0
     scored_df["quality_adjusted_rank_score"] = scored_df.apply(_quality_adjusted_rank_score, axis=1)
     scored_df["source_spread"] = scored_df["source_types"].apply(lambda items: "/".join(items))
     scored_df["evidence_count"] = scored_df["evidence_items"].apply(len)
@@ -1489,6 +1511,8 @@ def _prepare_scored_candidates(candidates_df, domain_context=None):
 
 
 def _research_signal_type(row):
+    if str(row.get("score_applicability", "")).strip() == "not_applicable":
+        return "other"
     tech_name = str(row.get("display_candidate_name", row.get("tech_name", ""))).strip().lower()
     mechanism_core = str(row.get("mechanism_core", "")).strip()
     candidate_stage = str(row.get("candidate_stage", "")).strip()

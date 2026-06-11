@@ -20,6 +20,7 @@ from ..extraction.event_extractor import (
 from ..extraction.candidate_former import build_candidate_forms
 
 from ..scoring.scorer import score_all_candidates, refresh_research_layers
+from ..scoring.candidate_eligibility import apply_candidate_eligibility
 from ..scoring.signal_generator import generate_candidate_outputs
 from ..scoring.topic_refiner import refine_research_scored_candidates
 
@@ -172,6 +173,7 @@ class AnalysisPipeline:
         candidate_forms_df = self._apply_candidate_event_quality(candidate_forms_df, event_quality_df)
         candidate_count_before_dedupe = len(candidate_forms_df)
         candidate_forms_df = self._dedupe_candidate_flow(candidate_forms_df)
+        candidate_forms_df = self._apply_candidate_eligibility_contract(candidate_forms_df)
         print(f"  生成了 {candidate_count_before_dedupe} 个候选对象，流转去重后 {len(candidate_forms_df)} 个")
 
         # 阶段4: 评分
@@ -1275,6 +1277,7 @@ class AnalysisPipeline:
         candidate_forms_df = self._apply_candidate_event_quality(candidate_forms_df, event_quality_df)
         candidate_count_before_dedupe = len(candidate_forms_df)
         candidate_forms_df = self._dedupe_candidate_flow(candidate_forms_df)
+        candidate_forms_df = self._apply_candidate_eligibility_contract(candidate_forms_df)
         print(f"  生成了 {candidate_count_before_dedupe} 个候选对象，流转去重后 {len(candidate_forms_df)} 个")
 
         print("\n[阶段4] 弱信号评分...")
@@ -1922,6 +1925,18 @@ class AnalysisPipeline:
     ) -> pd.DataFrame:
         """将事件质量聚合到候选层和证据项。"""
         return merge_event_quality_into_candidates(candidate_df, event_quality_df)
+
+    def _apply_candidate_eligibility_contract(
+        self,
+        candidate_df: pd.DataFrame,
+        phase: str = "candidate_form_ready",
+    ) -> pd.DataFrame:
+        """Attach domain-aware eligibility metadata to candidate rows."""
+        return apply_candidate_eligibility(
+            candidate_df,
+            phase=phase,
+            domain_context=self.domain_context,
+        )
 
     def _candidate_flow_key(self, row: pd.Series, index: int) -> str:
         identity_parts = [
