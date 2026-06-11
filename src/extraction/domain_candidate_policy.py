@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any, Iterable, Sequence, Tuple
 
 from .tech_lexicon import normalize_signal_phrase
@@ -38,14 +39,57 @@ def _list_values(value: Any) -> list[Any]:
 def _value(source: Any, name: str, default: Any = None) -> Any:
     if source is None:
         return default
-    if isinstance(source, dict):
+    if isinstance(source, Mapping):
         return source.get(name, default)
+    get_value = getattr(source, "get", None)
+    if callable(get_value):
+        return get_value(name, default)
     return getattr(source, name, default)
 
 
+def _as_mapping(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return dict(value)
+    items = getattr(value, "items", None)
+    if callable(items):
+        try:
+            return dict(items())
+        except (TypeError, ValueError):
+            pass
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        mapped = to_dict()
+        if mapped is not value:
+            return _as_mapping(mapped)
+    if is_dataclass(value) and not isinstance(value, type):
+        return {item.name: getattr(value, item.name) for item in fields(value)}
+    try:
+        attrs = vars(value)
+    except TypeError:
+        return {}
+    return {
+        key: item
+        for key, item in attrs.items()
+        if isinstance(key, str) and not key.startswith("_") and not callable(item)
+    }
+
+
 def _mapping_value(source: Any, name: str) -> dict[str, Any]:
-    value = _value(source, name, {})
-    return value if isinstance(value, dict) else {}
+    return _as_mapping(_value(source, name, None))
+
+
+def _has_pack_sections(source: Any) -> bool:
+    return any(
+        _mapping_value(source, key)
+        for key in (
+            "domain_identity",
+            "observation_scopes",
+            "candidate_formation",
+            "reporting",
+        )
+    )
 
 
 def _attached_pack(domain_lexicon: Any) -> Any:
@@ -65,16 +109,10 @@ def _attached_pack(domain_lexicon: Any) -> Any:
             pack = source.get("domain_pack") or source.get("pack")
             if pack is not None:
                 return pack
-            if any(
-                key in source
-                for key in (
-                    "domain_identity",
-                    "observation_scopes",
-                    "candidate_formation",
-                    "reporting",
-                )
-            ):
+            if _has_pack_sections(source):
                 return source
+        elif _has_pack_sections(source):
+            return source
     return None
 
 
@@ -101,6 +139,39 @@ class DomainCandidatePolicy:
     legacy_surface_task_patterns: Sequence[SurfacePattern] = field(default_factory=tuple)
     legacy_title_topic_anchors: Sequence[str] = field(default_factory=tuple)
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "legacy_scope_labels", dict(self.legacy_scope_labels or {}))
+        object.__setattr__(
+            self,
+            "legacy_generic_method_display_names",
+            set(self.legacy_generic_method_display_names or set()),
+        )
+        object.__setattr__(
+            self,
+            "legacy_generic_object_labels",
+            set(self.legacy_generic_object_labels or set()),
+        )
+        object.__setattr__(
+            self,
+            "legacy_generic_tech_object_slots",
+            set(self.legacy_generic_tech_object_slots or set()),
+        )
+        object.__setattr__(
+            self,
+            "legacy_surface_object_patterns",
+            tuple(self.legacy_surface_object_patterns or ()),
+        )
+        object.__setattr__(
+            self,
+            "legacy_surface_task_patterns",
+            tuple(self.legacy_surface_task_patterns or ()),
+        )
+        object.__setattr__(
+            self,
+            "legacy_title_topic_anchors",
+            tuple(self.legacy_title_topic_anchors or ()),
+        )
+
     @property
     def pack_id(self) -> str:
         pack = _attached_pack(self.domain_lexicon)
@@ -125,7 +196,7 @@ class DomainCandidatePolicy:
             label = str(display_labels.get(raw_scope, "") or "").strip()
             if label:
                 return label
-        if self.is_legacy_humanoid:
+        if self.is_legacy_humanoid and self.legacy_scope_labels:
             return self.legacy_scope_labels.get(raw_scope, raw_scope)
 
         observation_scopes = _section(self.domain_lexicon, "observation_scopes")
@@ -152,7 +223,6 @@ class DomainCandidatePolicy:
         candidate_formation = _section(self.domain_lexicon, "candidate_formation")
         observation_scopes = _section(self.domain_lexicon, "observation_scopes")
         domain_identity = _section(self.domain_lexicon, "domain_identity")
-        search_strategy = _section(self.domain_lexicon, "search_strategy")
         values: list[Any] = []
         for key in (
             "technical_object_types",
@@ -163,15 +233,14 @@ class DomainCandidatePolicy:
         ):
             values.extend(_list_values(candidate_formation.get(key)))
         values.extend(_list_values(observation_scopes.get("technical_object")))
-        for source in (domain_identity, search_strategy):
-            values.extend(_list_values(source.get("core_keywords")))
-            values.extend(_list_values(source.get("english_terms")))
+        values.extend(_list_values(domain_identity.get("core_keywords")))
+        values.extend(_list_values(domain_identity.get("english_terms")))
         if not values:
             values.extend(_list_values(_value(self.domain_lexicon, "domain_anchor_terms", [])))
         return tuple(_dedupe(values))
 
     def generic_method_display_names(self) -> set[str]:
-        if self.is_legacy_humanoid:
+        if self.is_legacy_humanoid and self.legacy_generic_method_display_names:
             return set(self.legacy_generic_method_display_names)
         return {
             normalized
@@ -183,12 +252,12 @@ class DomainCandidatePolicy:
         }
 
     def generic_object_labels(self) -> set[str]:
-        if self.is_legacy_humanoid:
+        if self.is_legacy_humanoid and self.legacy_generic_object_labels:
             return set(self.legacy_generic_object_labels)
         return set(_dedupe([*self.generic_terms(), *self.shell_terms()]))
 
     def generic_tech_object_slots(self) -> set[str]:
-        if self.is_legacy_humanoid:
+        if self.is_legacy_humanoid and self.legacy_generic_tech_object_slots:
             return set(self.legacy_generic_tech_object_slots)
         return set(_dedupe([*self.generic_terms(), *self.shell_terms()]))
 
@@ -203,7 +272,7 @@ class DomainCandidatePolicy:
         return ()
 
     def title_topic_anchors(self) -> tuple[str, ...]:
-        if self.is_legacy_humanoid:
+        if self.is_legacy_humanoid and self.legacy_title_topic_anchors:
             return tuple(_dedupe(self.legacy_title_topic_anchors))
         candidate_formation = _section(self.domain_lexicon, "candidate_formation")
         values: list[Any] = []
@@ -214,6 +283,17 @@ class DomainCandidatePolicy:
             "scene_or_application_types",
         ):
             values.extend(_list_values(candidate_formation.get(key)))
+        if not values:
+            values.extend(_list_values(_value(self.domain_lexicon, "domain_anchor_terms", [])))
+            for alias_map_name in (
+                "object_aliases",
+                "mechanism_aliases",
+                "task_aliases",
+                "scene_aliases",
+            ):
+                alias_map = _value(self.domain_lexicon, alias_map_name, {})
+                if isinstance(alias_map, Mapping):
+                    values.extend(alias_map.keys())
         return tuple(_dedupe(values))
 
     def is_generic_or_shell(self, value: str) -> bool:
