@@ -970,6 +970,10 @@ def run_analysis(
             candidate_forms_df = pipeline._apply_candidate_event_quality(candidate_forms_df, event_quality_df)
             candidate_count_before_dedupe = len(candidate_forms_df)
             candidate_forms_df = pipeline._dedupe_candidate_flow(candidate_forms_df)
+            candidate_forms_df = pipeline._apply_candidate_eligibility_contract(
+                candidate_forms_df,
+                phase="candidate_form_ready",
+            )
             check_cancel()
             add_log(f"生成了 {candidate_count_before_dedupe} 个候选对象，流转去重后 {len(candidate_forms_df)} 个", "success")
 
@@ -1011,9 +1015,11 @@ def run_analysis(
             if isinstance(signals_output, dict):
                 signals_df = signals_output.get("candidates_df", pd.DataFrame())
                 near_strong_df = signals_output.get("near_strong_candidates_df", pd.DataFrame())
+                trends_df = signals_output.get("trends_df", pd.DataFrame())
             else:
                 signals_df = signals_output
                 near_strong_df = pd.DataFrame()
+                trends_df = pd.DataFrame()
             add_log(f"生成了 {len(signals_df)} 个信号", "success")
 
             update_stage("报告生成", "active", 8)
@@ -1044,6 +1050,7 @@ def run_analysis(
                 "signals_df": signals_df,
                 "signals_output": signals_output,
                 "near_strong_df": near_strong_df,
+                "trends_df": trends_df,
                 "family_metrics_df": pipeline.latest_family_metrics_df,
                 "source_documents_df": pipeline.latest_source_documents_df,
                 "signal_evidence_links_df": pipeline.latest_signal_evidence_links_df,
@@ -1120,6 +1127,10 @@ def run_analysis(
         candidate_forms_df = pipeline._apply_candidate_event_quality(candidate_forms_df, event_quality_df)
         candidate_count_before_dedupe = len(candidate_forms_df)
         candidate_forms_df = pipeline._dedupe_candidate_flow(candidate_forms_df)
+        candidate_forms_df = pipeline._apply_candidate_eligibility_contract(
+            candidate_forms_df,
+            phase="candidate_form_ready",
+        )
         check_cancel()
         add_log(f"生成了 {candidate_count_before_dedupe} 个候选对象，流转去重后 {len(candidate_forms_df)} 个", "success")
 
@@ -1165,9 +1176,11 @@ def run_analysis(
         if isinstance(signals_output, dict):
             signals_df = signals_output.get('candidates_df', pd.DataFrame())
             near_strong_df = signals_output.get('near_strong_candidates_df', pd.DataFrame())
+            trends_df = signals_output.get('trends_df', pd.DataFrame())
         else:
             signals_df = signals_output
             near_strong_df = pd.DataFrame()
+            trends_df = pd.DataFrame()
 
         add_log(f"生成了 {len(signals_df)} 个信号", "success")
 
@@ -1203,6 +1216,7 @@ def run_analysis(
             'signals_df': signals_df,
             'signals_output': signals_output,
             'near_strong_df': near_strong_df,
+            'trends_df': trends_df,
             'family_metrics_df': pipeline.latest_family_metrics_df,
             'source_documents_df': pipeline.latest_source_documents_df,
             'signal_evidence_links_df': pipeline.latest_signal_evidence_links_df,
@@ -1448,13 +1462,20 @@ def render_results(results):
     with col2:
         st.metric("🔧 候选对象", len(build_unique_candidate_view(results['candidate_forms_df'])))
     with col3:
-        st.metric("📊 评分候选", len(build_unique_candidate_view(results['scored_df'])))
+        metric_scored_df = results['scored_df']
+        if isinstance(metric_scored_df, pd.DataFrame) and "score_applicability" in metric_scored_df.columns:
+            metric_scored_df = metric_scored_df[metric_scored_df["score_applicability"] == "applicable"]
+        st.metric("📊 评分候选", len(build_unique_candidate_view(metric_scored_df)))
     with col4:
         signals_df = results['signals_df']
+        if 'candidate_eligibility' in signals_df.columns:
+            signals_df = signals_df[signals_df['candidate_eligibility'] != 'candidate_monitoring']
+        weak_mask = pd.Series([True] * len(signals_df), index=signals_df.index)
         if 'signal_type' in signals_df.columns:
-            weak_count = len(signals_df[signals_df['signal_type'] == 'weak_signal'])
-        else:
-            weak_count = len(signals_df)
+            weak_mask = signals_df['signal_type'].astype(str) == 'weak_signal'
+        if 'confirmed_signal_type' in signals_df.columns:
+            weak_mask = weak_mask | (signals_df['confirmed_signal_type'].astype(str) == 'confirmed_weak_signal')
+        weak_count = len(signals_df[weak_mask])
         st.metric("🎯 弱信号", weak_count)
     with col5:
         temporal_validation_df = results.get('temporal_validation_df', pd.DataFrame())
@@ -1473,6 +1494,7 @@ def render_results(results):
         "🔧 候选成形",
         "📊 弱信号评分",
         "🎯 弱信号生成",
+        "📈 趋势分流",
         "⏱ 持续观测",
         "📝 分析报告",
     ])
@@ -1683,6 +1705,10 @@ def render_results(results):
                 'candidate_stage',
                 'topic_granularity',
                 'display_tier',
+                'candidate_eligibility',
+                'eligibility_reason_codes',
+                'score_applicability',
+                'display_candidate_name_issue',
                 'family_priority',
                 'cluster_evidence_count',
                 'source_count',
@@ -1708,8 +1734,21 @@ def render_results(results):
         st.markdown("### 📊 弱信号评分")
         scored_df = results['scored_df']
         if not scored_df.empty:
-            unique_scored_df = build_unique_candidate_view(scored_df)
-            score_cols = ['display_candidate_name', 'weak_signal_score', 'hotspot_score', 'source_count', 'total_mentions']
+            if "score_applicability" in scored_df.columns:
+                applicable_df = scored_df[scored_df["score_applicability"] == "applicable"]
+            else:
+                applicable_df = scored_df
+            unique_scored_df = build_unique_candidate_view(applicable_df)
+            score_cols = [
+                'display_candidate_name',
+                'candidate_eligibility',
+                'weak_signal_score',
+                'weak_signal_raw_score',
+                'score_applicability',
+                'hotspot_score',
+                'source_count',
+                'total_mentions',
+            ]
             score_cols = [c for c in score_cols if c in unique_scored_df.columns]
 
             sorted_df = sort_by_available_scores(
@@ -1766,10 +1805,12 @@ def render_results(results):
         st.markdown("### 🎯 弱信号生成")
         signals_df = results['signals_df']
 
+        weak_mask = pd.Series([True] * len(signals_df), index=signals_df.index)
         if 'signal_type' in signals_df.columns:
-            weak_signals = signals_df[signals_df['signal_type'] == 'weak_signal']
-        else:
-            weak_signals = signals_df
+            weak_mask = signals_df['signal_type'].astype(str) == 'weak_signal'
+        if 'confirmed_signal_type' in signals_df.columns:
+            weak_mask = weak_mask | (signals_df['confirmed_signal_type'].astype(str) == 'confirmed_weak_signal')
+        weak_signals = signals_df[weak_mask]
 
         if not weak_signals.empty:
             def dataframe_records(value):
@@ -3043,6 +3084,22 @@ def render_results(results):
             st.info("未识别到弱信号")
 
     with tabs[6]:
+        st.markdown("### 📈 趋势分流")
+        trends_df = results.get('trends_df', pd.DataFrame())
+        if isinstance(trends_df, pd.DataFrame) and not trends_df.empty:
+            trends_cols = ['display_candidate_name', 'candidate_eligibility', 'eligibility_reason_codes', 'candidate_stage', 'cluster_evidence_count', 'source_count']
+            trends_cols = [c for c in trends_cols if c in trends_df.columns]
+            render_paginated_dataframe(
+                trends_df,
+                trends_cols,
+                "trends_candidates_table",
+                page_size=20,
+                empty_message="暂无趋势分流候选。",
+            )
+        else:
+            st.info("当前结果未包含趋势分流候选（或所有候选均已被过滤）。")
+
+    with tabs[7]:
         st.markdown("### ⏱ 弱信号持续跟踪与趋势观测")
 
         # 1. 弱信号趋势比对
@@ -3155,8 +3212,6 @@ def render_results(results):
             is_weak = pd.Series(False, index=validated_df.index)
             if "signal_type" in validated_df.columns:
                 is_weak = is_weak | (validated_df["signal_type"] == "weak_signal")
-            if "candidate_stage" in validated_df.columns:
-                is_weak = is_weak | (validated_df["candidate_stage"] == "formed_candidate_strong")
             validated_df_weak = validated_df[is_weak].copy()
 
             if temporal_enriched_cols and not validated_df_weak.empty:
@@ -3173,7 +3228,7 @@ def render_results(results):
                     empty_message="当前结果未包含候选时间验证字段。",
                 )
 
-    with tabs[7]:
+    with tabs[8]:
         st.markdown("### 📝 分析报告")
         report = results['report']
         if report:
@@ -3246,6 +3301,7 @@ def _build_history_results(folder_path: Path) -> Dict[str, Any]:
     refined_df = _load_history_dataframe(folder_path, "refined")
     validated_df = _load_history_dataframe(folder_path, "validated")
     signals_df = _load_history_dataframe(folder_path, "signals")
+    trends_df = _load_history_dataframe(folder_path, "trends")
     reverse_validation_df = _load_history_dataframe(folder_path, "reverse_validation")
     family_metrics_df = _load_history_dataframe(folder_path, "family_evaluation")
     source_documents_df = _load_history_dataframe(folder_path, "source_documents")
@@ -3286,6 +3342,7 @@ def _build_history_results(folder_path: Path) -> Dict[str, Any]:
         'validated_df': validated_df,
         'signals_df': signals_df,
         'near_strong_df': near_strong_df,
+        'trends_df': trends_df,
         'family_metrics_df': family_metrics_df,
         'source_documents_df': source_documents_df,
         'signal_evidence_links_df': signal_evidence_links_df,

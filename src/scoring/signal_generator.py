@@ -9,6 +9,7 @@ from ..validation.object_family_canonicalizer import (
     CanonicalizationResult,
     get_canonicalizer,
 )
+from .candidate_eligibility import apply_candidate_eligibility
 
 
 _ANALYSIS_SCOPE_FIELDS = [
@@ -757,6 +758,26 @@ def _first_nonempty_token(values):
     return ""
 
 
+def _can_add_technical_suffix(row):
+    row = row or {}
+    status = _safe_text(row.get("candidate_eligibility", ""))
+    technical_item_stage = _safe_text(row.get("technical_item_stage", ""))
+    source_type_values = [row.get("source_type", "")]
+    source_types = row.get("source_types", [])
+    if isinstance(source_types, (list, tuple, set)):
+        source_type_values.extend(source_types)
+    else:
+        source_type_values.append(source_types)
+    source_type_set = {_safe_text(item).lower() for item in source_type_values if _safe_text(item)}
+    return (
+        status == "eligible"
+        and technical_item_stage in {"technical_item", "technical_item_draft"}
+        and not _safe_bool(row.get("scope_shell_heavy", False))
+        and _safe_bool(row.get("survives_without_scope", False))
+        and not (source_type_set & {"policy", "market", "finance"})
+    )
+
+
 def _compose_slot_technical_name(row):
     mechanism = _safe_text((row or {}).get("mechanism_core", ""))
     if not mechanism:
@@ -774,10 +795,14 @@ def _compose_slot_technical_name(row):
         parts = [subject, mechanism]
         name = " ".join(part for part in parts if part).strip()
         if name and "technology" not in name.lower() and not _contains_technical_anchor(name):
+            if not _can_add_technical_suffix(row):
+                return ""
             name = f"{name} technology"
         return name
     name = f"{subject}{mechanism}".strip()
     if name and not _contains_technical_anchor(name):
+        if not _can_add_technical_suffix(row):
+            return ""
         name = f"{name}技术"
     return name
 
@@ -1167,9 +1192,10 @@ def _empty_candidate_columns():
         "cross_source_pattern_strength", "cross_source_pattern_reason",
         # 新增：专利侧角色解释
         "patent_role_reason", "patent_support_mode",
-        # 新增：对象族范围语义验证
         "family_semantic_consistency", "family_semantic_validation_score",
         "family_semantic_validation_method", "family_semantic_validation_note",
+        "candidate_eligibility", "eligibility_reason_codes", "eligible_for_scoring",
+        "eligible_for_signal_generation", "eligible_for_weak_signal",
     ]
 
 
@@ -1203,6 +1229,20 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
     active_forms = candidate_forms_df[
         candidate_forms_df["candidate_stage"].isin(["scope_overview", "formed_candidate", "formed_candidate_strong"])
     ].copy()
+
+    if (
+        "eligible_for_signal_generation" not in active_forms.columns
+        or "candidate_eligibility" not in active_forms.columns
+    ):
+        active_forms = apply_candidate_eligibility(
+            active_forms,
+            phase="signal_generation_ready",
+            domain_context=domain_context,
+        )
+    scope_overview_mask = active_forms["candidate_stage"] == "scope_overview"
+    signal_eligible_mask = active_forms["eligible_for_signal_generation"].apply(_safe_bool)
+    active_forms = active_forms[scope_overview_mask | signal_eligible_mask].copy()
+
     diagnostics["active_candidate_count"] = int(len(active_forms))
     if "signal_type" in active_forms.columns:
         diagnostics["upstream_weak_signal_count"] = int((active_forms["signal_type"].astype(str) == "weak_signal").sum())
@@ -1672,6 +1712,11 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
                 "score": float(first.get("score", first.get("weak_signal_score", first.get("hotspot_score", 0.0))) or 0.0),
                 "explanation": str(first.get("explanation", "")).strip(),
                 "upstream_signal_type": str(first.get("signal_type", "")).strip(),
+                "candidate_eligibility": str(first.get("candidate_eligibility", "")).strip(),
+                "eligibility_reason_codes": first.get("eligibility_reason_codes", []),
+                "eligible_for_scoring": _safe_bool(first.get("eligible_for_scoring", False)),
+                "eligible_for_signal_generation": _safe_bool(first.get("eligible_for_signal_generation", False)),
+                "eligible_for_weak_signal": _safe_bool(first.get("eligible_for_weak_signal", False)),
                 # 新增：内部标签与最终表述分离
                 "raw_phrase_cluster": "；".join(raw_variant_aliases[:5]) if raw_variant_aliases else "",
                 "final_research_object_name": final_technical_name or str(first.get("topic_summary_name", "")).strip() or str(first.get("display_candidate_name", "")).strip(),
@@ -1711,14 +1756,14 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
     def _set_signal_type(row):
         if str(row.get("technical_name_issue", "")).strip() == "application_only_surface":
             return "other"
+        if row.get("candidate_stage") != "scope_overview" and not _safe_bool(row.get("eligible_for_weak_signal", False)):
+            return "other"
         upstream_signal_type = str(row.get("upstream_signal_type", "")).strip()
         if upstream_signal_type in {"weak_signal", "hotspot", "near_strong", "scope_overview", "other"}:
             return upstream_signal_type
         if row.get("candidate_stage") == "scope_overview":
             return "scope_overview"
-        elif row.get("candidate_stage") == "formed_candidate_strong":
-            return "weak_signal"
-        elif row.get("candidate_stage") == "formed_candidate":
+        elif row.get("candidate_stage") in ["formed_candidate", "formed_candidate_strong"]:
             evidence_ready = bool(
                 _safe_int(row.get("cluster_evidence_count"), 0) >= 2
                 and _safe_int(row.get("source_count"), 0) >= 2
@@ -1742,20 +1787,30 @@ def generate_candidate_outputs(candidate_forms_df, data_df, domain_context=None)
     diagnostics["application_only_rejected_count"] = int(
         (candidates_df["technical_name_issue"].astype(str) == "application_only_surface").sum()
     )
-    
+
     candidates_df = candidates_df.sort_values(
         by=["total_mentions", "source_count", "org_count", "tech_name"],
         ascending=[False, False, False, True],
     ).reset_index(drop=True)
+
+    if "candidate_eligibility" in candidates_df.columns:
+        trends_mask = candidates_df["candidate_eligibility"] == "candidate_monitoring"
+        trends_df = candidates_df[trends_mask].copy().reset_index(drop=True)
+        candidates_df = candidates_df[~trends_mask].copy().reset_index(drop=True)
+    else:
+        trends_df = pd.DataFrame(columns=candidates_df.columns)
+
     near_strong_candidates_df = candidates_df[
         (candidates_df["signal_type"] == "near_strong")
     ].copy()
     diagnostics["output_candidate_count"] = int(len(candidates_df))
     diagnostics["final_weak_signal_count"] = int((candidates_df["signal_type"] == "weak_signal").sum())
     diagnostics["near_strong_count"] = int(len(near_strong_candidates_df))
+    diagnostics["trends_count"] = int(len(trends_df))
     return {
         "candidates_df": candidates_df,
         "near_strong_candidates_df": near_strong_candidates_df.reset_index(drop=True),
+        "trends_df": trends_df,
         "diagnostics": diagnostics,
     }
 

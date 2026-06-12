@@ -110,6 +110,67 @@ def _is_shell_like_term(value: Any) -> bool:
     return not text or text in {item.lower() for item in DEFAULT_SHELL_TERMS}
 
 
+def _scope_exact_key(value: Any) -> str:
+    return re.sub(r"\s+", "", _clean_text(value).lower())
+
+
+def _scope_echo_exact_terms(
+    request_payload: Dict[str, Any] | None,
+    domain_model: Dict[str, Any] | None,
+) -> set[str]:
+    request_payload = request_payload if isinstance(request_payload, dict) else {}
+    domain_model = domain_model if isinstance(domain_model, dict) else {}
+    scopes = domain_model.get("observation_scopes", {}) if isinstance(domain_model.get("observation_scopes"), dict) else {}
+    terms = (
+        [_clean_text(request_payload.get("field_name", ""))]
+        + _coerce_text_list(request_payload.get("synonyms"))
+        + [_clean_text(scopes.get("main_scope", ""))]
+    )
+    return {key for key in (_scope_exact_key(item) for item in terms) if key}
+
+
+def _remove_exact_scope_echo_terms(values: List[str], exact_scope_terms: set[str]) -> List[str]:
+    if not exact_scope_terms:
+        return values
+    return [item for item in values if _scope_exact_key(item) not in exact_scope_terms]
+
+
+def _remove_candidate_specific_terms_from_scope_echo_terms(
+    scopes: Dict[str, Any],
+    candidate_formation: Dict[str, Any],
+) -> None:
+    if not isinstance(scopes, dict) or not isinstance(candidate_formation, dict):
+        return
+    protected_scope_terms = {_scope_exact_key(scopes.get("main_scope"))}
+    protected_scope_terms.discard("")
+    candidate_specific_terms: set[str] = set()
+    for field_name in [
+        "technical_object_types",
+        "mechanism_types",
+        "task_or_performance_types",
+        "data_or_method_types",
+        "scene_or_application_types",
+    ]:
+        for term in _coerce_text_list(candidate_formation.get(field_name)):
+            if not _is_shell_like_term(term):
+                candidate_specific_terms.add(_scope_exact_key(term))
+    candidate_specific_terms.discard("")
+    if not candidate_specific_terms:
+        return
+    scopes["scope_aliases"] = [
+        term
+        for term in _coerce_text_list(scopes.get("scope_aliases"))
+        if _scope_exact_key(term) not in candidate_specific_terms
+        or _scope_exact_key(term) in protected_scope_terms
+    ]
+    scopes["scope_echo_terms"] = [
+        term
+        for term in _coerce_text_list(scopes.get("scope_echo_terms"))
+        if _scope_exact_key(term) not in candidate_specific_terms
+        or _scope_exact_key(term) in protected_scope_terms
+    ]
+
+
 def _flatten_text_values(value: Any) -> List[str]:
     if value is None:
         return []
@@ -309,6 +370,12 @@ def build_scoring_adjustments_prompt(
 请输出合法 JSON 对象，包含 `scoring_adjustments` 字段，该字段为一个规则数组。
 每条规则必须有 rule_id，score_delta 和 max_delta 必须是有界数值。绝对不要包含任何注释（如 //）。
 
+【严格质量约束】：
+1. 每条规则必须至少包含以下其一才能生效：非空的 `match_terms`、非空的 `required_evidence_fields`、或明确绑定某类 marker。绝不允许生成无条件加分规则。
+2. 每条规则的 `score_delta` 绝对值不应超过 1.0。
+3. 整个 pack 的所有规则中，正向 `score_delta` 的总和建议不超过 2.0。
+4. 绝对禁止生成类似 `rule_001` 这种无语义的规则 ID，`rule_id` 必须能直接体现领域和触发条件（如 `battery_early_validation`、`drone_policy_noise`）。
+
 必须输出字段：
 - scoring_adjustments
 
@@ -360,7 +427,8 @@ observation_scopes 不得为空：
 - main_scope 必须使用用户技术领域名称；
 - sub_scopes 必须包含阶段一 sub_directions 和用户核心关键词；
 - scope_aliases 必须包含用户 synonyms/english_terms；
-- scope_echo_terms 必须包含用户 field_name 和 keywords；
+- scope_echo_terms 只放 field_name、main_scope 等观察范围回声词，不放具体技术对象、机制、应用词；
+- 用户 keywords、sub_directions 等具体词应放入 sub_scopes 或 candidate_formation，不要放入 scope_echo_terms；
 - off_domain_anchor_terms 必须包含 exclude_terms、noise_terms、out_of_scope_domains。
 candidate_formation.technical_object_types 必须保留中文关键词和英文同义词，禁止只保留英文缩写。
 
@@ -548,8 +616,6 @@ def _ensure_observation_scopes_safety(
     scopes["scope_echo_terms"] = _dedupe_texts(
         _coerce_text_list(scopes.get("scope_echo_terms"))
         + _coerce_text_list([field_name, field_id])
-        + _coerce_text_list(request_payload.get("keywords"))
-        + _coerce_text_list(search_strategy.get("core_keywords"))
     )[:32]
     scopes["off_domain_anchor_terms"] = _dedupe_texts(
         _coerce_text_list(scopes.get("off_domain_anchor_terms"))
@@ -847,6 +913,10 @@ class DomainPackGenerator:
             request_payload=request_payload,
             domain_model=domain_model,
         )
+        _remove_candidate_specific_terms_from_scope_echo_terms(
+            final["observation_scopes"],
+            final["candidate_formation"],
+        )
         if isinstance(final.get("weak_signal_rules"), dict):
             final_scoring_adjustments = final["weak_signal_rules"].get(
                 "scoring_adjustments",
@@ -893,6 +963,7 @@ class DomainPackGenerator:
     ) -> None:
         if not isinstance(cf, dict):
             return
+        exact_scope_terms = _scope_echo_exact_terms(request_payload, domain_model)
         for field_name in [
             "technical_object_types",
             "mechanism_types",
@@ -903,15 +974,24 @@ class DomainPackGenerator:
             values = _coerce_text_list(cf.get(field_name))
             if field_name in {"technical_object_types", "mechanism_types"}:
                 values = [item for item in values if not _is_shell_like_term(item)]
+            if field_name == "technical_object_types":
+                values = _remove_exact_scope_echo_terms(values, exact_scope_terms)
             cf[field_name] = values
 
         if not cf["technical_object_types"] and not cf["mechanism_types"]:
-            cf["technical_object_types"] = _fallback_specific_candidate_terms(request_payload, domain_model)
+            cf["technical_object_types"] = _remove_exact_scope_echo_terms(
+                _fallback_specific_candidate_terms(request_payload, domain_model),
+                exact_scope_terms,
+            )
         else:
             cf["technical_object_types"] = _dedupe_texts(
                 cf["technical_object_types"]
                 + _fallback_specific_candidate_terms(request_payload, domain_model)
             )[:32]
+            cf["technical_object_types"] = _remove_exact_scope_echo_terms(
+                cf["technical_object_types"],
+                exact_scope_terms,
+            )
 
         for field_name in ["generic_terms", "shell_terms"]:
             cleaned_terms = _coerce_text_list(cf.get(field_name))

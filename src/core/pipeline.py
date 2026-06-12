@@ -173,7 +173,10 @@ class AnalysisPipeline:
         candidate_forms_df = self._apply_candidate_event_quality(candidate_forms_df, event_quality_df)
         candidate_count_before_dedupe = len(candidate_forms_df)
         candidate_forms_df = self._dedupe_candidate_flow(candidate_forms_df)
-        candidate_forms_df = self._apply_candidate_eligibility_contract(candidate_forms_df)
+        candidate_forms_df = self._apply_candidate_eligibility_contract(
+            candidate_forms_df,
+            phase="candidate_form_ready",
+        )
         print(f"  生成了 {candidate_count_before_dedupe} 个候选对象，流转去重后 {len(candidate_forms_df)} 个")
 
         # 阶段4: 评分
@@ -1277,8 +1280,12 @@ class AnalysisPipeline:
         candidate_forms_df = self._apply_candidate_event_quality(candidate_forms_df, event_quality_df)
         candidate_count_before_dedupe = len(candidate_forms_df)
         candidate_forms_df = self._dedupe_candidate_flow(candidate_forms_df)
-        candidate_forms_df = self._apply_candidate_eligibility_contract(candidate_forms_df)
+        candidate_forms_df = self._apply_candidate_eligibility_contract(
+            candidate_forms_df,
+            phase="candidate_form_ready",
+        )
         print(f"  生成了 {candidate_count_before_dedupe} 个候选对象，流转去重后 {len(candidate_forms_df)} 个")
+        print("  已补齐候选有效性评估")
 
         print("\n[阶段4] 弱信号评分...")
         scored_df = self._score_candidates(candidate_forms_df)
@@ -2217,8 +2224,6 @@ class AnalysisPipeline:
             is_weak = pd.Series(False, index=candidate_df.index)
             if "signal_type" in candidate_df.columns:
                 is_weak = is_weak | (candidate_df["signal_type"] == "weak_signal")
-            if "candidate_stage" in candidate_df.columns:
-                is_weak = is_weak | (candidate_df["candidate_stage"] == "formed_candidate_strong")
 
             has_stage_cols = ("signal_type" in candidate_df.columns) or ("candidate_stage" in candidate_df.columns)
             if has_stage_cols:
@@ -4376,6 +4381,10 @@ class AnalysisPipeline:
                 return pd.DataFrame(data if data else [])
             return data
 
+        trends_df = pd.DataFrame()
+        if isinstance(signals_df, dict) and "trends_df" in signals_df:
+            trends_df = signals_df["trends_df"] if isinstance(signals_df["trends_df"], pd.DataFrame) else pd.DataFrame(signals_df["trends_df"])
+
         events_df = ensure_df(events_df)
         event_quality_df = ensure_df(self.latest_event_quality_df)
         temporal_validation_df = ensure_df(self.latest_temporal_validation_df)
@@ -4384,6 +4393,7 @@ class AnalysisPipeline:
         refined_df = ensure_df(refined_df)
         validated_df = ensure_df(validated_df)
         signals_df = ensure_df(signals_df)
+        trends_df = ensure_df(trends_df)
         events_df = self._attach_domain_metadata(events_df)
         event_quality_df = self._attach_domain_metadata(event_quality_df)
         temporal_validation_df = self._attach_domain_metadata(temporal_validation_df)
@@ -4392,7 +4402,26 @@ class AnalysisPipeline:
         refined_df = self._attach_domain_metadata(refined_df)
         validated_df = self._attach_domain_metadata(validated_df)
         signals_df = self._attach_domain_metadata(signals_df)
+        trends_df = self._attach_domain_metadata(trends_df)
+        required_eligibility_columns = {
+            "candidate_eligibility",
+            "eligible_for_scoring",
+            "eligible_for_signal_generation",
+            "eligible_for_weak_signal",
+            "score_applicability",
+        }
+        if not required_eligibility_columns.issubset(candidate_forms_df.columns):
+            candidate_forms_df = self._apply_candidate_eligibility_contract(
+                candidate_forms_df,
+                phase="save_results_fallback",
+            )
+        if not scored_df.empty and not required_eligibility_columns.issubset(scored_df.columns):
+            scored_df = self._apply_candidate_eligibility_contract(
+                scored_df,
+                phase="save_results_fallback",
+            )
         signals_df = self._assign_signal_ids(signals_df)
+        trends_df = self._assign_signal_ids(trends_df)
         source_documents_df = self._build_source_documents(raw_data, events_df)
         signal_evidence_links_df = self._build_signal_evidence_links(signals_df, source_documents_df)
         signal_reliability_df = self._build_signal_reliability_table(signals_df, signal_evidence_links_df)
@@ -4429,6 +4458,9 @@ class AnalysisPipeline:
         refined_df.to_json(result_dir / "refined.json", orient='records', force_ascii=False, indent=2)
         validated_df.to_json(result_dir / "validated.json", orient='records', force_ascii=False, indent=2)
         signals_df.to_json(result_dir / "signals.json", orient='records', force_ascii=False, indent=2)
+        if not trends_df.empty:
+            trends_df.to_json(result_dir / "trends.json", orient='records', force_ascii=False, indent=2)
+            trends_df.to_csv(result_dir / "trends.csv", index=False, encoding='utf-8-sig')
         source_documents_df.to_json(result_dir / "source_documents.json", orient='records', force_ascii=False, indent=2)
         signal_evidence_links_df.to_json(result_dir / "signal_evidence_links.json", orient='records', force_ascii=False, indent=2)
         signal_evidence_links_df.to_csv(result_dir / "signal_evidence_links.csv", index=False, encoding='utf-8-sig')
@@ -4519,6 +4551,25 @@ class AnalysisPipeline:
                 )
 
         if signal_generation_diagnostics:
+            saved_weak_mask = pd.Series(False, index=signals_df.index)
+            if "signal_type" in signals_df.columns:
+                saved_weak_mask = saved_weak_mask | (signals_df["signal_type"].astype(str) == "weak_signal")
+            if "confirmed_signal_type" in signals_df.columns:
+                saved_weak_mask = saved_weak_mask | (
+                    signals_df["confirmed_signal_type"].astype(str) == "confirmed_weak_signal"
+                )
+            archived_weak_signal_count = int(saved_weak_mask.sum()) if not signals_df.empty else 0
+            expected_count_field = (
+                "confirmed_weak_signal_count"
+                if "confirmed_signal_type" in signals_df.columns
+                else "final_weak_signal_count"
+            )
+            signal_generation_diagnostics["archived_weak_signal_count"] = archived_weak_signal_count
+            signal_generation_diagnostics["weak_signals_count_diagnostic_field"] = expected_count_field
+            signal_generation_diagnostics["weak_signals_count_matches_diagnostics"] = (
+                archived_weak_signal_count
+                == int(signal_generation_diagnostics.get(expected_count_field, archived_weak_signal_count) or 0)
+            )
             (result_dir / "signal_generation_diagnostics.json").write_text(
                 json.dumps(signal_generation_diagnostics, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -4551,8 +4602,6 @@ class AnalysisPipeline:
             is_weak = is_weak | (signals_df["signal_type"] == "weak_signal")
         if "confirmed_signal_type" in signals_df.columns:
             is_weak = is_weak | (signals_df["confirmed_signal_type"] == "confirmed_weak_signal")
-        if "candidate_stage" in signals_df.columns:
-            is_weak = is_weak | (signals_df["candidate_stage"] == "formed_candidate_strong")
 
         weak_df = signals_df[is_weak].copy()
 

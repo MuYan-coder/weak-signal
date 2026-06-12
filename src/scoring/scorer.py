@@ -1052,17 +1052,36 @@ def _hotspot_score(row):
     return round((2.5 * row["source_count"]) + (1.2 * row["org_count"]) + row["total_mentions"] + row["growth_score"], 2)
 
 
-def _weak_signal_score(row):
-    return round(
-        (2 * row["source_count"])
-        + row["org_count"]
-        + row["growth_score"]
-        + row["novelty_score"]
-        + row["validation_bonus"]
+def _weak_signal_scoring_profile(row):
+    raw_score = round(
+        (2 * row.get("source_count", 0))
+        + row.get("org_count", 0)
+        + row.get("growth_score", 0.0)
+        + row.get("novelty_score", 0.0)
+        + row.get("validation_bonus", 0.0)
         + _safe_float(row.get("domain_pack_scoring_delta", 0.0), 0.0)
-        - row["mainstream_penalty"],
+        - row.get("mainstream_penalty", 0.0),
         2,
     )
+    status = _safe_text(row.get("candidate_eligibility", ""))
+    is_eligible = bool(row.get("eligible_for_scoring", False)) and status == "eligible"
+
+    # 获取 candidate_eligibility 设置的状态，如果被抑制则传递原因
+    status = status or "missing_eligibility"
+    reason_codes = row.get("eligibility_reason_codes", [])
+    reason = ", ".join(reason_codes) if isinstance(reason_codes, list) else str(reason_codes)
+
+    score_applicability = "applicable" if is_eligible else "not_applicable"
+    score_suppression_reason = f"状态={status}, 原因={reason}" if not is_eligible else ""
+
+    weak_signal_score = raw_score if is_eligible else 0.0
+
+    return {
+        "weak_signal_score": weak_signal_score,
+        "weak_signal_raw_score": raw_score,
+        "score_applicability": score_applicability,
+        "score_suppression_reason": score_suppression_reason,
+    }
 
 
 def _quality_adjusted_rank_score(row):
@@ -1239,6 +1258,17 @@ def _prepare_scored_candidates(candidates_df, domain_context=None):
     else:
         # 从 source_type 列创建 source_types
         if "source_type" in scored_df.columns:
+            def _assign_signal_type(row):
+                candidate_eligibility = _safe_text(row.get("candidate_eligibility", ""))
+                if candidate_eligibility != "eligible" or not _safe_bool(row.get("eligible_for_weak_signal", False)):
+                    return "other"
+                research_bucket = row.get("final_research_bucket", "")
+                if research_bucket == "hotspot":
+                    return "hotspot"
+                elif research_bucket in {"weak_signal", "near_strong"}:
+                    return "weak_signal"
+                return "other"
+            scored_df["signal_type"] = scored_df.apply(_assign_signal_type, axis=1)
             scored_df["source_types"] = scored_df["source_type"].apply(
                 lambda x: [_safe_text(x)] if _safe_text(x) else []
             )
@@ -1478,20 +1508,7 @@ def _prepare_scored_candidates(candidates_df, domain_context=None):
         item.get("marker_hits", {}) if isinstance(item.get("marker_hits", {}), dict) else {}
         for item in domain_scoring_profiles
     ]
-    scored_df["weak_signal_score"] = scored_df.apply(_weak_signal_score, axis=1)
     scored_df["hotspot_score"] = scored_df.apply(_hotspot_score, axis=1)
-    scored_df["weak_signal_raw_score"] = scored_df["weak_signal_score"]
-    scored_df["hotspot_raw_score"] = scored_df["hotspot_score"]
-    scored_df = apply_candidate_eligibility(
-        scored_df,
-        phase="scoring_ready",
-        domain_context=domain_context,
-    )
-    not_applicable = scored_df["score_applicability"].astype(str) == "not_applicable"
-    if not_applicable.any():
-        scored_df.loc[not_applicable, "weak_signal_score"] = 0.0
-        scored_df.loc[not_applicable, "hotspot_score"] = 0.0
-    scored_df["quality_adjusted_rank_score"] = scored_df.apply(_quality_adjusted_rank_score, axis=1)
     scored_df["source_spread"] = scored_df["source_types"].apply(lambda items: "/".join(items))
     scored_df["evidence_count"] = scored_df["evidence_items"].apply(len)
     scored_df["raw_phrase_example"] = scored_df["evidence_items"].apply(
@@ -1516,6 +1533,21 @@ def _prepare_scored_candidates(candidates_df, domain_context=None):
     scored_df["survives_without_scope"] = [bool(item["survives_without_scope"]) for item in profiles]
     scored_df["scope_shell_heavy"] = [bool(item["scope_shell_heavy"]) for item in profiles]
     scored_df["scope_shell_reason"] = [str(item["scope_shell_reason"]) for item in profiles]
+    scored_df = apply_candidate_eligibility(
+        scored_df,
+        phase="scoring_ready",
+        domain_context=domain_context,
+    )
+    weak_score_profiles = scored_df.apply(_weak_signal_scoring_profile, axis=1)
+    scored_df["weak_signal_score"] = [item["weak_signal_score"] for item in weak_score_profiles]
+    scored_df["weak_signal_raw_score"] = [item["weak_signal_raw_score"] for item in weak_score_profiles]
+    scored_df["score_applicability"] = [item["score_applicability"] for item in weak_score_profiles]
+    scored_df["score_suppression_reason"] = [item["score_suppression_reason"] for item in weak_score_profiles]
+    scored_df["hotspot_raw_score"] = scored_df["hotspot_score"]
+    not_applicable = scored_df["score_applicability"].astype(str) == "not_applicable"
+    if not_applicable.any():
+        scored_df.loc[not_applicable, "hotspot_score"] = 0.0
+    scored_df["quality_adjusted_rank_score"] = scored_df.apply(_quality_adjusted_rank_score, axis=1)
     # 新增：自然小主题与弱信号两层判断
     weak_signal_readiness_profiles = scored_df.apply(_infer_weak_signal_readiness, axis=1)
     scored_df["is_natural_small_topic"] = [item[0] for item in weak_signal_readiness_profiles]
@@ -1549,10 +1581,15 @@ def _prepare_scored_candidates(candidates_df, domain_context=None):
     # 将在 score_signals 和 score_all_candidates 中调用
     return scored_df
 
-
 def _research_signal_type(row, domain_context=None):
     if str(row.get("score_applicability", "")).strip() == "not_applicable":
         return "other"
+    candidate_eligibility = _safe_text(row.get("candidate_eligibility", ""))
+    if row.get("candidate_stage") != "scope_overview":
+        if candidate_eligibility and candidate_eligibility != "eligible":
+            return "other"
+        if candidate_eligibility == "eligible" and not _safe_bool(row.get("eligible_for_weak_signal", True)):
+            return "other"
     tech_name = str(row.get("display_candidate_name", row.get("tech_name", ""))).strip().lower()
     mechanism_core = str(row.get("mechanism_core", "")).strip()
     candidate_stage = str(row.get("candidate_stage", "")).strip()
@@ -1929,6 +1966,11 @@ def build_signal_explanation(row):
         f"文献验证={row.get('literature_validated', False)}，专利验证={row.get('patent_validated', False)}，"
         f"时间验证={row.get('time_validated', False)}"
     )
+    if not bool(row.get("eligible_for_scoring", False)):
+        candidate_eligibility = row.get('candidate_eligibility', '')
+        reason_codes = row.get('eligibility_reason_codes', [])
+        reason_str = ", ".join(reason_codes) if isinstance(reason_codes, list) else str(reason_codes)
+        base += f"，准入状态={candidate_eligibility}，抑制原因={reason_str}"
     raw_phrases = _safe_text(row.get("raw_phrases", ""))
     if raw_phrases:
         base += f"，原始短语簇={raw_phrases}"

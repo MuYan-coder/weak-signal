@@ -60,6 +60,8 @@ def validate_domain_pack(
     _check_candidate_formation(pack, errors, warnings, checks)
     _check_rule_conflicts(pack, errors, warnings, checks)
     _check_canonicalization(pack, warnings, checks)
+    _check_scoring_rules(pack, errors, warnings, checks)
+    _check_object_overlap(pack, errors, warnings, checks)
 
     report = _coerce_dry_run_report(dry_run_report)
     dry_run_metrics = _check_dry_run_gate(
@@ -244,6 +246,8 @@ def _check_canonicalization(
     checks: Dict[str, Any],
 ) -> None:
     object_families = _dict_items(pack.canonicalization.get("object_families"))
+    if not object_families:
+        warnings.append("generated domain pack has empty object_families; downstream will use neutral canonicalization")
     for family in object_families:
         confidence = _float_value(family.get("merge_confidence"), default=0.0)
         aliases = _list_values(family.get("aliases"))
@@ -253,6 +257,99 @@ def _check_canonicalization(
             warnings.append(f"object_family {family_id} needs aliases or evidence_required for high-confidence merge")
     checks["canonicalization"] = "passed"
 
+def _check_scoring_rules(
+    pack: DomainPack,
+    errors: List[str],
+    warnings: List[str],
+    checks: Dict[str, Any],
+) -> None:
+    weak_signal_rules = getattr(pack, "weak_signal_rules", {})
+    if not isinstance(weak_signal_rules, dict):
+        return
+    scoring_adjustments = _dict_items(weak_signal_rules.get("scoring_adjustments"))
+
+    total_positive_delta = 0.0
+    for idx, rule in enumerate(scoring_adjustments):
+        match_terms = _list_values(rule.get("match_terms"))
+        req_evidence = _list_values(rule.get("required_evidence_fields"))
+        rule_id = _clean_text(rule.get("rule_id", ""))
+        score_delta = _float_value(rule.get("score_delta"), default=0.0)
+
+        # 1. 拦截无条件加分规则
+        if not match_terms and not req_evidence and score_delta > 0:
+            errors.append(f"scoring rule '{rule_id}' is an unconditional positive rule (no match_terms or required_evidence_fields)")
+
+        # 2. 拦截不规范的 Rule ID
+        if rule_id.startswith("rule_00"):
+            if match_terms:
+                new_id = f"rule_{'_'.join(match_terms[:2])}"
+                rule["rule_id"] = new_id
+                warnings.append(f"auto-renamed meaningless rule_id '{rule_id}' to '{new_id}'")
+            else:
+                warnings.append(f"scoring rule has meaningless rule_id '{rule_id}'")
+
+        # 3. 统计总加分
+        if score_delta > 0:
+            total_positive_delta += score_delta
+
+    if total_positive_delta > 2.0:
+        warnings.append(f"total positive score_delta ({total_positive_delta}) exceeds recommended maximum of 2.0")
+
+    checks["scoring_rules"] = "passed" if not any("scoring rule" in item for item in errors) else "failed"
+
+def _check_object_overlap(
+    pack: DomainPack,
+    errors: List[str],
+    warnings: List[str],
+    checks: Dict[str, Any],
+) -> None:
+    candidate_formation = getattr(pack, "candidate_formation", {})
+    obs_scopes = getattr(pack, "observation_scopes", {})
+    if not isinstance(candidate_formation, dict) or not isinstance(obs_scopes, dict):
+        return
+
+    tech_objects = set(_list_values(candidate_formation.get("technical_object_types")))
+    scope_echo_terms = set(_list_values(obs_scopes.get("scope_echo_terms")))
+    main_scope = _clean_text(obs_scopes.get("main_scope"))
+
+    if main_scope:
+        scope_echo_terms.add(main_scope)
+
+    if not tech_objects:
+        return
+
+    overlap = tech_objects & scope_echo_terms
+    normalized_scope_terms = {term.lower() for term in scope_echo_terms if term}
+    normalized_main_scope = main_scope.lower() if main_scope else ""
+    exact_main_scope_hits = [obj for obj in tech_objects if normalized_main_scope and obj.lower() == normalized_main_scope]
+    exact_scope_echo_hits = [
+        obj for obj in tech_objects
+        if obj.lower() in normalized_scope_terms and obj not in exact_main_scope_hits
+    ]
+    if exact_main_scope_hits:
+        errors.append(
+            "technical_object_types contains exact main_scope term(s): "
+            + ", ".join(sorted(exact_main_scope_hits))
+        )
+    if exact_scope_echo_hits:
+        errors.append(
+            "technical_object_types contains exact scope_echo_terms: "
+            + ", ".join(sorted(exact_scope_echo_hits))
+        )
+    overlap_ratio = len(overlap) / len(tech_objects)
+
+    if overlap_ratio > 0.5:
+        errors.append(f"technical_object_types heavily overlaps ({overlap_ratio:.0%}) with scope_echo_terms/main_scope")
+    elif overlap_ratio > 0:
+        warnings.append(f"technical_object_types has significant overlap ({overlap_ratio:.0%}) with scope_echo_terms")
+
+    # Check if technical objects are only broad names
+    broad_objs = {"系统", "技术", "方法", "方案", "平台", "架构", "应用"}
+    pure_broad = all(obj.lower() in broad_objs or obj in scope_echo_terms for obj in tech_objects)
+    if pure_broad and tech_objects:
+        errors.append("technical_object_types contains only broad domain names or shell terms")
+
+    checks["object_overlap"] = "passed" if not any("overlap" in item for item in errors) else "failed"
 
 def _check_dry_run_gate(
     pack: DomainPack,
